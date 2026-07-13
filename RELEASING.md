@@ -139,12 +139,17 @@ too (`./dist/pinerun scan examples/rsi.pine --symbols BTCUSDT --tf 1h --limit 50
 CI does not gate on formatting, but keep the files you touched clean:
 `bunx prettier --check <files>`.
 
-### 5. Commit the release prep on `main`
+### 5. Commit the release prep and merge to `main`
+
+`main` is protected by a ruleset: changes land via **pull request with green CI**
+(no direct pushes, no force pushes).
 
 ```bash
+git checkout -b chore/release-X.Y.Z
 git add packages/pinerun/package.json packages/pinery/package.json CHANGELOG.md
 git commit -m "chore(release): X.Y.Z"
-git push origin main
+git push -u origin chore/release-X.Y.Z
+gh pr create --fill      # merge once CI is green
 ```
 
 ### 6. Tag on `main` and push
@@ -218,11 +223,16 @@ single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 ## Fixing a botched release
 
 - **Workflow failed before the release step** (typecheck/test/build red): no
-  release was created. Delete the tag, fix `main`, re-tag.
+  release was created. Delete the tag, fix `main`, re-tag. `v*` tags are
+  protected by the `protect-release-tags` ruleset (no delete/move), so disable
+  it for the moment of deletion and re-enable right after:
 
   ```bash
+  RS=$(gh api repos/heyphat/pinestack/rulesets --jq '.[] | select(.name=="protect-release-tags") | .id')
+  gh api -X PUT repos/heyphat/pinestack/rulesets/$RS -F enforcement=disabled >/dev/null
   git push --delete origin vX.Y.Z
   git tag -d vX.Y.Z
+  gh api -X PUT repos/heyphat/pinestack/rulesets/$RS -F enforcement=active >/dev/null
   # fix, land on main, then re-tag
   ```
 

@@ -19,7 +19,7 @@ trivial parallelism across worker threads.
   (screen many symbols), `backtest` (analyze one strategy deeply), `compare`
   (two strategies side by side), `portfolio` (one strategy, N symbols, one
   capital pot), `sweep` (optimize parameters), `walkforward` (validate the
-  optimum out of sample).
+  optimum out of sample) — plus `upgrade` (self-update the installed binary).
 
 `piner` (`@heyphat/piner`) is a **peer dependency**; `@heyphat/pinery` is a
 regular dependency (used by `scan` / `sweep` to fetch history).
@@ -40,7 +40,8 @@ This downloads the right binary for your platform from the
 `PINERUN_VERSION=v0.1.0`). Prebuilt targets: Linux and macOS on x64/arm64, plus a
 Windows x64 `.exe` from the [Releases](https://github.com/heyphat/pinestack/releases)
 page. macOS users may need `xattr -d com.apple.quarantine pinerun` on an unsigned
-download.
+download. Once installed, `pinerun upgrade` updates the binary in place from the
+latest release (checksum-verified, atomic swap).
 
 ### Build the binary from source
 
@@ -435,9 +436,11 @@ pinerun compare     <a.pine> <b.pine> [options]
 pinerun portfolio   <script.pine> [options]
 pinerun sweep       <script.pine> [options]
 pinerun walkforward <script.pine> [options]
+pinerun upgrade     [--check]
 ```
 
-Every command takes `--help` for its full flag list (e.g. `pinerun scan --help`).
+Every command takes `--help` for its full flag list (e.g. `pinerun scan --help`),
+and `pinerun --version` (or `-v`) prints the CLI version and build commit.
 During development, run the CLI straight from source instead of building the
 binary: `bun packages/pinerun/src/cli.ts <command> …`.
 

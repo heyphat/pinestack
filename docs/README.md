@@ -20,6 +20,7 @@ pinerun --help
 | [`portfolio`](./portfolio.md)     | One strategy across N symbols against ONE shared pot of capital.  |
 | [`sweep`](./sweep.md)             | Optimize one script's input grid over one or more symbols.        |
 | [`walkforward`](./walkforward.md) | Validate a swept edge out of sample (anti-overfitting).           |
+| [`upgrade`](./upgrade.md)         | Update pinerun to the latest release, in place.                   |
 
 ## Shared flags
 

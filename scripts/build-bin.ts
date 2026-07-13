@@ -39,6 +39,27 @@ const OUT_DIR = join(ROOT, 'dist');
 const PINER_DIR = join(ROOT, '..', 'piner');
 const PINERUN_TSCONFIG = join(ROOT, 'packages/pinerun/tsconfig.json');
 
+// Baked into the binary so `pinerun --version` self-reports (see cli.ts's
+// PINERUN_VERSION / PINERUN_REVISION declares). Version comes from the package
+// manifest — the single source of truth — and the revision from git (best effort).
+const PKG_VERSION = (
+  JSON.parse(readFileSync(join(ROOT, 'packages/pinerun/package.json'), 'utf8')) as {
+    version: string;
+  }
+).version;
+
+function gitRevision(): string | null {
+  try {
+    const proc = Bun.spawnSync(['git', 'rev-parse', '--short', 'HEAD'], { cwd: ROOT });
+    if (proc.exitCode === 0) return proc.stdout.toString().trim();
+  } catch {
+    // not a git checkout (e.g. a source tarball) — version alone still reports
+  }
+  return null;
+}
+
+const REVISION = gitRevision();
+
 const TARGETS = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'windows-x64'];
 const VARIANTS = ['musl', 'baseline', 'modern'];
 
@@ -74,6 +95,9 @@ async function build(target: { base: string; full: string }, forHost: boolean): 
     forHost ? `pinerun${ext}` : `pinerun-${target.full.slice(4)}${ext}`,
   );
   const args = ['build', '--compile', `--target=${target.full}`, CLI, WORKER, '--outfile', outfile];
+  // --define values are JS expressions, hence JSON.stringify to quote them.
+  args.push('--define', `PINERUN_VERSION=${JSON.stringify(PKG_VERSION)}`);
+  if (REVISION) args.push('--define', `PINERUN_REVISION=${JSON.stringify(REVISION)}`);
   console.log(`\n→ ${target.full}`);
   const proc = Bun.spawn(['bun', ...args], { stdout: 'inherit', stderr: 'inherit' });
   if ((await proc.exited) !== 0) fail(`build failed for ${target.full}`);

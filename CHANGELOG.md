@@ -5,11 +5,12 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The `pinerun` CLI is distributed as a prebuilt, self-contained binary (see the
-README). The packages themselves are pre-release (`0.0.0`) and run from
+README). The workspace packages themselves stay at `0.0.0` and run from
 TypeScript source; publishing the library to npm remains a possible follow-up.
-Until the first tagged release, changes are tracked here under **Unreleased**.
 
-## [Unreleased]
+## [0.1.0] - 2026-07-13
+
+First public open-source release.
 
 ### Added
 
@@ -45,3 +46,5 @@ Until the first tagged release, changes are tracked here under **Unreleased**.
   and a tag-triggered release workflow that attaches them to a GitHub Release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
+
+[0.1.0]: https://github.com/heyphat/pinestack/releases/tag/v0.1.0

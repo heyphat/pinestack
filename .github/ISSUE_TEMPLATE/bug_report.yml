@@ -1,0 +1,49 @@
+name: Bug report
+description: pinestack produces a wrong result, crashes, or a data provider misbehaves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report! A copy-pasteable repro makes fixes far faster.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Which package?
+      options:
+        - '@heyphat/pinerun (orchestration / CLI)'
+        - '@heyphat/pinery (data / providers)'
+        - not sure
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The exact `pinerun` command (or minimal code) that reproduces the problem. Include the symbols, timeframe, and any `--` flags. Redact API keys.
+      render: shell
+      placeholder: |
+        bun packages/pinerun/src/cli.ts scan examples/rsi.pine \
+          --symbols BTCUSDT,ETHUSDT --tf 1h --limit 300 --rank "last(rsi)"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What pinestack produced — output, an error, or a stack trace.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Bun version, and the piner version resolved (`bun pm ls | grep piner`).
+      placeholder: 'bun 1.2.x, @heyphat/piner 0.8.0'
+    validations:
+      required: true

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+# pinery on-disk history cache (local dev)
+.pinery-cache/
+out/
+.vscode
+.kiro
+# internal design/planning docs — not part of the public release
+# (promote individual files back into git when ready to publish them)
+dev-docs/
+
+out

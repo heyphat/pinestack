@@ -1,0 +1,54 @@
+{
+  "name": "@heyphat/pinerun",
+  "version": "0.0.0",
+  "description": "Programmable, parallel execution surface for the piner engine: fan out (script x symbol x timeframe x params) runs, rank, and scan.",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "author": "Phat Huynh (heyphat)",
+  "homepage": "https://github.com/heyphat/pinestack/tree/main/packages/pinerun#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heyphat/pinestack.git",
+    "directory": "packages/pinerun"
+  },
+  "bugs": {
+    "url": "https://github.com/heyphat/pinestack/issues"
+  },
+  "keywords": [
+    "pine-script",
+    "piner",
+    "backtest",
+    "backtesting",
+    "trading",
+    "quant",
+    "walk-forward",
+    "parameter-sweep",
+    "portfolio",
+    "cli"
+  ],
+  "bin": {
+    "pinerun": "./src/cli.ts"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./node": {
+      "types": "./src/node.ts",
+      "default": "./src/node.ts"
+    }
+  },
+  "dependencies": {
+    "@heyphat/pinery": "workspace:*"
+  },
+  "peerDependencies": {
+    "@heyphat/piner": "*"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "scripts": {
+    "build:bin": "bun ../../scripts/build-bin.ts"
+  }
+}

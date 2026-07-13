@@ -1,0 +1,7 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/pinery" },
+    { "path": "./packages/pinerun" }
+  ]
+}

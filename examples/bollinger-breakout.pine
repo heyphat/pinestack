@@ -1,0 +1,24 @@
+//@version=6
+// Bollinger breakout: trade expansion, not reversion. Go long when price closes
+// above the upper band (a volatility breakout) and exit when it falls back
+// through the moving-average basis. Inputs are exposed so `pinerun sweep` can
+// tune them:
+//   pinerun sweep examples/bollinger-breakout.pine --symbol BTCUSDT --tf 1h \
+//     --limit 500 --input length=10,20,30 --input mult=1.5,2,2.5 --top 10
+// The --input NAME must match the input() title exactly ("length" / "mult").
+strategy("Bollinger breakout", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+length = input.int(20, "length", minval=2)
+mult   = input.float(2.0, "mult", minval=0.1, step=0.1)
+
+[basis, upper, lower] = ta.bb(close, length, mult)
+
+// Breakout entry above the upper band; exit back through the basis.
+if ta.crossover(close, upper)
+    strategy.entry("long", strategy.long)
+if ta.crossunder(close, basis)
+    strategy.close("long")
+
+plot(basis, title="basis")
+plot(upper, title="upper")
+plot(lower, title="lower")

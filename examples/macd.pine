@@ -1,0 +1,25 @@
+//@version=6
+// MACD crossover: a momentum/trend strategy. Go long when the MACD line crosses
+// above its signal line and flatten on the opposite cross. Inputs are exposed so
+// `pinerun sweep` can tune the three lengths:
+//   pinerun sweep examples/macd.pine --symbol BTCUSDT --tf 1h --limit 500 \
+//     --input fast=8,12,16 --input slow=26:34:4 --input signal=7,9,11 --top 10
+// The --input NAME must match the input() title exactly ("fast" / "slow" /
+// "signal").
+strategy("MACD cross", overlay=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+fastLen   = input.int(12, "fast", minval=1)
+slowLen   = input.int(26, "slow", minval=1)
+signalLen = input.int(9, "signal", minval=1)
+
+[macdLine, signalLine, histLine] = ta.macd(close, fastLen, slowLen, signalLen)
+
+// Long when momentum turns up (MACD over signal); close when it turns down.
+if ta.crossover(macdLine, signalLine)
+    strategy.entry("long", strategy.long)
+if ta.crossunder(macdLine, signalLine)
+    strategy.close("long")
+
+plot(macdLine, title="macd")
+plot(signalLine, title="signal")
+plot(histLine, title="hist", style=plot.style_histogram)

@@ -1,0 +1,25 @@
+name: Feature request
+description: Request a new capability — an analysis mode, a data provider, a CLI flag, or an API
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like?
+      description: The capability you want — e.g. a new data adapter, a ranker function, a CLI option, an export format.
+    validations:
+      required: true
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: What are you trying to do? A short example of the command or script you'd run.
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Links to a provider's API docs, prior art, or anything else useful.
+    validations:
+      required: false

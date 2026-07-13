@@ -1,0 +1,50 @@
+name: Release
+
+# On a version tag (v*), cross-compile the pinerun CLI for every target and
+# attach the self-contained binaries to a GitHub Release. `bun build --compile`
+# cross-compiles all targets from a single Linux runner, so there is no build
+# matrix. The binaries bake in the Bun runtime + the piner engine + pinery, so
+# users install with a single curl (see scripts/install.sh) — no npm involved.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build all target binaries
+        run: bun run build:bin all
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum pinerun-* > checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/pinerun-*
+            dist/checksums.txt
+          generate_release_notes: true

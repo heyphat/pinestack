@@ -1,0 +1,44 @@
+{
+  "name": "@heyphat/pinery",
+  "version": "0.0.0",
+  "description": "Data layer for the piner engine: OHLCV history providers (Binance, static) + a Node on-disk cache. Implements piner's DataFeed contract.",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "author": "Phat Huynh (heyphat)",
+  "homepage": "https://github.com/heyphat/pinestack/tree/main/packages/pinery#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heyphat/pinestack.git",
+    "directory": "packages/pinery"
+  },
+  "bugs": {
+    "url": "https://github.com/heyphat/pinestack/issues"
+  },
+  "keywords": [
+    "pine-script",
+    "piner",
+    "ohlcv",
+    "market-data",
+    "binance",
+    "okx",
+    "kraken",
+    "alpaca",
+    "datafeed"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./node": {
+      "types": "./src/node.ts",
+      "default": "./src/node.ts"
+    }
+  },
+  "peerDependencies": {
+    "@heyphat/piner": "*"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  }
+}

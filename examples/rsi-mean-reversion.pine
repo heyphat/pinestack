@@ -1,0 +1,27 @@
+//@version=6
+// RSI mean-reversion: fade extremes. Go long when RSI climbs back out of
+// oversold territory, and flatten when it recovers into overbought — betting
+// that stretched moves revert. Inputs are exposed so `pinerun sweep` can tune
+// them:
+//   pinerun sweep examples/rsi-mean-reversion.pine --symbol BTCUSDT --tf 1h \
+//     --limit 500 --input length=7,14,21 --input oversold=20:35:5 --top 10
+// The --input NAME must match the input() title exactly ("length" / "oversold" /
+// "overbought").
+strategy("RSI mean-reversion", overlay=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+length    = input.int(14, "length", minval=2)
+oversold  = input.int(30, "oversold", minval=1, maxval=99)
+overbought = input.int(70, "overbought", minval=1, maxval=99)
+
+r = ta.rsi(close, length)
+
+// Enter long as RSI crosses back up through the oversold line (reversal from
+// stretched-down); exit as it crosses up through the overbought line.
+if ta.crossover(r, oversold)
+    strategy.entry("long", strategy.long)
+if ta.crossover(r, overbought)
+    strategy.close("long")
+
+plot(r, title="rsi")
+hline(oversold, title="oversold")
+hline(overbought, title="overbought")

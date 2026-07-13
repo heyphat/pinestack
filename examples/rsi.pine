@@ -1,0 +1,4 @@
+//@version=6
+indicator("RSI scan")
+r = ta.rsi(close, 14)
+plot(r, title="rsi")

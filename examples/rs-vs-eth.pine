@@ -1,0 +1,6 @@
+//@version=6
+indicator("Relative strength vs ETH")
+// Cross-symbol request.security: pull ETH's daily close (fetched once, shared across the scan)
+eth = request.security("ETHUSDT", "1D", close)
+rs = close / eth
+plot(rs, title="rs")

@@ -1,0 +1,50 @@
+{
+  "name": "pinestack",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Programmable, parallel execution surface for the piner Pine Script engine \u2014 data (pinery) + orchestration (pinerun).",
+  "license": "AGPL-3.0-only",
+  "author": "Phat Huynh (heyphat)",
+  "homepage": "https://github.com/heyphat/pinestack#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heyphat/pinestack.git"
+  },
+  "bugs": {
+    "url": "https://github.com/heyphat/pinestack/issues"
+  },
+  "keywords": [
+    "pine-script",
+    "pinescript",
+    "piner",
+    "backtest",
+    "backtesting",
+    "trading",
+    "quant",
+    "ohlcv",
+    "walk-forward",
+    "parameter-sweep",
+    "tradingview"
+  ],
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b",
+    "test": "bun test",
+    "build": "bun run --filter '*' build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build:bin": "bun scripts/build-bin.ts"
+  },
+  "devDependencies": {
+    "@heyphat/piner": "0.8.0",
+    "@types/bun": "^1.2.5",
+    "prettier": "^3.9.4",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

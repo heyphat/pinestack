@@ -1,6 +1,6 @@
 {
   "name": "@heyphat/pinerun",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "description": "Programmable, parallel execution surface for the piner engine: fan out (script x symbol x timeframe x params) runs, rank, and scan.",
   "type": "module",
   "license": "AGPL-3.0-only",

@@ -29,9 +29,14 @@ it in `~/.local/bin` (override with `PINERUN_INSTALL_DIR`; pin a version with
 Windows x64 `.exe` you can download directly from the Releases page.
 
 ```bash
+pinerun --version
 pinerun --help
 pinerun scan --help
 ```
+
+Later, update in place with `pinerun upgrade` — it downloads the latest
+release's binary for your platform, verifies its checksum, and swaps the
+executable atomically (`--check` to just look).
 
 Prefer to build it yourself? See [Getting started](#getting-started) below, then
 `bun run build:bin --install`.

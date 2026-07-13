@@ -53,6 +53,33 @@ import {
   type StarterTemplate,
 } from './index.js';
 import { WorkerPoolRunner } from './node.js';
+import { runUpgrade } from './upgrade.js';
+
+// Injected by scripts/build-bin.ts (`bun build --define`) so the compiled
+// binary self-reports its release version + commit. Absent when running from
+// source, where resolveVersion() falls back to this package's package.json.
+declare const PINERUN_VERSION: string | undefined;
+declare const PINERUN_REVISION: string | undefined;
+
+/** The CLI's version — the build define, else package.json (source runs). */
+function resolveVersion(): string | undefined {
+  if (typeof PINERUN_VERSION === 'string') return PINERUN_VERSION;
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version;
+  } catch {
+    // an exotic packaging without the define — cliVersion prints 'unknown'
+    return undefined;
+  }
+}
+
+/** "pinerun <version>[ (<commit>)]" for --version. */
+function cliVersion(): string {
+  const revision = typeof PINERUN_REVISION === 'string' ? ` (${PINERUN_REVISION})` : '';
+  return `pinerun ${resolveVersion() ?? 'unknown'}${revision}`;
+}
 
 function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
@@ -78,11 +105,18 @@ function main(argv: string[]): Promise<void> {
       return runSweep(rest);
     case 'walkforward':
       return runWalkforward(rest);
+    case 'upgrade':
+      return runUpgrade({ check: parseArgs(rest).has('check'), currentVersion: resolveVersion() });
     case undefined:
     case '-h':
     case '--help':
     case 'help':
       printHelp();
+      return Promise.resolve();
+    case '-v':
+    case '--version':
+    case 'version':
+      console.log(cliVersion());
       return Promise.resolve();
     default:
       console.error(`pinerun: unknown command "${command}"\n`);
@@ -1922,7 +1956,11 @@ USAGE
   pinerun compare     <a.pine> <b.pine> [opts]  Compare: two strategies on the same bars, side by side
   pinerun portfolio   <script.pine> [options]   Combine: one strategy across N symbols, ONE capital pot
   pinerun sweep       <script.pine> [options]   Optimize: one script's input grid, one or more symbols
-  pinerun walkforward <script.pine> [options]   Validate: does the swept edge survive out of sample?`;
+  pinerun walkforward <script.pine> [options]   Validate: does the swept edge survive out of sample?
+
+  pinerun upgrade                               Update pinerun to the latest release
+  pinerun <command> --help                      Show a command's options
+  pinerun --version                             Print the pinerun version`;
 
 const HELP_SECTIONS: Record<string, string> = {
   init: `INIT OPTIONS
@@ -2167,9 +2205,30 @@ SWEEP EXAMPLES
 WALKFORWARD EXAMPLE
   pinerun walkforward examples/sma-cross-param.pine --symbol BTCUSDT --tf 1h \\
     --limit 2000 --input fast=5,10,15,20 --input slow=30:100:10 --windows 5`,
+
+  upgrade: `UPGRADE OPTIONS
+  --check               Report whether a newer release exists; change nothing
+
+  Downloads the latest GitHub release's binary for this platform, verifies its
+  sha256 against the release's checksums.txt, and atomically replaces the
+  current executable. Only the compiled binary self-updates — from a source
+  checkout, git pull and rebuild (bun run build:bin --install) instead.
+
+UPGRADE EXAMPLE
+  pinerun upgrade --check      # is a newer release out?
+  pinerun upgrade              # download, verify, and swap in place`,
 };
 
-const HELP_ORDER = ['init', 'scan', 'backtest', 'compare', 'portfolio', 'sweep', 'walkforward'];
+const HELP_ORDER = [
+  'init',
+  'scan',
+  'backtest',
+  'compare',
+  'portfolio',
+  'sweep',
+  'walkforward',
+  'upgrade',
+];
 
 /** Full help, or — when `command` names a known command — just that command's section. */
 function printHelp(command?: string): void {

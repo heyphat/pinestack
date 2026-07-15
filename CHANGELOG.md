@@ -9,6 +9,22 @@ README). The workspace packages run from TypeScript source and version in
 lockstep with the release tag; publishing the library to npm remains a possible
 follow-up.
 
+## [0.1.2] - 2026-07-15
+
+### Fixed
+
+- **Engine correctness (via `@heyphat/piner` 0.8.1).** Bumped the piner engine
+  to pick up four Pine v6 conformance fixes that affect computed `scan` /
+  `sweep` / `backtest` / `walkforward` / `portfolio` results:
+  - String compound assignment (`s += "x"`) now concatenates instead of
+    lowering to numeric addition (which produced `na` and could serialize
+    `text` as `null`).
+  - `==` / `!=` round float operands to nine fractional digits, so
+    `0.1 + 0.2 == 0.3` is `true` (and `switch` subject matching inherits it).
+  - `[]` floors a float offset (`close[2.9]` → `close[2]`); a non-finite
+    offset reads `na`.
+  - `±Infinity` is falsy in conditions.
+
 ## [0.1.1] - 2026-07-13
 
 ### Added
@@ -62,5 +78,6 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.1.2]: https://github.com/heyphat/pinestack/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/heyphat/pinestack/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/heyphat/pinestack/releases/tag/v0.1.0

@@ -273,9 +273,12 @@ The `Σ_{j≠i}` margin term — the pot already spoken-for by the rest of the b
 — is the _entire_ shared-pot coupling on the buy side. In isolated mode it is
 `0`, recovering the plain single-symbol check.
 
-Liquidation (`D = +1` long, `−1` short) triggers where marked equity falls to
-required margin; the 4× rule force-closes `min(4·deficit/(p·mᵢ), |sizeᵢ|)` walking
-the intrabar path. No cross-symbol netting.
+Liquidation (`D = +1` long, `−1` short) evaluates once per bar at the bar's
+worst price for the position (low for longs, high for shorts): the cover
+quantity `deficit/(p·mᵢ)` truncates to the sleeve's lot step (`minQty`), then
+quadruples — `min(4·TRUNC(deficit/(p·mᵢ)), |sizeᵢ|)`, one whole unit when the
+truncation is zero (piner's TV-verified margin model; see piner's
+`docs/strategy-broker.md` §9). No cross-symbol netting.
 
 ### Portfolio equity curve
 

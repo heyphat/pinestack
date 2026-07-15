@@ -5,7 +5,7 @@
  * Credentials come from constructor options, falling back to the
  * `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` env vars in Node.
  */
-import type { Bar } from '../provider.js';
+import type { Bar, InstrumentInfo } from '../provider.js';
 import {
   applyRange,
   dropUnclosedBars,
@@ -103,6 +103,11 @@ export class AlpacaProvider implements HistoryProvider {
 
     out.sort((a, b) => a.time - b.time);
     return applyRange(dropUnclosedBars(out, timeframe), range);
+  }
+  /** US equities: whole-share lot step (TV's margin-call step-9 truncates stock
+   *  quantities to whole shares — its own TSLA worked example), one-cent tick. */
+  async instrument(_symbol: string): Promise<InstrumentInfo | undefined> {
+    return { minQty: 1, mintick: 0.01 };
   }
 }
 

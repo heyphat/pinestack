@@ -30,6 +30,7 @@ import type { RunResult } from './result.js';
 import { LocalRunner, type Runner } from './runner.js';
 import { sweep } from './sweep.js';
 import { resolveSecurity } from './security.js';
+import { resolveInstrument } from './instrument.js';
 import { comboId, type Axis } from './params.js';
 
 export interface WalkforwardOptions {
@@ -56,6 +57,8 @@ export interface WalkforwardOptions {
   concurrency?: number;
   backend?: 'js' | 'interp';
   mintick?: number;
+  /** Lot-step override; unset → provider instrument metadata → piner default. */
+  minQty?: number;
   /** Host conventions for the derived risk-adjusted metrics. */
   metrics?: JobMetricsOptions;
   /** Resolve request.security dependencies per window. Default true. */
@@ -205,6 +208,8 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
     return empty(err instanceof Error ? err.message : String(err));
   }
 
+  const inst = await resolveInstrument(opts.provider, opts.symbol, opts);
+
   const plans = planWindows(bars.length, opts.windows ?? 5, opts.oosFraction ?? 0.25, anchored);
   const windows: WalkforwardWindow[] = [];
 
@@ -234,7 +239,8 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
       top: 1,
       concurrency: opts.concurrency,
       backend: opts.backend,
-      mintick: opts.mintick,
+      mintick: inst.mintick,
+      minQty: inst.minQty,
       metrics: opts.metrics,
       resolveSecurity: opts.resolveSecurity,
       maxCombos: opts.maxCombos,
@@ -265,7 +271,8 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
       timeframe: pinerTf,
       bars: bars.slice(plan.isFrom, plan.oosTo),
       inputs: { ...opts.baseInputs, ...best.inputs },
-      mintick: opts.mintick,
+      mintick: inst.mintick,
+      minQty: inst.minQty,
       backend: opts.backend,
       metrics: opts.metrics,
       includeTrades: true,

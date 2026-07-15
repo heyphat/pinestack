@@ -256,3 +256,39 @@ test('adapters expose their asset class directly', () => {
   expect(new MassiveProvider().assetClass).toBe('equities');
   expect(new StaticProvider().assetClass).toBeUndefined();
 });
+
+test('router forwards instrument() to the addressed adapter, prefix stripped', async () => {
+  const urls: string[] = [];
+  const fn = (async (url: string | URL) => {
+    const s = String(url);
+    urls.push(s);
+    const body = {
+      symbols: [
+        {
+          symbol: 'SOLUSDT',
+          filters: [
+            { filterType: 'LOT_SIZE', stepSize: '0.01' },
+            { filterType: 'PRICE_FILTER', tickSize: '0.0100' },
+          ],
+        },
+      ],
+    };
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+      headers: { get: () => null },
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  const router = new InstrumentRouter({ fetchImpl: fn });
+  // Addressed: BI:FU: routes to binance futures, ticker stripped for the lookup.
+  expect(await router.instrument('BI:FU:SOLUSDT')).toEqual({ minQty: 0.01, mintick: 0.01 });
+  expect(urls[0]).toContain('fapi.binance.com');
+  expect(urls[0]).toContain('/fapi/v1/exchangeInfo');
+  // Equities adapters answer statically (no fetch, no credentials).
+  expect(await router.instrument('AL:AAPL')).toEqual({ minQty: 1, mintick: 0.01 });
+  expect(urls.length).toBe(1);
+});

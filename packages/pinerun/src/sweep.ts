@@ -28,6 +28,7 @@ import type { RunResult } from './result.js';
 import { LocalRunner, type Runner } from './runner.js';
 import { evalRank, parseRankSpec, sortRanked, type RankSpec } from './rank.js';
 import { resolveSecurity } from './security.js';
+import { resolveInstrument } from './instrument.js';
 import {
   assertComboBudget,
   cartesian,
@@ -67,6 +68,8 @@ export interface SweepOptions {
   concurrency?: number;
   backend?: 'js' | 'interp';
   mintick?: number;
+  /** Lot-step override; unset → provider instrument metadata → piner default. */
+  minQty?: number;
   /** Attach the full trade ledger + equity curve to each result (strategies only). */
   includeTrades?: boolean;
   /** Host conventions for the derived risk-adjusted metrics (strategies only). */
@@ -233,23 +236,29 @@ export async function sweep(opts: SweepOptions): Promise<SweepReport> {
 
   // Fetch each symbol's bars ONCE — every combo of a symbol shares its series.
   // Slots are filled by symbol index so job/point order stays deterministic.
-  const slots = new Array<{ symbol: string; bars: Bar[] } | undefined>(symbols.length);
+  type Fetched = { symbol: string; bars: Bar[]; inst?: { minQty?: number; mintick?: number } };
+  const slots = new Array<Fetched | undefined>(symbols.length);
   const fetchErrors: { symbol: string; error: string }[] = [];
   if (opts.bars != null) {
-    slots[0] = { symbol: symbols[0]!, bars: opts.bars };
+    slots[0] = {
+      symbol: symbols[0]!,
+      bars: opts.bars,
+      inst: await resolveInstrument(opts.provider, symbols[0]!, opts),
+    };
     opts.onFetch?.(symbols[0]!, opts.bars.length);
   } else {
     await mapLimit(symbols, fetchConcurrency, async (symbol, i) => {
       try {
         const bars = await opts.provider.history(symbol, opts.timeframe, opts.range);
         opts.onFetch?.(symbol, bars.length);
-        slots[i] = { symbol, bars };
+        const inst = await resolveInstrument(opts.provider, symbol, opts);
+        slots[i] = { symbol, bars, inst };
       } catch (err) {
         fetchErrors.push({ symbol, error: err instanceof Error ? err.message : String(err) });
       }
     });
   }
-  const fetched = slots.filter((s): s is { symbol: string; bars: Bar[] } => s != null);
+  const fetched = slots.filter((s): s is Fetched => s != null);
 
   if (fetched.length === 0) {
     const rank = opts.rank ?? 'last';
@@ -273,7 +282,7 @@ export async function sweep(opts: SweepOptions): Promise<SweepReport> {
 
   // Build one Job per (symbol, combo): the symbol's shared bars, per-combo
   // inputs, and a readable combo id (result.symbol tells the symbols apart).
-  const jobs: Job[] = fetched.flatMap(({ symbol, bars }) =>
+  const jobs: Job[] = fetched.flatMap(({ symbol, bars, inst }) =>
     combos.map((combo) => ({
       id: comboId(combo),
       source: opts.source,
@@ -281,7 +290,8 @@ export async function sweep(opts: SweepOptions): Promise<SweepReport> {
       timeframe: pinerTf,
       bars,
       inputs: { ...opts.baseInputs, ...combo },
-      mintick: opts.mintick,
+      mintick: inst?.mintick ?? opts.mintick,
+      minQty: inst?.minQty ?? opts.minQty,
       backend: opts.backend,
       includeTrades: opts.includeTrades,
       metrics: opts.metrics,

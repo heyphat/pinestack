@@ -209,6 +209,8 @@ async function runScan(args: string[]): Promise<void> {
       top,
       concurrency,
       backend,
+      mintick: opts.getNum('mintick'),
+      minQty: opts.getNum('min-qty'),
       includeTrades,
       metrics,
       resolveSecurity,
@@ -332,6 +334,8 @@ async function runBacktest(args: string[]): Promise<void> {
         range,
         inputs,
         backend,
+        mintick: opts.getNum('mintick'),
+        minQty: opts.getNum('min-qty'),
         metrics,
         resolveSecurity,
       });
@@ -367,6 +371,8 @@ async function runBacktest(args: string[]): Promise<void> {
     range,
     inputs,
     backend,
+    mintick: opts.getNum('mintick'),
+    minQty: opts.getNum('min-qty'),
     metrics,
     resolveSecurity,
   });
@@ -846,6 +852,7 @@ async function runPortfolio(args: string[]): Promise<void> {
       inputs,
       backend,
       mintick: opts.getNum('mintick'),
+      minQty: opts.getNum('min-qty'),
       concurrency: opts.getNum('concurrency'),
       metrics,
       resolveSecurity: !opts.has('no-security'),
@@ -1129,6 +1136,8 @@ async function runSweep(args: string[]): Promise<void> {
       top,
       concurrency,
       backend,
+      mintick: opts.getNum('mintick'),
+      minQty: opts.getNum('min-qty'),
       includeTrades,
       metrics,
       resolveSecurity,
@@ -1289,6 +1298,8 @@ async function runWalkforward(args: string[]): Promise<void> {
       anchored,
       concurrency,
       backend,
+      mintick: opts.getNum('mintick'),
+      minQty: opts.getNum('min-qty'),
       metrics,
       resolveSecurity,
       maxCombos,
@@ -1821,6 +1832,7 @@ const VALUE_KEYS = new Set([
   'capital',
   'weights',
   'mintick',
+  'min-qty',
   'input-a',
   'input-b',
   'label-a',
@@ -2029,6 +2041,13 @@ INIT EXAMPLE
   --api-secret <secret> Alpaca secret key. DISCOURAGED (leaks); prefer
                           ALPACA_API_SECRET_KEY.
   --feed iex|sip        Alpaca data feed (default iex)
+  --mintick <n>         Instrument tick size override. Default: the provider's
+                          exchange metadata (tickSize), else 0.01
+  --min-qty <n>         Instrument lot step override — the broker truncates
+                          derived order sizes and margin-call liquidation
+                          quantities to this step (TV parity). Default: the
+                          provider's exchange metadata (e.g. Binance LOT_SIZE
+                          stepSize), else 0.001
   --no-security         Skip request.security dependency resolution (cross-symbol
                           / lower-TF fetch + inject); those requests degrade to na
   --no-cache            Disable the on-disk history cache
@@ -2054,8 +2073,8 @@ EXAMPLE
                           DRAWDOWNS tables always print)
   --tf, --from, --to, --limit, --backend, --provider, --asset-class,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
-  --csv, --plot, --no-security, --no-cache, --cache-dir, --refresh,
-  --json   (as scan)
+  --mintick, --min-qty, --csv, --plot, --no-security, --no-cache,
+  --cache-dir, --refresh, --json   (as scan)
 
   Prints a full tearsheet: returns (net/gross, buy & hold, CAGR), risk (drawdown,
   volatility, Sharpe/Sortino/Calmar, exposure), and trade quality (win rate,

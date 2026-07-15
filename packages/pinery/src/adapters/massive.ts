@@ -6,7 +6,7 @@
  * env var in Node. Called directly over REST so pinery stays dependency-free
  * (fractal-chart uses the @massive.com/client-js SDK; the wire format is the same).
  */
-import type { Bar } from '../provider.js';
+import type { Bar, InstrumentInfo } from '../provider.js';
 import {
   applyRange,
   dropUnclosedBars,
@@ -80,6 +80,11 @@ export class MassiveProvider implements HistoryProvider {
       .filter((b): b is Bar => b !== null)
       .sort((a, b) => a.time - b.time);
     return applyRange(dropUnclosedBars(bars, timeframe), range);
+  }
+  /** US equities: whole-share lot step (TV's margin-call step-9 truncates stock
+   *  quantities to whole shares — its own TSLA worked example), one-cent tick. */
+  async instrument(_symbol: string): Promise<InstrumentInfo | undefined> {
+    return { minQty: 1, mintick: 0.01 };
   }
 }
 

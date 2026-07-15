@@ -10,6 +10,7 @@ import type { RunResult } from './result.js';
 import { LocalRunner, type Runner } from './runner.js';
 import { parseRankSpec, rankResults, type RankedResult, type RankSpec } from './rank.js';
 import { resolveSecurity } from './security.js';
+import { resolveInstrument } from './instrument.js';
 
 export interface ScanOptions {
   source: string;
@@ -26,6 +27,8 @@ export interface ScanOptions {
   backend?: 'js' | 'interp';
   inputs?: Record<string, unknown>;
   mintick?: number;
+  /** Lot-step override; unset → provider instrument metadata → piner default. */
+  minQty?: number;
   /** Attach the full trade ledger + equity curve to each result (strategies only). */
   includeTrades?: boolean;
   /** Host conventions for the derived risk-adjusted metrics (strategies only). */
@@ -72,13 +75,15 @@ export async function scan(opts: ScanOptions): Promise<ScanReport> {
     try {
       const bars = await opts.provider.history(symbol, opts.timeframe, opts.range);
       opts.onFetch?.(symbol, bars.length);
+      const inst = await resolveInstrument(opts.provider, symbol, opts);
       slots[i] = {
         source: opts.source,
         symbol,
         timeframe: pinerTf,
         bars,
         inputs: opts.inputs,
-        mintick: opts.mintick,
+        mintick: inst.mintick,
+        minQty: inst.minQty,
         backend: opts.backend,
         includeTrades: opts.includeTrades,
         metrics: opts.metrics,

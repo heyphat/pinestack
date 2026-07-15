@@ -6,7 +6,7 @@
  * Massive). The Node-only on-disk cache lives behind the separate
  * `@heyphat/pinery/node` entry so it is never bundled into a browser.
  */
-export type { Bar, HistoryProvider, HistoryRange } from './provider.js';
+export type { Bar, HistoryProvider, HistoryRange, InstrumentInfo } from './provider.js';
 export { toDataFeed, applyRange, dropUnclosedBars } from './provider.js';
 export type { Timeframe } from './timeframe.js';
 export {

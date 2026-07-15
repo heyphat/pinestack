@@ -5,7 +5,7 @@
  * but Kraken does not serve arbitrarily deep history here), so `range` is applied
  * as a filter over what Kraken returns.
  */
-import type { Bar } from '../provider.js';
+import type { Bar, InstrumentInfo } from '../provider.js';
 import {
   applyRange,
   dropUnclosedBars,
@@ -63,6 +63,28 @@ export class KrakenProvider implements HistoryProvider {
       .sort((a, b) => a.time - b.time);
     // Kraken's last OHLC entry is the current, not-yet-committed frame.
     return applyRange(dropUnclosedBars(bars, timeframe), range);
+  }
+
+  /** AssetPairs: lot_decimals → minQty (10^-decimals), tick_size → mintick. */
+  async instrument(symbol: string): Promise<InstrumentInfo | undefined> {
+    const pair = normalizeKrakenSpot(symbol);
+    const url = new URL('/0/public/AssetPairs', this.baseUrl);
+    url.searchParams.set('pair', pair);
+    const payload = await fetchJson<{
+      error?: string[];
+      result?: Record<string, { lot_decimals?: number; tick_size?: string }>;
+    }>(url.toString(), { label: 'kraken /AssetPairs', fetchImpl: this.fetchImpl });
+    if (Array.isArray(payload.error) && payload.error.length > 0) {
+      throw new Error(`kraken /AssetPairs: ${payload.error.join(', ')}`);
+    }
+    const row = payload.result ? Object.values(payload.result)[0] : undefined;
+    if (!row) return undefined;
+    const minQty = row.lot_decimals != null ? Math.pow(10, -row.lot_decimals) : NaN;
+    const mintick = Number(row.tick_size);
+    return {
+      ...(Number.isFinite(minQty) && minQty > 0 ? { minQty } : {}),
+      ...(Number.isFinite(mintick) && mintick > 0 ? { mintick } : {}),
+    };
   }
 }
 

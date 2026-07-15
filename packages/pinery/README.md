@@ -30,7 +30,14 @@ bun add @heyphat/pinery @heyphat/piner
 Re-exported from piner. `time` is unix **seconds** at pinery's surface:
 
 ```ts
-interface Bar { time: number; open: number; high: number; low: number; close: number; volume: number; }
+interface Bar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
 ```
 
 > **Time units.** pinery emits `time` in unix **seconds** (ergonomic for CLI dates
@@ -45,18 +52,41 @@ The one interface every data source implements.
 
 ```ts
 interface HistoryRange {
-  from?: number;   // inclusive lower bound, unix seconds
-  to?: number;     // inclusive upper bound, unix seconds
-  limit?: number;  // hard cap on bar count (most-recent when only limit is set)
+  from?: number; // inclusive lower bound, unix seconds
+  to?: number; // inclusive upper bound, unix seconds
+  limit?: number; // hard cap on bar count (most-recent when only limit is set)
 }
 
 interface HistoryProvider {
-  readonly id: string;  // stable id used in cache keys / diagnostics
+  readonly id: string; // stable id used in cache keys / diagnostics
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]>;
+  // Optional: the symbol's exchange trading rules. Providers that don't know
+  // return undefined; callers fall back to engine defaults.
+  instrument?(symbol: string): Promise<InstrumentInfo | undefined>;
+}
+
+interface InstrumentInfo {
+  minQty?: number; // minimum order-quantity step (lot step / min contract size)
+  mintick?: number; // minimum price increment (piner's syminfo.mintick)
 }
 ```
 
 Bars are returned ascending by time.
+
+`instrument()` matters for TradingView parity: the piner broker truncates
+derived order sizes and margin-call liquidation quantities to the symbol's
+minimum contract size, so hosts should resolve the real lot step per symbol
+(SOLUSDT perps trade in 0.01 steps, DOGE perps in whole contracts, spot BTC in
+1e-5). Implemented by:
+
+| Provider                             | Source                                                        | Notes                                                                 |
+| ------------------------------------ | ------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `BinanceProvider` (spot + futures)   | `exchangeInfo` → `LOT_SIZE.stepSize`, `PRICE_FILTER.tickSize` | full map fetched once per instance and memoized                       |
+| `OkxProvider` (spot + swap)          | `/api/v5/public/instruments` → `lotSz`, `tickSz`              | swap lot steps are in contracts — converted to base units via `ctVal` |
+| `KrakenProvider`                     | `AssetPairs` → `lot_decimals` (step = 10^-n), `tick_size`     |                                                                       |
+| `AlpacaProvider` / `MassiveProvider` | static                                                        | whole-share lots (`minQty: 1`), one-cent tick — no credentials needed |
+| `StaticProvider`                     | `setInstrument(symbol, info)`                                 | test / fixture seam                                                   |
+| `InstrumentRouter`                   | routes like `history()`                                       | prefix stripped, per-pair adapter answers                             |
 
 ### `toDataFeed(provider, range?) → DataFeed`
 
@@ -85,16 +115,16 @@ Pinery uses canonical timeframe tokens: `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d
 ```ts
 import { timeframeSeconds, toPinerTimeframe } from '@heyphat/pinery';
 
-timeframeSeconds('15m');    // 900
-timeframeSeconds('4h');     // 14400
-timeframeSeconds('1d');     // 86400
+timeframeSeconds('15m'); // 900
+timeframeSeconds('4h'); // 14400
+timeframeSeconds('1d'); // 86400
 
 // Map a canonical token onto piner's timeframe-string convention
 // (minutes as a bare number, or D/W/M multiples):
-toPinerTimeframe('1h');     // "60"
-toPinerTimeframe('15m');    // "15"
-toPinerTimeframe('1d');     // "D"
-toPinerTimeframe('1w');     // "W"
+toPinerTimeframe('1h'); // "60"
+toPinerTimeframe('15m'); // "15"
+toPinerTimeframe('1d'); // "D"
+toPinerTimeframe('1w'); // "W"
 ```
 
 `toPinerTimeframe` only affects piner's `timeframe.*` builtins and
@@ -102,14 +132,14 @@ toPinerTimeframe('1w');     // "W"
 
 ## Adapters
 
-| Provider | Class | Markets | Auth | Notes |
-|---|---|---|---|---|
-| Binance | `BinanceProvider` | spot, USDⓈ-M futures | none | keyless public klines |
-| OKX | `OkxProvider` | spot, swap (perps) | none | keyless v5 candles |
-| Kraken | `KrakenProvider` | spot | none | keyless public OHLC (recent window) |
-| Alpaca | `AlpacaProvider` | US equities | key id + secret | Market Data v2 |
-| Massive | `MassiveProvider` | US equities | api key | Polygon-compatible aggregates |
-| — | `StaticProvider` | any | n/a | in-memory / fixtures |
+| Provider | Class             | Markets              | Auth            | Notes                               |
+| -------- | ----------------- | -------------------- | --------------- | ----------------------------------- |
+| Binance  | `BinanceProvider` | spot, USDⓈ-M futures | none            | keyless public klines               |
+| OKX      | `OkxProvider`     | spot, swap (perps)   | none            | keyless v5 candles                  |
+| Kraken   | `KrakenProvider`  | spot                 | none            | keyless public OHLC (recent window) |
+| Alpaca   | `AlpacaProvider`  | US equities          | key id + secret | Market Data v2                      |
+| Massive  | `MassiveProvider` | US equities          | api key         | Polygon-compatible aggregates       |
+| —        | `StaticProvider`  | any                  | n/a             | in-memory / fixtures                |
 
 All network adapters accept an injectable `fetchImpl` (for tests) and return
 ascending `Bar[]` in unix seconds. Crypto symbols are normalized to each
@@ -119,7 +149,7 @@ exchange's instrument-id form, so a user can type `BTCUSDT`, `BTC/USDT`, or
 ## Asset classes
 
 Asset class is orthogonal to the provider: one provider can serve more than one
-class (Binance serves crypto spot *and* USDⓈ-M futures). The closed universe is
+class (Binance serves crypto spot _and_ USDⓈ-M futures). The closed universe is
 `equities | crypto | futures | forex`; `ASSET_CLASS_REGISTRY` declares which
 (provider, assetClass) pairs pinery serves and each provider's default class.
 Every adapter instance exposes the class it serves as `provider.assetClass`.
@@ -127,11 +157,11 @@ Every adapter instance exposes the class it serves as `provider.assetClass`.
 ```ts
 import { createProvider, resolveInstrument, supportsPair } from '@heyphat/pinery';
 
-createProvider('binance');            // spot klines    (id "binance",         assetClass "crypto")
+createProvider('binance'); // spot klines    (id "binance",         assetClass "crypto")
 createProvider('binance', 'futures'); // USDⓈ-M perps   (id "binance-futures", assetClass "futures")
-createProvider('okx', 'futures');     // OKX swaps      (id "okx-swap",        assetClass "futures")
-createProvider('kraken', 'futures');  // throws — kraken does not serve "futures"
-supportsPair('alpaca', 'equities');   // true
+createProvider('okx', 'futures'); // OKX swaps      (id "okx-swap",        assetClass "futures")
+createProvider('kraken', 'futures'); // throws — kraken does not serve "futures"
+supportsPair('alpaca', 'equities'); // true
 ```
 
 Instruments have one canonical address, `PREFIX[:CODE]:TICKER` — the same
@@ -139,11 +169,15 @@ prefixes (`BI OK KR AL MA`) and 2-letter class codes (`EQ CR FU FX`) as
 fractal-chart, with the code omitted when it equals the provider's default:
 
 ```ts
-import { encodeInstrumentAddress, canonicalizeInstrumentAddress, resolveInstrument } from '@heyphat/pinery';
+import {
+  encodeInstrumentAddress,
+  canonicalizeInstrumentAddress,
+  resolveInstrument,
+} from '@heyphat/pinery';
 
 encodeInstrumentAddress('binance', 'futures', 'BTCUSDT'); // "BI:FU:BTCUSDT"
-encodeInstrumentAddress('binance', 'crypto', 'BTCUSDT');  // "BI:BTCUSDT" (default class collapses)
-canonicalizeInstrumentAddress('bi:cr:btcusdt');           // "BI:BTCUSDT" (idempotent)
+encodeInstrumentAddress('binance', 'crypto', 'BTCUSDT'); // "BI:BTCUSDT" (default class collapses)
+canonicalizeInstrumentAddress('bi:cr:btcusdt'); // "BI:BTCUSDT" (idempotent)
 
 const { provider, ticker } = resolveInstrument('BI:FU:BTCUSDT');
 const bars = await provider.history(ticker, '4h', { limit: 500 });
@@ -160,7 +194,7 @@ works in the browser and Node with no credentials.
 ```ts
 import { BinanceProvider } from '@heyphat/pinery';
 
-const spot = new BinanceProvider();                       // market: 'spot' (default)
+const spot = new BinanceProvider(); // market: 'spot' (default)
 const perps = new BinanceProvider({ market: 'futures' }); // USDⓈ-M perpetuals
 
 // Most-recent N bars (single request):
@@ -169,15 +203,15 @@ await spot.history('BTCUSDT', '1h', { limit: 500 });
 // A time range (pages forward from `from`):
 await spot.history('ETHUSDT', '1d', {
   from: Math.floor(new Date('2023-01-01').getTime() / 1000),
-  to:   Math.floor(new Date('2024-01-01').getTime() / 1000),
+  to: Math.floor(new Date('2024-01-01').getTime() / 1000),
 });
 ```
 
 ```ts
 interface BinanceProviderOptions {
   market?: 'spot' | 'futures'; // default 'spot'
-  baseUrl?: string;            // override the REST base. Defaults per market
-  maxBars?: number;            // safety cap when paging a range. Default 50_000
+  baseUrl?: string; // override the REST base. Defaults per market
+  maxBars?: number; // safety cap when paging a range. Default 50_000
   fetchImpl?: typeof fetch;
 }
 ```
@@ -196,7 +230,7 @@ REST API. Pages newest→oldest via the `after` cursor, falling through from
 ```ts
 import { OkxProvider } from '@heyphat/pinery';
 
-const spot = new OkxProvider();                    // market: 'spot' (default)
+const spot = new OkxProvider(); // market: 'spot' (default)
 const perps = new OkxProvider({ market: 'swap' });
 
 await spot.history('BTCUSDT', '1h', { limit: 300 }); // → instId BTC-USDT
@@ -206,8 +240,8 @@ await perps.history('ETHUSDT', '4h', { limit: 300 }); // → instId ETH-USDT-SWA
 ```ts
 interface OkxProviderOptions {
   market?: 'spot' | 'swap'; // default 'spot'
-  baseUrl?: string;         // default https://www.okx.com
-  maxBars?: number;         // default 50_000
+  baseUrl?: string; // default https://www.okx.com
+  maxBars?: number; // default 50_000
   fetchImpl?: typeof fetch;
 }
 ```
@@ -230,7 +264,7 @@ await kraken.history('XBTUSD', '1h', { limit: 500 }); // → pair BTC/USD
 
 ```ts
 interface KrakenProviderOptions {
-  baseUrl?: string;          // default https://api.kraken.com
+  baseUrl?: string; // default https://api.kraken.com
   fetchImpl?: typeof fetch;
 }
 ```
@@ -259,10 +293,10 @@ await alpaca.history('AAPL', '1h', { from: 1_700_000_000, to: 1_700_600_000 });
 
 ```ts
 interface AlpacaProviderOptions {
-  keyId?: string;            // falls back to env ALPACA_API_KEY_ID
-  secretKey?: string;        // falls back to env ALPACA_API_SECRET_KEY
-  feed?: 'iex' | 'sip';      // default 'iex'
-  baseUrl?: string;          // default https://data.alpaca.markets
+  keyId?: string; // falls back to env ALPACA_API_KEY_ID
+  secretKey?: string; // falls back to env ALPACA_API_SECRET_KEY
+  feed?: 'iex' | 'sip'; // default 'iex'
+  baseUrl?: string; // default https://data.alpaca.markets
   fetchImpl?: typeof fetch;
 }
 ```
@@ -292,8 +326,8 @@ await massive.history('AAPL', '1d', { from: 1_690_000_000, to: 1_700_000_000 });
 
 ```ts
 interface MassiveProviderOptions {
-  apiKey?: string;           // falls back to env MASSIVE_API_KEY
-  baseUrl?: string;          // default https://api.massive.com
+  apiKey?: string; // falls back to env MASSIVE_API_KEY
+  baseUrl?: string; // default https://api.massive.com
   fetchImpl?: typeof fetch;
 }
 ```
@@ -310,7 +344,7 @@ In-memory provider for tests, offline replay, and fixtures. Keyed by `symbol`
 import { StaticProvider, barsFromCsv } from '@heyphat/pinery';
 
 const provider = new StaticProvider({
-  BTCUSDT: bars,               // matches any timeframe for BTCUSDT
+  BTCUSDT: bars, // matches any timeframe for BTCUSDT
   'ETHUSDT|1h': hourlyEthBars, // matches only ETHUSDT @ 1h
 });
 
@@ -356,7 +390,7 @@ Options:
 
 ```ts
 interface DiskCacheOptions {
-  dir?: string;     // cache directory. Default `<cwd>/.pinery-cache`
+  dir?: string; // cache directory. Default `<cwd>/.pinery-cache`
   refresh?: boolean; // bypass reads (still writes) — forced refresh. Default false
 }
 ```
@@ -365,10 +399,15 @@ Cache entries are JSON files keyed by a hash of `providerId + symbol + timeframe
 range`. A corrupt entry falls back to a fresh fetch. The wrapped provider's `id`
 becomes `"<providerId>+cache"`.
 
+`instrument()` lookups are cached too (when the wrapped provider supports them):
+one JSON file per `(provider, symbol)` keyed by UTC day, so exchange trading-rule
+changes surface within a day. `refresh: true` bypasses instrument reads as well.
+
 ## API summary
 
 **`@heyphat/pinery`**
-- Types: `Bar`, `HistoryProvider`, `HistoryRange`, `Timeframe`, and each provider's `*Options`
+
+- Types: `Bar`, `HistoryProvider`, `HistoryRange`, `InstrumentInfo`, `Timeframe`, and each provider's `*Options`
 - `toDataFeed`, `applyRange`
 - `timeframeSeconds`, `toPinerTimeframe`, `parseTimeframe`, `pinerTimeframeToCanonical`
 - `fetchJson` (shared retrying JSON GET), `FetchJsonOptions`
@@ -376,13 +415,17 @@ becomes `"<providerId>+cache"`.
 - Adapters: `BinanceProvider`, `OkxProvider`, `KrakenProvider`, `AlpacaProvider`, `MassiveProvider`, `StaticProvider`, `barsFromCsv`
 
 **`@heyphat/pinery/node`**
+
 - `cached`, `DiskCacheOptions`
 
 ## Writing a new provider
 
 Implement `HistoryProvider`. Return ascending bars in unix seconds; honor
 `range` (or lean on `applyRange` after materializing). Keep the core browser-safe
-— put any Node-only I/O behind a separate `/node`-style module.
+— put any Node-only I/O behind a separate `/node`-style module. If the venue
+exposes trading rules (lot step / tick size), also implement `instrument()` so
+hosts can run the broker on the symbol's real quantization; it's optional and
+callers must tolerate `undefined`.
 
 ```ts
 import type { Bar, HistoryProvider, HistoryRange } from '@heyphat/pinery';

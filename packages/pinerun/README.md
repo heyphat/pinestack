@@ -195,6 +195,9 @@ interface Job {
   bars: Bar[]; // OHLCV, ascending by time
   inputs?: Record<string, unknown>; // input overrides keyed by input title
   mintick?: number; // instrument tick size (default 0.01)
+  minQty?: number; // instrument lot step — the broker's TV-parity quantity
+  //                  truncation unit for derived order sizes and margin-call
+  //                  liquidations (default 0.001)
   backend?: 'js' | 'interp'; // piner backend (default 'js')
 }
 ```
@@ -285,7 +288,7 @@ or inside a worker. Compile errors and runtime errors are captured into
 ### `jobHash(job) → string`
 
 The determinism key: a fast FNV-1a hash over `source + timeframe + backend +
-mintick + a numeric digest of the bars + inputs + metrics options`. Two jobs with
+mintick + minQty + a numeric digest of the bars + inputs + metrics options`. Two jobs with
 identical inputs hash equal (so results memoize); changing any input changes the
 hash.
 
@@ -398,7 +401,8 @@ interface ScanOptions {
   concurrency?: number; // job execution default: worker-pool size (4 for LocalRunner)
   backend?: 'js' | 'interp';
   inputs?: Record<string, unknown>;
-  mintick?: number;
+  mintick?: number; // tick-size override; unset → provider instrument metadata
+  minQty?: number; // lot-step override; unset → provider instrument metadata
   includeTrades?: boolean; // attach ledger + equity curve (strategies)
   metrics?: JobMetricsOptions; // { periodsPerYear?, riskFreeRate? } for derived metrics
   runner?: Runner; // default new LocalRunner()

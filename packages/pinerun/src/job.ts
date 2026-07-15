@@ -22,6 +22,10 @@ export interface Job {
   inputs?: Record<string, unknown>;
   /** Instrument tick size (defaults to 0.01). */
   mintick?: number;
+  /** Instrument minimum quantity step (lot step). Configures the broker's
+   *  TV-parity quantity truncation (derived order sizes, margin-call
+   *  liquidations). Unset → piner's default (0.001). */
+  minQty?: number;
   /** Which piner backend to use. Default 'js'. */
   backend?: 'js' | 'interp';
   /** Attach the full trade ledger + equity curve to the result (strategies only). */

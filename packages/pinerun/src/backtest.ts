@@ -14,6 +14,7 @@ import type { Job, JobMetricsOptions } from './job.js';
 import type { RunResult } from './result.js';
 import { executeJob } from './execute.js';
 import { resolveSecurity } from './security.js';
+import { resolveInstrument } from './instrument.js';
 
 export interface BacktestOptions {
   source: string;
@@ -26,6 +27,8 @@ export interface BacktestOptions {
   /** Fixed input overrides keyed by input title. */
   inputs?: Record<string, unknown>;
   mintick?: number;
+  /** Lot-step override; unset → provider instrument metadata → piner default. */
+  minQty?: number;
   backend?: 'js' | 'interp';
   /** Host conventions for the derived risk-adjusted metrics. */
   metrics?: JobMetricsOptions;
@@ -53,13 +56,16 @@ export async function backtest(opts: BacktestOptions): Promise<BacktestReport> {
     return { fetchError: err instanceof Error ? err.message : String(err) };
   }
 
+  const inst = await resolveInstrument(opts.provider, opts.symbol, opts);
+
   const job: Job = {
     source: opts.source,
     symbol: opts.symbol,
     timeframe: pinerTf,
     bars,
     inputs: opts.inputs,
-    mintick: opts.mintick,
+    mintick: inst.mintick,
+    minQty: inst.minQty,
     backend: opts.backend,
     metrics: opts.metrics,
     includeTrades: true, // the whole point of a backtest is the full detail

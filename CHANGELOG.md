@@ -9,6 +9,44 @@ README). The workspace packages run from TypeScript source and version in
 lockstep with the release tag; publishing the library to npm remains a possible
 follow-up.
 
+## [0.2.0] - 2026-07-15
+
+### Changed (breaking)
+
+- **piner engine `0.8.1` → `0.9.0`** — backtest **results change** for
+  margin-enabled and derived-quantity (`cash` / `percent_of_equity`)
+  strategies: the margin-call simulation now matches TradingView's broker
+  emulator exactly (worst-extreme evaluation and fill, lot-step-truncated ×4
+  liquidations, one-unit fallback, directional liquidation-price rounding),
+  and derived order quantities truncate to the symbol's lot step. Verified
+  against a 42-event TradingView margin-call ledger. See piner's 0.9.0
+  changelog for the full details; pass `--min-qty 0` to disable quantity
+  truncation.
+
+### Added
+
+- **Per-symbol instrument metadata** (`minQty` lot step + `mintick` tick size),
+  fetched from the provider's exchange rules and applied to every run
+  automatically:
+  - pinery: optional `HistoryProvider.instrument(symbol)` — implemented for
+    Binance (spot + USDⓈ-M futures `exchangeInfo`: `LOT_SIZE.stepSize`,
+    `PRICE_FILTER.tickSize`), OKX (`/public/instruments`; swap lot steps
+    convert via `ctVal` to base units), Kraken (`AssetPairs`), and the
+    equities providers (whole-share lots), plus `StaticProvider.setInstrument`
+    for tests. `cached()` caches instrument lookups on disk (daily-keyed).
+  - pinerun: every command (backtest/scan/sweep/walkforward/portfolio)
+    resolves the symbol's lot step and tick size before running — explicit
+    `--min-qty` / `--mintick` flags override, provider metadata fills the
+    gaps, piner defaults (0.001 / 0.01) remain the last resort. `--mintick`
+    previously parsed but was only honored by `portfolio`; it now applies
+    everywhere.
+
+  The lot step drives piner ≥0.9's TV-parity quantity truncation (derived
+  order sizes and margin-call liquidations truncate to the symbol's minimum
+  contract size), so per-symbol resolution keeps multi-symbol scans honest —
+  SOLUSDT perps trade in 0.01 steps, DOGE perps in whole contracts, spot BTC
+  in 1e-5.
+
 ## [0.1.2] - 2026-07-15
 
 ### Fixed
@@ -78,6 +116,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.2.0]: https://github.com/heyphat/pinestack/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/heyphat/pinestack/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/heyphat/pinestack/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/heyphat/pinestack/releases/tag/v0.1.0

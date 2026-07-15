@@ -26,6 +26,7 @@ import {
 import type { Job, JobMetricsOptions, Bar } from './job.js';
 import type { StrategySummary, StrategyTrade } from './result.js';
 import { resolveSecurity } from './security.js';
+import { resolveInstrument } from './instrument.js';
 import { alignEquity, returnCorrelation, type Sleeve } from './align.js';
 
 export interface PortfolioOptions {
@@ -45,6 +46,8 @@ export interface PortfolioOptions {
   inputs?: Record<string, unknown>;
   backend?: 'js' | 'interp';
   mintick?: number;
+  /** Lot-step override; unset → provider instrument metadata → piner default. */
+  minQty?: number;
   /** Fetch concurrency (default 4), as scan. */
   concurrency?: number;
   /** Host conventions for the portfolio metrics (periodsPerYear / riskFreeRate). */
@@ -125,13 +128,15 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
       const bars = await opts.provider.history(symbol, opts.timeframe, opts.range);
       if (bars.length === 0) throw new Error('no bars in range');
       opts.onFetch?.(symbol, bars.length);
+      const inst = await resolveInstrument(opts.provider, symbol, opts);
       slots[i] = {
         source: opts.source,
         symbol,
         timeframe: pinerTf,
         bars,
         inputs: opts.inputs,
-        mintick: opts.mintick,
+        mintick: inst.mintick,
+        minQty: inst.minQty,
         backend: opts.backend,
       };
     } catch (err) {
@@ -169,6 +174,7 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     symbol: j.symbol,
     timeframe: j.timeframe,
     mintick: j.mintick,
+    minQty: j.minQty,
     bars: toPinerBars(j.bars),
     securityBars: j.securityBars
       ? Object.fromEntries(Object.entries(j.securityBars).map(([k, v]) => [k, toPinerBars(v)]))

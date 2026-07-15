@@ -44,6 +44,7 @@ function canonical(job: Job): string {
     job.timeframe,
     job.backend ?? 'js',
     job.mintick ?? '',
+    job.minQty ?? '',
     job.bars.length,
     (d1 >>> 0).toString(16) + (d2 >>> 0).toString(16),
     inputs,

@@ -4,7 +4,7 @@
  * (Binance calls futures a `market: 'futures'`, OKX calls it `market: 'swap'`).
  * Unsupported pairs throw with a message naming the offending pair.
  */
-import type { Bar, HistoryProvider, HistoryRange } from './provider.js';
+import type { Bar, HistoryProvider, HistoryRange, InstrumentInfo } from './provider.js';
 import {
   coerceAssetClass,
   defaultAssetClassForProvider,
@@ -117,6 +117,18 @@ export class InstrumentRouter implements HistoryProvider {
       ? coerceAssetClass(parsed.assetClass, provider)
       : this.fallbackAssetClass;
     return this.providerFor(provider, assetClass).history(parsed.ticker, timeframe, range);
+  }
+
+  /** Route instrument metadata exactly like history(); undefined when the
+   *  target adapter has no instrument() of its own. */
+  async instrument(symbol: string): Promise<InstrumentInfo | undefined> {
+    const parsed = parseInstrumentAddress(symbol);
+    const provider = parsed.provider ?? this.fallbackProvider;
+    const assetClass = parsed.provider
+      ? coerceAssetClass(parsed.assetClass, provider)
+      : this.fallbackAssetClass;
+    const target = this.providerFor(provider, assetClass);
+    return target.instrument ? target.instrument(parsed.ticker) : undefined;
   }
 
   private providerFor(provider: DataProvider, assetClass: AssetClass): HistoryProvider {

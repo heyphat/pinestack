@@ -64,6 +64,21 @@ export MASSIVE_API_KEY=…                                # Massive
 `backtest` and `compare` are single runs, so they have no `--workers` /
 `--concurrency`.
 
+## Instrument metadata
+
+Each run resolves the symbol's exchange trading rules automatically —
+lot step and tick size — from the provider (Binance `exchangeInfo`, OKX
+`/public/instruments`, Kraken `AssetPairs`; equities are whole-share). The lot
+step is what the broker truncates derived order sizes and margin-call
+liquidation quantities to (TradingView parity), so multi-symbol scans get the
+right quantization per symbol (SOL perps 0.01, DOGE perps whole contracts, spot
+BTC 1e-5). Lookups ride the history cache (daily-keyed).
+
+| Flag            | Default                         | Description                                                            |
+| --------------- | ------------------------------- | ---------------------------------------------------------------------- |
+| `--min-qty <n>` | provider metadata, else `0.001` | Lot-step override — the broker's quantity truncation unit.             |
+| `--mintick <n>` | provider metadata, else `0.01`  | Tick-size override (`syminfo.mintick`, level rounding, slippage unit). |
+
 ## History cache
 
 pinerun caches fetched bars on disk so repeat runs are instant and offline.

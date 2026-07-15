@@ -5,7 +5,7 @@
  *
  * Canonical pinery timeframes map 1:1 onto Binance intervals.
  */
-import type { Bar } from '../provider.js';
+import type { Bar, InstrumentInfo } from '../provider.js';
 import { dropUnclosedBars, type HistoryProvider, type HistoryRange } from '../provider.js';
 import type { AssetClass } from '../asset-class.js';
 import { timeframeSeconds } from '../timeframe.js';
@@ -144,6 +144,48 @@ export class BinanceProvider implements HistoryProvider {
       label: `${this.id} /klines`,
       fetchImpl: this.fetchImpl,
     });
+  }
+
+  /** Per-instance memo of exchangeInfo lookups — a scan over N symbols fetches
+   *  the (unfiltered, ~MB-sized on futures) endpoint once, not N times. */
+  private instruments?: Promise<Map<string, InstrumentInfo>>;
+
+  /** LOT_SIZE.stepSize → minQty, PRICE_FILTER.tickSize → mintick, from
+   *  exchangeInfo. Spot supports a per-symbol query; USDⓈ-M futures does not,
+   *  so both markets fetch the full map once and answer from the memo. */
+  async instrument(symbol: string): Promise<InstrumentInfo | undefined> {
+    const sym = symbol.trim().toUpperCase().replace(/\//g, '');
+    this.instruments ??= this.fetchInstruments();
+    try {
+      return (await this.instruments).get(sym);
+    } catch (err) {
+      this.instruments = undefined; // don't memoize a transient failure
+      throw err;
+    }
+  }
+
+  private async fetchInstruments(): Promise<Map<string, InstrumentInfo>> {
+    const path = this.klinesPath.includes('/fapi/')
+      ? '/fapi/v1/exchangeInfo'
+      : '/api/v3/exchangeInfo';
+    const data = await fetchJson<{
+      symbols?: Array<{ symbol: string; filters?: Array<Record<string, string>> }>;
+    }>(new URL(path, this.baseUrl).toString(), {
+      label: `${this.id} /exchangeInfo`,
+      fetchImpl: this.fetchImpl,
+    });
+    const map = new Map<string, InstrumentInfo>();
+    for (const s of data.symbols ?? []) {
+      const lot = s.filters?.find((f) => f.filterType === 'LOT_SIZE');
+      const price = s.filters?.find((f) => f.filterType === 'PRICE_FILTER');
+      const minQty = lot ? Number(lot.stepSize) : NaN;
+      const mintick = price ? Number(price.tickSize) : NaN;
+      map.set(s.symbol, {
+        ...(Number.isFinite(minQty) && minQty > 0 ? { minQty } : {}),
+        ...(Number.isFinite(mintick) && mintick > 0 ? { mintick } : {}),
+      });
+    }
+    return map;
   }
 }
 

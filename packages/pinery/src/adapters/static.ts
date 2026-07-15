@@ -2,12 +2,13 @@
  * Static in-memory provider — for tests, offline replay, and fixtures. Keyed by
  * `symbol` (any timeframe) or the exact `symbol|timeframe` pair when present.
  */
-import type { Bar } from '../provider.js';
+import type { Bar, InstrumentInfo } from '../provider.js';
 import { applyRange, type HistoryProvider, type HistoryRange } from '../provider.js';
 
 export class StaticProvider implements HistoryProvider {
   readonly id = 'static';
   private readonly data = new Map<string, Bar[]>();
+  private readonly instruments = new Map<string, InstrumentInfo>();
 
   constructor(seed?: Record<string, Bar[]> | Map<string, Bar[]>) {
     if (seed) {
@@ -18,7 +19,10 @@ export class StaticProvider implements HistoryProvider {
 
   /** Register bars under a `symbol` or a specific `symbol|timeframe` key. */
   set(key: string, bars: Bar[]): this {
-    this.data.set(key, [...bars].sort((a, b) => a.time - b.time));
+    this.data.set(
+      key,
+      [...bars].sort((a, b) => a.time - b.time),
+    );
     return this;
   }
 
@@ -26,6 +30,16 @@ export class StaticProvider implements HistoryProvider {
     const bars = this.data.get(`${symbol}|${timeframe}`) ?? this.data.get(symbol);
     if (!bars) throw new Error(`static: no bars for "${symbol}" (${timeframe})`);
     return applyRange(bars, range);
+  }
+
+  /** Register instrument metadata for a symbol (tests / offline fixtures). */
+  setInstrument(symbol: string, info: InstrumentInfo): this {
+    this.instruments.set(symbol, info);
+    return this;
+  }
+
+  async instrument(symbol: string): Promise<InstrumentInfo | undefined> {
+    return this.instruments.get(symbol);
   }
 }
 

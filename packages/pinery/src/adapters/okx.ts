@@ -3,7 +3,7 @@
  * OKX v5 REST API. Pages newest→oldest using the `after` cursor, falling through
  * from /market/candles (recent, 300/page) to /market/history-candles (deep, 100/page).
  */
-import type { Bar } from '../provider.js';
+import type { Bar, InstrumentInfo } from '../provider.js';
 import {
   applyRange,
   dropUnclosedBars,
@@ -132,6 +132,30 @@ export class OkxProvider implements HistoryProvider {
       throw new Error(`okx ${path}: (${payload.code}) ${payload.msg ?? 'unknown error'}`);
     }
     return Array.isArray(payload?.data) ? (payload.data as OkxCandle[]) : [];
+  }
+
+  /** lotSz → minQty, tickSz → mintick from /public/instruments. SWAP quantities
+   *  are denominated in CONTRACTS; the engine sizes in base units, so the swap
+   *  lot step converts via the contract value: minQty = lotSz × ctVal. */
+  async instrument(symbol: string): Promise<InstrumentInfo | undefined> {
+    const instId = this.market === 'swap' ? normalizeOkxSwap(symbol) : normalizeOkxSpot(symbol);
+    const url = new URL('/api/v5/public/instruments', this.baseUrl);
+    url.searchParams.set('instType', this.market === 'swap' ? 'SWAP' : 'SPOT');
+    url.searchParams.set('instId', instId);
+    const payload = await fetchJson<{
+      code?: string;
+      data?: Array<{ lotSz?: string; tickSz?: string; ctVal?: string }>;
+    }>(url.toString(), { label: 'okx /public/instruments', fetchImpl: this.fetchImpl });
+    const row = payload?.data?.[0];
+    if (!row) return undefined;
+    const lotSz = Number(row.lotSz);
+    const ctVal = this.market === 'swap' ? Number(row.ctVal) : 1;
+    const tickSz = Number(row.tickSz);
+    const minQty = lotSz * (Number.isFinite(ctVal) && ctVal > 0 ? ctVal : 1);
+    return {
+      ...(Number.isFinite(minQty) && minQty > 0 ? { minQty } : {}),
+      ...(Number.isFinite(tickSz) && tickSz > 0 ? { mintick: tickSz } : {}),
+    };
   }
 }
 

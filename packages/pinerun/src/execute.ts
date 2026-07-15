@@ -61,6 +61,8 @@ export async function executeJob(job: Job): Promise<RunResult> {
     const engine = new Engine(compiled, new ArrayFeed(toPinerBars(job.bars)), {
       backend: job.backend ?? 'js',
       inputs: job.inputs,
+      // The symbol's lot step drives the broker's TV-parity quantity truncation.
+      strategy: job.minQty != null ? { minQty: job.minQty } : undefined,
     });
     // Inject host-fetched request.security bars (cross-symbol / lower-TF) before the run.
     if (job.securityBars) {

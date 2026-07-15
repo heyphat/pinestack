@@ -232,3 +232,84 @@ test('dropUnclosedBars trims only the still-forming tail', () => {
   expect(dropUnclosedBars(bars, '1h', 1_700_010_800)).toHaveLength(3); // exactly closed → kept
   expect(dropUnclosedBars([], '1h', nowSec)).toEqual([]);
 });
+
+// ── instrument() — per-symbol exchange trading rules ──────────────────────────
+
+test('BinanceProvider spot instrument: LOT_SIZE/PRICE_FILTER parsing + memoization', async () => {
+  const body = {
+    symbols: [
+      {
+        symbol: 'BTCUSDT',
+        filters: [
+          { filterType: 'LOT_SIZE', stepSize: '0.00001000' },
+          { filterType: 'PRICE_FILTER', tickSize: '0.01000000' },
+        ],
+      },
+    ],
+  };
+  const { fn, calls } = mockFetch([body]);
+  const p = new BinanceProvider({ market: 'spot', fetchImpl: fn });
+  expect(await p.instrument('btc/usdt')).toEqual({ minQty: 0.00001, mintick: 0.01 });
+  expect(calls[0]!.url).toContain('/api/v3/exchangeInfo');
+  // Second lookup answers from the per-instance memo — no extra fetch.
+  await p.instrument('BTCUSDT');
+  expect(calls.length).toBe(1);
+  // Unknown symbol → undefined, still no extra fetch.
+  expect(await p.instrument('NOPEUSDT')).toBeUndefined();
+  expect(calls.length).toBe(1);
+});
+
+test('BinanceProvider futures instrument: fapi endpoint, whole-contract steps', async () => {
+  const body = {
+    symbols: [
+      {
+        symbol: 'DOGEUSDT',
+        filters: [
+          { filterType: 'LOT_SIZE', stepSize: '1' },
+          { filterType: 'PRICE_FILTER', tickSize: '0.00001' },
+        ],
+      },
+    ],
+  };
+  const { fn, calls } = mockFetch([body]);
+  const p = new BinanceProvider({ market: 'futures', fetchImpl: fn });
+  expect(await p.instrument('DOGEUSDT')).toEqual({ minQty: 1, mintick: 0.00001 });
+  expect(calls[0]!.url).toContain('/fapi/v1/exchangeInfo');
+});
+
+test('OkxProvider spot instrument: lotSz/tickSz straight through', async () => {
+  const { fn, calls } = mockFetch([{ code: '0', data: [{ lotSz: '0.00000001', tickSz: '0.1' }] }]);
+  const p = new OkxProvider({ fetchImpl: fn });
+  expect(await p.instrument('BTC/USDT')).toEqual({ minQty: 0.00000001, mintick: 0.1 });
+  expect(calls[0]!.url).toContain('/api/v5/public/instruments');
+  expect(calls[0]!.url).toContain('instType=SPOT');
+  expect(calls[0]!.url).toContain('instId=BTC-USDT');
+});
+
+test('OkxProvider swap instrument: contract lots convert to base units via ctVal', async () => {
+  const { fn, calls } = mockFetch([
+    { code: '0', data: [{ lotSz: '1', tickSz: '0.1', ctVal: '0.0001' }] },
+  ]);
+  const p = new OkxProvider({ market: 'swap', fetchImpl: fn });
+  // 1 contract × 0.0001 BTC/contract = 0.0001 base units per lot step
+  expect(await p.instrument('BTCUSDT')).toEqual({ minQty: 0.0001, mintick: 0.1 });
+  expect(calls[0]!.url).toContain('instType=SWAP');
+});
+
+test('KrakenProvider instrument: lot_decimals → 10^-n, tick_size passthrough', async () => {
+  const { fn, calls } = mockFetch([
+    { error: [], result: { XXBTZUSD: { lot_decimals: 8, tick_size: '0.1' } } },
+  ]);
+  const p = new KrakenProvider({ fetchImpl: fn });
+  expect(await p.instrument('BTC/USD')).toEqual({ minQty: 1e-8, mintick: 0.1 });
+  expect(calls[0]!.url).toContain('/0/public/AssetPairs');
+});
+
+test('equities providers instrument: whole-share lots, one-cent tick, no HTTP', async () => {
+  const { fn, calls } = mockFetch([]);
+  const alpaca = new AlpacaProvider({ fetchImpl: fn });
+  const massive = new MassiveProvider({ fetchImpl: fn });
+  expect(await alpaca.instrument('TSLA')).toEqual({ minQty: 1, mintick: 0.01 });
+  expect(await massive.instrument('AAPL')).toEqual({ minQty: 1, mintick: 0.01 });
+  expect(calls.length).toBe(0); // static exchange rules — no credentials needed
+});

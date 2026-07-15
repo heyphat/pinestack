@@ -20,12 +20,25 @@ export interface HistoryRange {
   limit?: number;
 }
 
+/** Per-symbol instrument metadata — the exchange's trading rules for a symbol. */
+export interface InstrumentInfo {
+  /** Minimum order-quantity step (lot step / minimum contract size). Drives the
+   *  broker's TV-parity quantity truncation: derived order sizes and margin-call
+   *  liquidation quantities truncate to this step. */
+  minQty?: number;
+  /** Minimum price increment (tick size) — piner's `syminfo.mintick`. */
+  mintick?: number;
+}
+
 export interface HistoryProvider {
   /** Stable id used in cache keys and diagnostics (e.g. "binance", "static"). */
   readonly id: string;
   /** Asset class this instance serves; unset for class-agnostic providers (static). */
   readonly assetClass?: AssetClass;
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]>;
+  /** Optional: the symbol's exchange trading rules (lot step, tick size).
+   *  Providers that don't know return undefined; callers fall back to defaults. */
+  instrument?(symbol: string): Promise<InstrumentInfo | undefined>;
 }
 
 /**

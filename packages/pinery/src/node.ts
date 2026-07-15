@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Bar, HistoryProvider, HistoryRange } from './provider.js';
+import type { Bar, HistoryProvider, HistoryRange, InstrumentInfo } from './provider.js';
 
 export interface DiskCacheOptions {
   /** Cache directory. Default `.pinery-cache` under the current working directory. */
@@ -18,7 +18,7 @@ export interface DiskCacheOptions {
 /** Wrap a provider so identical (symbol, timeframe, range) requests are served from disk. */
 export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): HistoryProvider {
   const dir = opts.dir ?? join(process.cwd(), '.pinery-cache');
-  return {
+  const wrapped: HistoryProvider = {
     id: `${provider.id}+cache`,
     async history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
       const key = cacheKey(provider.id, symbol, timeframe, range);
@@ -36,6 +36,30 @@ export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): 
       return bars;
     },
   };
+  // Instrument metadata caches like an open-ended range: keyed by UTC day so
+  // exchange trading-rule changes surface within a day. Only exposed when the
+  // wrapped provider knows how to answer, so capability detection stays honest.
+  if (provider.instrument) {
+    wrapped.instrument = async (symbol: string): Promise<InstrumentInfo | undefined> => {
+      const day = new Date().toISOString().slice(0, 10);
+      const safeSym = symbol.replace(/[^a-zA-Z0-9]+/g, '_');
+      const file = join(dir, `${provider.id}_${safeSym}_instrument_${day}.json`);
+      if (!opts.refresh && existsSync(file)) {
+        try {
+          return JSON.parse(readFileSync(file, 'utf8')) as InstrumentInfo;
+        } catch {
+          // fall through on a corrupt entry
+        }
+      }
+      const info = await provider.instrument!(symbol);
+      if (info) {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(file, JSON.stringify(info));
+      }
+      return info;
+    };
+  }
+  return wrapped;
 }
 
 function cacheKey(

@@ -1,6 +1,6 @@
 {
   "name": "@heyphat/pinery",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Data layer for the piner engine: OHLCV history providers (Binance, static) + a Node on-disk cache. Implements piner's DataFeed contract.",
   "type": "module",
   "license": "AGPL-3.0-only",

@@ -9,6 +9,46 @@ README). The workspace packages run from TypeScript source and version in
 lockstep with the release tag; publishing the library to npm remains a possible
 follow-up.
 
+## [0.3.0] - 2026-07-19
+
+### Added
+
+- **CSV file provider** — run any command on local CSV files (exported exchange
+  data, vendor downloads, synthetic series) instead of a live provider:
+  - pinerun: `--provider csv --data-dir <dir>` serves every bare ticker from
+    the directory; `CSV:TICKER` instrument addresses pull individual symbols
+    from files inside a mixed universe (`CSV:AAPL,BI:BTCUSDT`). CSV history
+    bypasses the on-disk cache — the files are the storage. See the new
+    [`docs/csv-data.md`](./docs/csv-data.md) and the runnable sample data in
+    `examples/data/`.
+  - File layout: one `<SYMBOL>_<TF>.csv` per instrument (header
+    `time,open,high,low,close,volume`, order-independent; unix seconds/millis
+    or ISO times; RFC 4180-quoted fields accepted). A timeframe-less
+    `<SYMBOL>.csv` fallback serves any timeframe only after its median bar
+    spacing matches the request — wrong-resolution data errors instead of
+    silently backtesting. An optional `instruments.csv` sidecar
+    (`symbol,minQty,mintick`) supplies per-symbol lot step + tick size;
+    malformed values fail the run with their line number rather than silently
+    becoming defaults.
+  - pinery: `CsvProvider` behind `@heyphat/pinery/node` (browser-safe core
+    untouched); `csv` joins the provider registry with the `CSV:` address
+    prefix; `InstrumentRouter` accepts pre-built provider instances via the
+    new `providers` option.
+- **`request.security` degradation warnings.** A dependency that fails to
+  fetch still degrades to `na`/`[]` (one flaky dependency must not kill a
+  100-symbol scan), but the CLI now prints a stderr warning naming the
+  dependency and the underlying error instead of degrading silently — a
+  strategy condition reading an unexpectedly-`na` series is otherwise
+  invisible. Programmatic callers get an `onSecurityError` callback on
+  `scan` / `backtest` / `portfolio` / `sweep` / `walkforward`.
+
+### Changed
+
+- `barsFromCsv` is stricter and more capable: RFC 4180-quoted fields, UTF-8
+  BOM stripping, duplicate timestamps keep the last row (a re-export
+  overwrites instead of doubling bars), and a malformed cell throws with its
+  line number instead of producing NaN bars.
+
 ## [0.2.0] - 2026-07-15
 
 ### Changed (breaking)
@@ -116,6 +156,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.3.0]: https://github.com/heyphat/pinestack/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/heyphat/pinestack/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/heyphat/pinestack/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/heyphat/pinestack/compare/v0.1.0...v0.1.1

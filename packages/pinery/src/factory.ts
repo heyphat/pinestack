@@ -71,6 +71,14 @@ export function createProvider(
       return new AlpacaProvider({ keyId: apiKey, secretKey: apiSecret, feed, baseUrl, fetchImpl });
     case 'massive':
       return new MassiveProvider({ apiKey, baseUrl, fetchImpl });
+    case 'csv':
+      // The CSV adapter reads the filesystem, so it lives behind the Node-only
+      // entry and can't be constructed from this browser-safe module. Build it
+      // yourself and hand it to the router.
+      throw new Error(
+        'pinery: the "csv" provider is Node-only — construct a CsvProvider from ' +
+          '"@heyphat/pinery/node" and pass it via InstrumentRouterOptions.providers',
+      );
   }
 }
 
@@ -85,6 +93,13 @@ export interface InstrumentRouterOptions extends CreateProviderOptions {
    * ("binance-futures"), not the router's.
    */
   wrap?: (provider: HistoryProvider) => HistoryProvider;
+  /**
+   * Pre-built provider instances, keyed by provider name. A named provider is
+   * used as-is for every asset class — neither created via `createProvider`
+   * nor passed through `wrap`. This is how Node-only providers (csv) join the
+   * router from this browser-safe module.
+   */
+  providers?: Partial<Record<DataProvider, HistoryProvider>>;
 }
 
 /**
@@ -100,14 +115,16 @@ export class InstrumentRouter implements HistoryProvider {
   private readonly fallbackAssetClass: AssetClass;
   private readonly providerOpts: CreateProviderOptions;
   private readonly wrap: (provider: HistoryProvider) => HistoryProvider;
+  private readonly overrides: Partial<Record<DataProvider, HistoryProvider>>;
   private readonly pairs = new Map<string, HistoryProvider>();
 
   constructor(opts: InstrumentRouterOptions = {}) {
-    const { fallbackProvider, fallbackAssetClass, wrap, ...providerOpts } = opts;
+    const { fallbackProvider, fallbackAssetClass, wrap, providers, ...providerOpts } = opts;
     this.fallbackProvider = fallbackProvider ?? 'binance';
     this.fallbackAssetClass = coerceAssetClass(fallbackAssetClass, this.fallbackProvider);
     this.providerOpts = providerOpts;
     this.wrap = wrap ?? ((provider) => provider);
+    this.overrides = providers ?? {};
   }
 
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
@@ -132,6 +149,8 @@ export class InstrumentRouter implements HistoryProvider {
   }
 
   private providerFor(provider: DataProvider, assetClass: AssetClass): HistoryProvider {
+    const override = this.overrides[provider];
+    if (override) return override;
     const key = `${provider}|${assetClass}`;
     let instance = this.pairs.get(key);
     if (!instance) {

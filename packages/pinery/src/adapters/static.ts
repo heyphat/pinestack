@@ -44,14 +44,62 @@ export class StaticProvider implements HistoryProvider {
 }
 
 /**
+ * Split one CSV line into fields, honoring RFC 4180 quoting: a quoted field may
+ * contain commas, and `""` inside quotes is a literal quote — so vendor exports
+ * that quote every field (`"time","open",…`) parse the same as bare ones.
+ * Embedded newlines inside quoted fields are NOT supported (input is pre-split
+ * on newlines); OHLCV rows never need them. The quote-free fast path keeps the
+ * common case a plain split.
+ */
+export function splitCsvLine(line: string): string[] {
+  if (!line.includes('"')) return line.split(',');
+  const fields: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      fields.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  fields.push(cur);
+  return fields;
+}
+
+/**
  * Parse OHLCV rows from CSV text. Expects a header row containing the columns
  * `time,open,high,low,close,volume` (order-independent, extra columns ignored).
- * `time` may be unix seconds, unix millis (auto-detected), or an ISO string.
+ * Fields may be RFC 4180-quoted (see `splitCsvLine`). `time` is the bar OPEN
+ * time: unix seconds, unix millis (auto-detected), or an ISO string. Rows are
+ * sorted ascending; duplicate timestamps keep the last occurrence (a re-export
+ * overwrites, it does not double bars). A row with a missing/non-numeric OHLC
+ * cell throws with its line number — bad data in a backtest should fail loudly,
+ * not run on NaNs.
  */
 export function barsFromCsv(text: string): Bar[] {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return [];
-  const header = lines[0]!.split(',').map((h) => h.trim().toLowerCase());
+  const rows = text
+    .replace(/^\uFEFF/, '') // strip a UTF-8 BOM so the first header cell matches
+    .split(/\r?\n/)
+    .map((line, i) => ({ line, no: i + 1 }))
+    .filter((r) => r.line.trim().length > 0);
+  if (rows.length === 0) return [];
+  const header = splitCsvLine(rows[0]!.line).map((h) => h.trim().toLowerCase());
   const col = (name: string) => header.indexOf(name);
   const iTime = col('time');
   const iOpen = col('open');
@@ -62,27 +110,43 @@ export function barsFromCsv(text: string): Bar[] {
   if ([iTime, iOpen, iHigh, iLow, iClose].some((i) => i < 0)) {
     throw new Error('barsFromCsv: header must include time,open,high,low,close (volume optional)');
   }
-  const bars: Bar[] = [];
-  for (let r = 1; r < lines.length; r++) {
-    const cells = lines[r]!.split(',');
-    bars.push({
-      time: parseTime(cells[iTime]!.trim()),
-      open: Number(cells[iOpen]),
-      high: Number(cells[iHigh]),
-      low: Number(cells[iLow]),
-      close: Number(cells[iClose]),
-      volume: iVol >= 0 ? Number(cells[iVol]) : 0,
-    });
+  const byTime = new Map<number, Bar>();
+  for (let r = 1; r < rows.length; r++) {
+    const { line, no } = rows[r]!;
+    const cells = splitCsvLine(line);
+    const num = (i: number, name: string): number => {
+      const value = Number(cells[i] ?? '');
+      if (cells[i] == null || cells[i]!.trim() === '' || !Number.isFinite(value)) {
+        throw new Error(`barsFromCsv: line ${no}: bad ${name} "${cells[i] ?? ''}"`);
+      }
+      return value;
+    };
+    const rawTime = cells[iTime];
+    if (rawTime == null || rawTime.trim() === '') {
+      throw new Error(`barsFromCsv: line ${no}: missing time`);
+    }
+    const bar: Bar = {
+      time: parseTime(rawTime.trim(), no),
+      open: num(iOpen, 'open'),
+      high: num(iHigh, 'high'),
+      low: num(iLow, 'low'),
+      close: num(iClose, 'close'),
+      volume: iVol >= 0 ? num(iVol, 'volume') : 0,
+    };
+    byTime.set(bar.time, bar);
   }
-  return bars.sort((a, b) => a.time - b.time);
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
 }
 
-function parseTime(raw: string): number {
+function parseTime(raw: string, lineNo?: number): number {
   if (/^\d+$/.test(raw)) {
     const n = Number(raw);
     return n > 1e11 ? Math.floor(n / 1000) : n; // millis vs seconds heuristic
   }
   const ms = Date.parse(raw);
-  if (Number.isNaN(ms)) throw new Error(`barsFromCsv: bad time "${raw}"`);
+  if (Number.isNaN(ms)) {
+    const at = lineNo != null ? `line ${lineNo}: ` : '';
+    throw new Error(`barsFromCsv: ${at}bad time "${raw}"`);
+  }
   return Math.floor(ms / 1000);
 }

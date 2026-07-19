@@ -56,6 +56,8 @@ export interface PortfolioOptions {
   resolveSecurity?: boolean;
   onFetch?: (symbol: string, bars: number) => void;
   onFetchError?: (symbol: string, error: string) => void;
+  /** A request.security dependency failed to fetch; its series degrades to na/[]. */
+  onSecurityError?: (label: string, error: string) => void;
 }
 
 export interface SleeveContribution {
@@ -157,6 +159,7 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
       mintick: opts.mintick,
       concurrency: fetchConcurrency,
       onFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+      onError: opts.onSecurityError,
     });
   }
 

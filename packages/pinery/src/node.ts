@@ -1,12 +1,15 @@
 /**
- * @heyphat/pinery/node — Node-only additions. Currently a fetch-once/replay-many
- * on-disk cache so scans and sweeps don't re-hit provider APIs. Never bundled
- * into the browser build.
+ * @heyphat/pinery/node — Node-only additions: a fetch-once/replay-many on-disk
+ * cache so scans and sweeps don't re-hit provider APIs, and the CSV file
+ * provider for backtests on exported/offline data. Never bundled into the
+ * browser build.
  */
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Bar, HistoryProvider, HistoryRange, InstrumentInfo } from './provider.js';
+
+export { CsvProvider, type CsvProviderOptions } from './adapters/csv.js';
 
 export interface DiskCacheOptions {
   /** Cache directory. Default `.pinery-cache` under the current working directory. */

@@ -40,6 +40,8 @@ export interface ScanOptions {
   onResult?: (result: RunResult, done: number, total: number) => void;
   onFetch?: (symbol: string, bars: number) => void;
   onFetchError?: (symbol: string, error: string) => void;
+  /** A request.security dependency failed to fetch; its series degrades to na/[]. */
+  onSecurityError?: (label: string, error: string) => void;
 }
 
 export interface ScanReport {
@@ -105,6 +107,7 @@ export async function scan(opts: ScanOptions): Promise<ScanReport> {
       mintick: opts.mintick,
       concurrency: fetchConcurrency,
       onFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+      onError: opts.onSecurityError,
     });
   }
 

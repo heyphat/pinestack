@@ -7,14 +7,15 @@ these appear as "(as scan)".
 
 ## Data source
 
-| Flag                  | Default          | Description                                                                                                    |
-| --------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------- |
-| `--tf <tf>`           | `1h`             | Timeframe. One of `1m 5m 15m 1h 4h 1d 1w` (and the other canonical steps).                                     |
-| `--from <date>`       | —                | Start of history. ISO date (`2024-01-01`) or unix seconds.                                                     |
-| `--to <date>`         | —                | End of history. ISO date or unix seconds.                                                                      |
-| `--limit <n>`         | —                | Max bars to fetch (per symbol).                                                                                |
-| `--provider <p>`      | `binance`        | Data provider: `binance`, `okx`, `kraken`, `alpaca`, `massive`. Legacy aliases: `binance-futures`, `okx-swap`. |
-| `--asset-class <cls>` | provider default | For providers that serve more than one class (`binance`/`okx`: `crypto` \| `futures`).                         |
+| Flag                  | Default          | Description                                                                                                           |
+| --------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `--tf <tf>`           | `1h`             | Timeframe. One of `1m 5m 15m 1h 4h 1d 1w` (and the other canonical steps).                                            |
+| `--from <date>`       | —                | Start of history. ISO date (`2024-01-01`) or unix seconds.                                                            |
+| `--to <date>`         | —                | End of history. ISO date or unix seconds.                                                                             |
+| `--limit <n>`         | —                | Max bars to fetch (per symbol).                                                                                       |
+| `--provider <p>`      | `binance`        | Data provider: `binance`, `okx`, `kraken`, `alpaca`, `massive`, `csv`. Legacy aliases: `binance-futures`, `okx-swap`. |
+| `--asset-class <cls>` | provider default | For providers that serve more than one class (`binance`/`okx`: `crypto` \| `futures`).                                |
+| `--data-dir <dir>`    | —                | Directory of local CSV history for `--provider csv` / `CSV:` symbols — see [CSV data files](./csv-data.md).           |
 
 Give history as either an explicit range (`--from`/`--to`) or a bar count
 (`--limit`), or both. With no range, providers return their most recent bars.
@@ -29,11 +30,16 @@ A symbol can be a bare ticker (`BTCUSDT`) resolved against `--provider` /
 PREFIX[:CODE]:TICKER
 ```
 
-- **Prefixes:** `BI` binance · `OK` okx · `KR` kraken · `AL` alpaca · `MA` massive
+- **Prefixes:** `BI` binance · `OK` okx · `KR` kraken · `AL` alpaca · `MA` massive · `CSV` local files
 - **Codes:** `EQ` equity · `CR` crypto · `FU` futures · `FX` fx
 
 Examples: `BI:FU:BTCUSDT` (binance futures), `KR:BTC/USD` (kraken), `AL:AAPL`
-(alpaca equity).
+(alpaca equity), `CSV:AAPL` (local [CSV file](./csv-data.md), needs `--data-dir`).
+
+The same rules apply to cross-symbol `request.security` dependencies inside a
+script: a bare ticker there resolves against `--provider`, not the chart
+symbol's provider. In a mixed universe, qualify it —
+`request.security("CSV:MSFT", …)`.
 
 ### Credentials (equities providers — Alpaca / Massive)
 
@@ -68,7 +74,8 @@ export MASSIVE_API_KEY=…                                # Massive
 
 Each run resolves the symbol's exchange trading rules automatically —
 lot step and tick size — from the provider (Binance `exchangeInfo`, OKX
-`/public/instruments`, Kraken `AssetPairs`; equities are whole-share). The lot
+`/public/instruments`, Kraken `AssetPairs`; equities are whole-share; csv reads
+an optional [`instruments.csv` sidecar](./csv-data.md#instrument-metadata)). The lot
 step is what the broker truncates derived order sizes and margin-call
 liquidation quantities to (TradingView parity), so multi-symbol scans get the
 right quantization per symbol (SOL perps 0.01, DOGE perps whole contracts, spot

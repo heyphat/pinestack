@@ -13,9 +13,9 @@ export type AssetClass = 'equities' | 'crypto' | 'futures' | 'forex';
 export const ASSET_CLASSES = ['equities', 'crypto', 'futures', 'forex'] as const;
 
 /** The data providers pinery ships adapters for. */
-export type DataProvider = 'binance' | 'okx' | 'kraken' | 'alpaca' | 'massive';
+export type DataProvider = 'binance' | 'okx' | 'kraken' | 'alpaca' | 'massive' | 'csv';
 
-export const DATA_PROVIDERS = ['binance', 'okx', 'kraken', 'alpaca', 'massive'] as const;
+export const DATA_PROVIDERS = ['binance', 'okx', 'kraken', 'alpaca', 'massive', 'csv'] as const;
 
 export interface ProviderAssetClassDeclaration {
   /** Used when a caller names this provider but no asset class. */
@@ -27,7 +27,9 @@ export interface ProviderAssetClassDeclaration {
 /**
  * Which asset classes each provider serves, per the adapters that exist today:
  * Binance spot/futures klines, OKX spot/swap candles, Kraken spot OHLC,
- * Alpaca + Massive US equities.
+ * Alpaca + Massive US equities. Local CSV files can hold anything, so `csv`
+ * serves every class (the default is nominal — asset class does not change how
+ * a file is read).
  */
 export const ASSET_CLASS_REGISTRY: Record<DataProvider, ProviderAssetClassDeclaration> = {
   binance: { defaultAssetClass: 'crypto', assetClasses: ['crypto', 'futures'] },
@@ -35,6 +37,7 @@ export const ASSET_CLASS_REGISTRY: Record<DataProvider, ProviderAssetClassDeclar
   kraken: { defaultAssetClass: 'crypto', assetClasses: ['crypto'] },
   alpaca: { defaultAssetClass: 'equities', assetClasses: ['equities'] },
   massive: { defaultAssetClass: 'equities', assetClasses: ['equities'] },
+  csv: { defaultAssetClass: 'crypto', assetClasses: ['crypto', 'futures', 'equities', 'forex'] },
 };
 
 export function isDataProvider(value: unknown): value is DataProvider {
@@ -81,6 +84,7 @@ const PROVIDER_PREFIXES: Record<string, DataProvider> = {
   KR: 'kraken',
   AL: 'alpaca',
   MA: 'massive',
+  CSV: 'csv',
 };
 
 const ASSET_CLASS_CODES = {
@@ -95,6 +99,7 @@ export function providerPrefix(provider: DataProvider): string {
   if (provider === 'okx') return 'OK';
   if (provider === 'kraken') return 'KR';
   if (provider === 'alpaca') return 'AL';
+  if (provider === 'csv') return 'CSV';
   return 'MA';
 }
 

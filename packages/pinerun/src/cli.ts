@@ -19,7 +19,7 @@ import {
   type HistoryProvider,
   type HistoryRange,
 } from '@heyphat/pinery';
-import { cached } from '@heyphat/pinery/node';
+import { cached, CsvProvider } from '@heyphat/pinery/node';
 import { scan, type ScanReport } from './index.js';
 import { LocalRunner, parseRankSpec, rankResults, selectPlot, type Runner } from './index.js';
 import { sweep, parseAxes, assertComboBudget, validateAxes, type SweepReport } from './index.js';
@@ -217,6 +217,7 @@ async function runScan(args: string[]): Promise<void> {
       runner,
       onResult: progress.onResult,
       onFetchError: (symbol, error) => console.error(`  fetch failed: ${symbol} — ${error}`),
+      onSecurityError: warnSecurityError,
     });
   } finally {
     progress.finish();
@@ -375,6 +376,7 @@ async function runBacktest(args: string[]): Promise<void> {
     minQty: opts.getNum('min-qty'),
     metrics,
     resolveSecurity,
+    onSecurityError: warnSecurityError,
   });
   const elapsed = Date.now() - started;
 
@@ -466,6 +468,7 @@ async function runCompare(args: string[]): Promise<void> {
       backend,
       metrics,
       resolveSecurity,
+      onSecurityError: warnSecurityError,
     });
   const repA = await run(sourceA, inputsA);
   const repB = await run(sourceB, inputsB);
@@ -856,6 +859,7 @@ async function runPortfolio(args: string[]): Promise<void> {
       concurrency: opts.getNum('concurrency'),
       metrics,
       resolveSecurity: !opts.has('no-security'),
+      onSecurityError: warnSecurityError,
     });
   } catch (err) {
     fail(`portfolio: ${err instanceof Error ? err.message : String(err)}`);
@@ -1141,6 +1145,7 @@ async function runSweep(args: string[]): Promise<void> {
       includeTrades,
       metrics,
       resolveSecurity,
+      onSecurityError: warnSecurityError,
       maxCombos,
       sample,
       seed,
@@ -1302,6 +1307,7 @@ async function runWalkforward(args: string[]): Promise<void> {
       minQty: opts.getNum('min-qty'),
       metrics,
       resolveSecurity,
+      onSecurityError: warnSecurityError,
       maxCombos,
       runner,
     });
@@ -1657,6 +1663,21 @@ function printFooters(report: ScanReport, rank: string, elapsedMs: number): void
 
 // ── provider / runner wiring ────────────────────────────────
 
+/**
+ * Report a request.security dependency that failed to fetch — its series runs
+ * as na/[] (deliberate: one flaky dependency must not kill a whole scan), which
+ * can silently disable strategy conditions, so it must be visible. Deduped by
+ * label so windowed commands (walkforward) don't repeat themselves.
+ */
+const warnedSecurityLabels = new Set<string>();
+function warnSecurityError(label: string, error: string): void {
+  if (warnedSecurityLabels.has(label)) return;
+  warnedSecurityLabels.add(label);
+  console.error(
+    `  warning: request.security ${label} unavailable — series degrades to na (${error})`,
+  );
+}
+
 /** Legacy compound provider names, kept so existing invocations don't break. */
 const LEGACY_PROVIDER_NAMES: Record<string, { provider: DataProvider; assetClass: AssetClass }> = {
   'binance-futures': { provider: 'binance', assetClass: 'futures' },
@@ -1669,9 +1690,13 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
   const provider = legacy?.provider ?? name;
   if (!isDataProvider(provider)) {
     fail(
-      `unknown provider "${name}" (binance, okx, kraken, alpaca, massive; ` +
+      `unknown provider "${name}" (binance, okx, kraken, alpaca, massive, csv; ` +
         `legacy: binance-futures, okx-swap)`,
     );
+  }
+  const dataDir = opts.get('data-dir');
+  if (provider === 'csv' && dataDir == null) {
+    fail('--provider csv needs --data-dir <dir> (a directory of <SYMBOL>_<TF>.csv files)');
   }
   const requestedClass = legacy?.assetClass ?? opts.get('asset-class');
   if (
@@ -1684,8 +1709,12 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
     );
   }
   // Route per symbol: a symbol may be a full instrument address (BI:FU:BTCUSDT,
-  // KR:BTC/USD) that overrides the flags; bare tickers use --provider/--asset-class.
-  // The cache wraps each routed provider so keys stay on real provider ids.
+  // KR:BTC/USD, CSV:AAPL) that overrides the flags; bare tickers use
+  // --provider/--asset-class. The cache wraps each routed provider so keys stay
+  // on real provider ids. The csv provider is injected pre-built (it is Node-only
+  // and reads local files, so the disk cache would only duplicate them); without
+  // --data-dir the injected stub turns a stray CSV: address into a flag hint
+  // instead of pinery's library-level error.
   const { apiKey, apiSecret } = resolveCredentials(opts);
   return new InstrumentRouter({
     fallbackProvider: provider,
@@ -1693,6 +1722,17 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
     apiKey,
     apiSecret,
     feed: opts.get('feed') === 'sip' ? 'sip' : 'iex',
+    providers: {
+      csv:
+        dataDir != null
+          ? new CsvProvider({ dir: dataDir })
+          : {
+              id: 'csv',
+              history: async (symbol: string) => {
+                throw new Error(`csv symbol "${symbol}" needs --data-dir <dir>`);
+              },
+            },
+    },
     wrap: opts.has('no-cache')
       ? undefined
       : (p) =>
@@ -1810,6 +1850,7 @@ const VALUE_KEYS = new Set([
   'backend',
   'provider',
   'asset-class',
+  'data-dir',
   'workers',
   'cache-dir',
   'feed',
@@ -1993,8 +2034,9 @@ INIT EXAMPLE
                           be a full instrument address PREFIX[:CODE]:TICKER that
                           overrides --provider/--asset-class per symbol, so one
                           scan can mix providers:
-                          BI:FU:BTCUSDT (binance futures), KR:BTC/USD, AL:AAPL
-                          (prefixes BI OK KR AL MA; codes EQ CR FU FX)
+                          BI:FU:BTCUSDT (binance futures), KR:BTC/USD, AL:AAPL,
+                          CSV:AAPL (local files, needs --data-dir)
+                          (prefixes BI OK KR AL MA CSV; codes EQ CR FU FX)
   --universe <file>     File of symbols (one per line; # comments allowed)
   --tf <1h>             Timeframe: 1m 5m 15m 1h 4h 1d 1w (default 1h)
   --from <date>         Start (ISO date or unix seconds)
@@ -2026,11 +2068,16 @@ INIT EXAMPLE
   --workers <n|local>   Worker threads (default = CPUs; "local" = in-process)
   --backend js|interp   piner backend (default js)
   --provider <name>     Data provider (default binance):
-                          binance | okx | kraken | alpaca | massive
+                          binance | okx | kraken | alpaca | massive | csv
                           (legacy aliases: binance-futures, okx-swap)
   --asset-class <cls>   Asset class, for providers that serve more than one
                           (binance/okx: crypto | futures; default: the
                           provider's default class)
+  --data-dir <dir>      Directory of local CSV history for --provider csv /
+                          CSV: symbols: one <SYMBOL>_<TF>.csv per instrument
+                          (e.g. BTCUSDT_1h.csv) with header
+                          time,open,high,low,close,volume; optional
+                          instruments.csv sidecar (symbol,minQty,mintick)
   CREDENTIALS (equities providers — Alpaca / Massive)
     Prefer environment variables — a key on the command line lands in shell
     history and process listings:
@@ -2071,7 +2118,7 @@ EXAMPLE
   --no-chart            Skip the in-terminal price/equity/drawdown charts and
                           the trade P/L histogram (the MONTHLY RETURNS and TOP
                           DRAWDOWNS tables always print)
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --mintick, --min-qty, --csv, --plot, --no-security, --no-cache,
   --cache-dir, --refresh, --json   (as scan)
@@ -2100,7 +2147,7 @@ BACKTEST EXAMPLE
   --input-b name=value  Fixed input override for script B (REPEATABLE)
   --label-a / --label-b Column/legend labels (default: the script filenames)
   --no-chart            Skip the equity overlay
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --no-security, --no-cache, --cache-dir, --refresh, --json   (as scan)
 
@@ -2134,7 +2181,7 @@ COMPARE EXAMPLES
                           CORRELATION matrix always print)
   --csv <dir>           portfolio-trades/equity.csv + per-sleeve CSVs
   --plot <dir>          portfolio.html + per-sleeve equity/drawdown charts
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --concurrency, --no-security, --no-cache, --cache-dir, --refresh,
   --json   (as scan)
@@ -2174,7 +2221,7 @@ PORTFOLIO EXAMPLE
                           strategy stats, error) — the whole optimization surface,
                           pandas-ready; cheap (no ledgers, unlike --csv)
   --tf, --from, --to, --limit, --rank, --top, --asc, --trades, --no-chart,
-  --concurrency, --workers, --backend, --provider, --asset-class, --api-key,
+  --concurrency, --workers, --backend, --provider, --asset-class, --data-dir, --api-key,
   --api-secret, --feed, --periods-per-year, --risk-free-rate, --csv, --plot,
   --no-security, --no-cache, --cache-dir, --refresh, --json   (as scan;
                           exports are per ranked combo, labeled <symbol>-<combo>;
@@ -2211,7 +2258,7 @@ SWEEP EXAMPLES
   --rank <spec>         Metric that picks each window's winner
                           (default strategy.netProfit)
   --tf, --from, --to, --limit, --concurrency, --workers, --backend, --provider,
-  --asset-class, --api-key, --api-secret, --feed, --periods-per-year,
+  --asset-class, --data-dir, --api-key, --api-secret, --feed, --periods-per-year,
   --risk-free-rate, --max-combos, --no-security, --no-cache, --cache-dir,
   --refresh, --json (as sweep)
 

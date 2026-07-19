@@ -34,6 +34,9 @@ flags in full and links there for the rest.
 - [**How the portfolio model works**](./portfolio-model.md) — capital models
   (isolated vs shared), the union clock, per-bar execution order, and the exact
   identities behind the `portfolio` numbers.
+- [**CSV data files**](./csv-data.md) — run any command on local CSV history
+  (`--provider csv --data-dir <dir>`, or `CSV:` symbols in a mixed universe):
+  file naming, row format, instrument-metadata sidecar.
 
 ## Typical flow
 

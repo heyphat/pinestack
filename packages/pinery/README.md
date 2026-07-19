@@ -140,6 +140,7 @@ toPinerTimeframe('1w'); // "W"
 | Alpaca   | `AlpacaProvider`  | US equities          | key id + secret | Market Data v2                      |
 | Massive  | `MassiveProvider` | US equities          | api key         | Polygon-compatible aggregates       |
 | —        | `StaticProvider`  | any                  | n/a             | in-memory / fixtures                |
+| —        | `CsvProvider`     | any                  | n/a             | local CSV files (`/node` entry)     |
 
 All network adapters accept an injectable `fetchImpl` (for tests) and return
 ascending `Bar[]` in unix seconds. Crypto symbols are normalized to each
@@ -417,6 +418,11 @@ changes surface within a day. `refresh: true` bypasses instrument reads as well.
 **`@heyphat/pinery/node`**
 
 - `cached`, `DiskCacheOptions`
+- `CsvProvider`, `CsvProviderOptions` — serve history from a directory of
+  `<SYMBOL>_<TF>.csv` files (header `time,open,high,low,close,volume`; optional
+  `instruments.csv` sidecar for lot step / tick size). Node-only because it
+  reads the filesystem; route it through `InstrumentRouter` via
+  `InstrumentRouterOptions.providers`.
 
 ## Writing a new provider
 

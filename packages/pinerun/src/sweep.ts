@@ -88,6 +88,8 @@ export interface SweepOptions {
   runner?: Runner;
   onResult?: (result: RunResult, done: number, total: number) => void;
   onFetch?: (symbol: string, bars: number) => void;
+  /** A request.security dependency failed to fetch; its series degrades to na/[]. */
+  onSecurityError?: (label: string, error: string) => void;
 }
 
 /** One point in the sweep: a parameter combo, its run result, and its ranked value. */
@@ -314,6 +316,7 @@ export async function sweep(opts: SweepOptions): Promise<SweepReport> {
         mintick: opts.mintick,
         concurrency: fetchConcurrency,
         onFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+        onError: opts.onSecurityError,
       },
     );
     // A discovery run means some request.security argument is only known at

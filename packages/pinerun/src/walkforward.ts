@@ -68,6 +68,8 @@ export interface WalkforwardOptions {
   runner?: Runner;
   onWindow?: (done: number, total: number) => void;
   onFetch?: (symbol: string, bars: number) => void;
+  /** A request.security dependency failed to fetch; its series degrades to na/[]. */
+  onSecurityError?: (label: string, error: string) => void;
 }
 
 /** One window's bar-index plan (half-open ranges over the fetched series). */
@@ -244,6 +246,7 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
       metrics: opts.metrics,
       resolveSecurity: opts.resolveSecurity,
       maxCombos: opts.maxCombos,
+      onSecurityError: opts.onSecurityError,
       runner,
     });
     for (const warning of swept.warnings) {
@@ -284,6 +287,7 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
         backend: opts.backend,
         mintick: opts.mintick,
         concurrency: Math.max(1, opts.concurrency ?? 4),
+        onError: opts.onSecurityError,
       });
     }
     const result = await runner.run(job);

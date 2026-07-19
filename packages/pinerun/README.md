@@ -112,7 +112,7 @@ flowchart TB
   SCAN["scan() orchestrator"]
 
   SCAN -->|"1. fetch history per symbol<br/>(bounded concurrency)"| PINERY
-  PINERY["pinery HistoryProvider<br/>Binance / OKX / Kraken / Alpaca / Massive"]
+  PINERY["pinery HistoryProvider<br/>Binance / OKX / Kraken / Alpaca / Massive / CSV files"]
   PINERY <-->|"hit / miss"| DISK[("on-disk cache<br/>.pinery-cache")]
   PINERY -->|"Bar[]"| SCAN
 
@@ -508,9 +508,11 @@ string builder — only the CLI touches the filesystem.
 --workers <n|local>   Worker threads (default = CPUs; "local" = in-process)
 --backend js|interp   piner backend (default js)
 --provider binance    Data provider (default binance): binance | okx | kraken |
-                        alpaca | massive
+                        alpaca | massive | csv
 --asset-class <cls>   Asset class for multi-class providers (binance/okx:
                         crypto | futures; default: the provider's default)
+--data-dir <dir>      Local CSV history for --provider csv / CSV: symbols
+                        (one <SYMBOL>_<TF>.csv per instrument)
 --no-cache            Disable the on-disk history cache
 --no-security         Skip request.security resolution (cross-symbol / lower-TF
                         fetch + inject); those requests degrade to na

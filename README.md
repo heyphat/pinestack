@@ -90,7 +90,8 @@ pinestack/
     │   │       ├── kraken.ts      Kraken spot OHLC
     │   │       ├── alpaca.ts      Alpaca US-equities bars (key + secret)
     │   │       ├── massive.ts     Massive US-equities aggregates (api key)
-    │   │       └── static.ts      in-memory provider + barsFromCsv
+    │   │       ├── static.ts      in-memory provider + barsFromCsv
+    │   │       └── csv.ts         local CSV-file provider (Node-only, /node entry)
     │   └── README.md
     └── pinerun/              @heyphat/pinerun — orchestration layer
         ├── src/

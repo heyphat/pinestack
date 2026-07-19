@@ -69,7 +69,10 @@ export interface ClassifiedRequests {
   selfPlainRawTfs: string[];
 }
 
-export function classifyRequests(requests: SecurityRequest[], chartTf: Timeframe): ClassifiedRequests {
+export function classifyRequests(
+  requests: SecurityRequest[],
+  chartTf: Timeframe,
+): ClassifiedRequests {
   const crossHtf = new Set<string>();
   const crossLtfSeen = new Set<string>();
   const crossLtf: { symbol: string; rawTf: string }[] = [];
@@ -95,7 +98,12 @@ export function classifyRequests(requests: SecurityRequest[], chartTf: Timeframe
       crossHtf.add(r.symbol);
     }
   }
-  return { crossHtf: [...crossHtf], crossLtf, selfLtfRawTfs: [...selfLtf], selfPlainRawTfs: [...selfPlain] };
+  return {
+    crossHtf: [...crossHtf],
+    crossLtf,
+    selfLtfRawTfs: [...selfLtf],
+    selfPlainRawTfs: [...selfPlain],
+  };
 }
 
 /**
@@ -139,6 +147,11 @@ export interface ResolveSecurityOptions {
   mintick?: number;
   concurrency: number;
   onFetch?: (label: string, bars: number) => void;
+  /** A dependency fetch failed; its series degrades to na/[] in the run. The
+   *  degrade is deliberate (one flaky dependency must not kill a 100-symbol
+   *  scan) but must be VISIBLE — a strategy whose condition reads a silently-na
+   *  series produces plausible-looking, wrong results. */
+  onError?: (label: string, error: string) => void;
 }
 
 /**
@@ -147,7 +160,10 @@ export interface ResolveSecurityOptions {
  * symbol/timeframe couldn't be resolved statically) — the caller must then fall
  * back to a discovery run. An empty `deps` yields an empty (all-clear) plan.
  */
-export function planFromStatic(deps: SecurityDependency[], chartTf: Timeframe): ClassifiedRequests | null {
+export function planFromStatic(
+  deps: SecurityDependency[],
+  chartTf: Timeframe,
+): ClassifiedRequests | null {
   if (deps.some((d) => d.dynamic)) return null;
   const crossHtf = new Set<string>();
   const crossLtfSeen = new Set<string>();
@@ -166,12 +182,18 @@ export function planFromStatic(deps: SecurityDependency[], chartTf: Timeframe): 
         }
       }
     } else if (d.self) {
-      if (d.timeframe !== null && resolveSameSymbolFetchTf(d.timeframe, chartTf)) selfPlain.add(d.timeframe);
+      if (d.timeframe !== null && resolveSameSymbolFetchTf(d.timeframe, chartTf))
+        selfPlain.add(d.timeframe);
     } else if (d.symbol !== null) {
       crossHtf.add(d.symbol);
     }
   }
-  return { crossHtf: [...crossHtf], crossLtf, selfLtfRawTfs: [...selfLtf], selfPlainRawTfs: [...selfPlain] };
+  return {
+    crossHtf: [...crossHtf],
+    crossLtf,
+    selfLtfRawTfs: [...selfLtf],
+    selfPlainRawTfs: [...selfPlain],
+  };
 }
 
 /**
@@ -231,8 +253,9 @@ export async function resolveSecurity(
         shared[symbol] = bars;
         opts.onFetch?.(symbol, bars.length);
       }
-    } catch {
-      /* leave out → request resolves to na */
+    } catch (err) {
+      // leave out → request resolves to na (reported, never silent)
+      opts.onError?.(symbol, errorMessage(err));
     }
   });
   await mapLimit(cls.crossLtf, opts.concurrency, async ({ symbol, rawTf }) => {
@@ -244,8 +267,9 @@ export async function resolveSecurity(
         shared[`${symbol}@${rawTf}`] = bars;
         opts.onFetch?.(`${symbol}@${rawTf}`, bars.length);
       }
-    } catch {
-      /* leave out → request resolves to [] */
+    } catch (err) {
+      // leave out → request resolves to [] (reported, never silent)
+      opts.onError?.(`${symbol}@${rawTf}`, errorMessage(err));
     }
   });
 
@@ -254,7 +278,10 @@ export async function resolveSecurity(
   const selfCache = new Map<string, Bar[]>();
   const selfPlan = [
     ...cls.selfLtfRawTfs.map((rawTf) => ({ rawTf, fetchTf: resolveLowerFetchTf(rawTf, chartTf) })),
-    ...cls.selfPlainRawTfs.map((rawTf) => ({ rawTf, fetchTf: resolveSameSymbolFetchTf(rawTf, chartTf) })),
+    ...cls.selfPlainRawTfs.map((rawTf) => ({
+      rawTf,
+      fetchTf: resolveSameSymbolFetchTf(rawTf, chartTf),
+    })),
   ].filter((e): e is { rawTf: string; fetchTf: Timeframe } => e.fetchTf !== null);
 
   if (selfPlan.length > 0) {
@@ -265,8 +292,9 @@ export async function resolveSecurity(
         if (!bars) {
           try {
             bars = await provider.history(job.symbol, fetchTf, opts.range);
-          } catch {
-            bars = [];
+          } catch (err) {
+            bars = []; // degrade, but say so
+            opts.onError?.(`${job.symbol}@${rawTf}`, errorMessage(err));
           }
           selfCache.set(cacheKey, bars);
         }
@@ -279,6 +307,10 @@ export async function resolveSecurity(
   }
 
   return { discovered };
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function mapLimit<T>(

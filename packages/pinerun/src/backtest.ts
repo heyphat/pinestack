@@ -35,6 +35,8 @@ export interface BacktestOptions {
   /** Resolve request.security dependencies (fetch + inject). Default true. */
   resolveSecurity?: boolean;
   onFetch?: (symbol: string, bars: number) => void;
+  /** A request.security dependency failed to fetch; its series degrades to na/[]. */
+  onSecurityError?: (label: string, error: string) => void;
 }
 
 export interface BacktestReport {
@@ -79,6 +81,7 @@ export async function backtest(opts: BacktestOptions): Promise<BacktestReport> {
       mintick: opts.mintick,
       concurrency: 4, // security fetches only — the run itself is a single job
       onFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+      onError: opts.onSecurityError,
     });
   }
 

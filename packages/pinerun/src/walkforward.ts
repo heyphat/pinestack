@@ -59,6 +59,9 @@ export interface WalkforwardOptions {
   mintick?: number;
   /** Lot-step override; unset → provider instrument metadata → piner default. */
   minQty?: number;
+  /** Override the script's calc_on_order_fills (TV's "After order is filled"
+   *  checkbox). Unset → the script's own flag. */
+  calcOnOrderFills?: boolean;
   /** Host conventions for the derived risk-adjusted metrics. */
   metrics?: JobMetricsOptions;
   /** Resolve request.security dependencies per window. Default true. */
@@ -243,6 +246,7 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
       backend: opts.backend,
       mintick: inst.mintick,
       minQty: inst.minQty,
+      calcOnOrderFills: opts.calcOnOrderFills,
       metrics: opts.metrics,
       resolveSecurity: opts.resolveSecurity,
       maxCombos: opts.maxCombos,
@@ -276,6 +280,7 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
       inputs: { ...opts.baseInputs, ...best.inputs },
       mintick: inst.mintick,
       minQty: inst.minQty,
+      calcOnOrderFills: opts.calcOnOrderFills,
       backend: opts.backend,
       metrics: opts.metrics,
       includeTrades: true,

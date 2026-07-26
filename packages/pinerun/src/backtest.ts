@@ -29,6 +29,9 @@ export interface BacktestOptions {
   mintick?: number;
   /** Lot-step override; unset → provider instrument metadata → piner default. */
   minQty?: number;
+  /** Override the script's calc_on_order_fills (TV's "After order is filled"
+   *  checkbox). Unset → the script's own flag. */
+  calcOnOrderFills?: boolean;
   backend?: 'js' | 'interp';
   /** Host conventions for the derived risk-adjusted metrics. */
   metrics?: JobMetricsOptions;
@@ -68,6 +71,7 @@ export async function backtest(opts: BacktestOptions): Promise<BacktestReport> {
     inputs: opts.inputs,
     mintick: inst.mintick,
     minQty: inst.minQty,
+    calcOnOrderFills: opts.calcOnOrderFills,
     backend: opts.backend,
     metrics: opts.metrics,
     includeTrades: true, // the whole point of a backtest is the full detail

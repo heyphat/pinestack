@@ -4,8 +4,18 @@
  * outputs into a serializable `RunResult`. Pure (piner-only, no I/O), so it runs
  * identically in-process (LocalRunner) or inside a worker.
  */
-import { compile, CompileError, Engine, ArrayFeed } from '@heyphat/piner';
-import type { CompiledScript } from '@heyphat/piner';
+import { compile, CompileError, Engine, ArrayFeed, StrategyBroker } from '@heyphat/piner';
+import type { CompiledScript, EngineOptions } from '@heyphat/piner';
+
+/**
+ * Does the loaded piner engine model calc_on_order_fills? Probed from a fresh
+ * broker's DEFAULT settings: a feature-capable engine initializes the field
+ * (`calcOnOrderFills: false`), piner ≤ 0.9.0 has no such key. Probing the
+ * default is load-bearing — configure() Object.assigns overrides into the
+ * settings, so a configured broker would show the key even on an engine that
+ * ignores it (Phase 3 audit, findings 1-2).
+ */
+const ENGINE_SUPPORTS_COOF = 'calcOnOrderFills' in new StrategyBroker().settings;
 import type { Job } from './job.js';
 import type { Bar } from './job.js';
 import { jobId } from './job.js';
@@ -57,12 +67,34 @@ export async function executeJob(job: Job): Promise<RunResult> {
     };
   }
 
+  // An explicit calc_on_order_fills override on an engine that ignores the
+  // field must fail loudly, not run once-per-bar under a distinct memo key
+  // while reporting the mode as active (Phase 3 audit, findings 1-2).
+  if (job.calcOnOrderFills != null && !ENGINE_SUPPORTS_COOF) {
+    return {
+      ...base,
+      error:
+        'calc_on_order_fills override: the loaded @heyphat/piner engine does not ' +
+        'model calc_on_order_fills (needs a release newer than 0.9.0) — remove ' +
+        'the override or upgrade the engine',
+      elapsedMs: Date.now() - started,
+    };
+  }
+
   try {
+    // Host overrides applied AFTER the strategy() header (piner: override wins).
+    // The extra-key cast drops once the @heyphat/piner peer dep ships
+    // calcOnOrderFills in StrategySettings (> 0.9.0); older engines carry the
+    // setting inertly.
+    const strategyOverride: Record<string, unknown> = {};
+    if (job.minQty != null) strategyOverride.minQty = job.minQty; // lot step → TV-parity qty truncation
+    if (job.calcOnOrderFills != null) strategyOverride.calcOnOrderFills = job.calcOnOrderFills;
     const engine = new Engine(compiled, new ArrayFeed(toPinerBars(job.bars)), {
       backend: job.backend ?? 'js',
       inputs: job.inputs,
-      // The symbol's lot step drives the broker's TV-parity quantity truncation.
-      strategy: job.minQty != null ? { minQty: job.minQty } : undefined,
+      strategy: Object.keys(strategyOverride).length
+        ? (strategyOverride as EngineOptions['strategy'])
+        : undefined,
     });
     // Inject host-fetched request.security bars (cross-symbol / lower-TF) before the run.
     if (job.securityBars) {
@@ -90,7 +122,14 @@ export async function executeJob(job: Job): Promise<RunResult> {
       const st = engine.ctx.strategy;
       const broker = engine.ctx.strategyBroker;
       const report = engine.strategy;
+      // Effective fill model, read from the ENGINE's post-configure settings —
+      // never from the requested configuration: an engine that ignores the
+      // field must not be reported as running it (Phase 3 audit, finding 2).
+      // On a capable engine this reflects header + override precedence; on
+      // piner ≤ 0.9.0 the key is absent (overrides were rejected above).
+      const effectiveCoof = (broker.settings as { calcOnOrderFills?: boolean }).calcOnOrderFills;
       strategy = {
+        calcOnOrderFills: effectiveCoof === true || undefined,
         initialCapital: st.initial_capital,
         netProfit: st.netprofit,
         netProfitPercent: st.netprofit_percent,

@@ -31,6 +31,7 @@ Plus shared flags — see [common options](./common-options.md):
 - **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
+- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills))
 - **Metrics:** `--periods-per-year` · `--risk-free-rate`
 - **Output:** `--json`
 

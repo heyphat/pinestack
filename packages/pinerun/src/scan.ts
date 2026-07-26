@@ -29,6 +29,9 @@ export interface ScanOptions {
   mintick?: number;
   /** Lot-step override; unset → provider instrument metadata → piner default. */
   minQty?: number;
+  /** Override the script's calc_on_order_fills (TV's "After order is filled"
+   *  checkbox). Unset → the script's own flag. */
+  calcOnOrderFills?: boolean;
   /** Attach the full trade ledger + equity curve to each result (strategies only). */
   includeTrades?: boolean;
   /** Host conventions for the derived risk-adjusted metrics (strategies only). */
@@ -86,6 +89,7 @@ export async function scan(opts: ScanOptions): Promise<ScanReport> {
         inputs: opts.inputs,
         mintick: inst.mintick,
         minQty: inst.minQty,
+        calcOnOrderFills: opts.calcOnOrderFills,
         backend: opts.backend,
         includeTrades: opts.includeTrades,
         metrics: opts.metrics,

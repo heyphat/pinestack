@@ -26,6 +26,14 @@ export interface Job {
    *  TV-parity quantity truncation (derived order sizes, margin-call
    *  liquidations). Unset → piner's default (0.001). */
   minQty?: number;
+  /** Override the strategy() declaration's `calc_on_order_fills` — TV's
+   *  "After order is filled" Properties checkbox. Changes fill results, so it
+   *  is part of the determinism key (hash.ts). Unset → the script's own flag.
+   *  Requires a piner engine that models the flag (> 0.9.0): executeJob
+   *  REJECTS an explicit override on an older engine (never runs it inertly
+   *  under a distinct memo key) — only a source-declared header flag stays
+   *  inert there, and it is then reported as inactive. */
+  calcOnOrderFills?: boolean;
   /** Which piner backend to use. Default 'js'. */
   backend?: 'js' | 'interp';
   /** Attach the full trade ledger + equity curve to the result (strategies only). */

@@ -45,6 +45,11 @@ function canonical(job: Job): string {
     job.backend ?? 'js',
     job.mintick ?? '',
     job.minQty ?? '',
+    // Engine-behavior override (TV's "After order is filled" checkbox): changes
+    // fill results, so it MUST key the memo — a sweep must never hand one
+    // variant the other's cached results. Source-declared flags need no entry
+    // here (the source string above already covers them).
+    job.calcOnOrderFills ?? '',
     job.bars.length,
     (d1 >>> 0).toString(16) + (d2 >>> 0).toString(16),
     inputs,

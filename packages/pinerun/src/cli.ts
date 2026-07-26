@@ -26,6 +26,7 @@ import { sweep, parseAxes, assertComboBudget, validateAxes, type SweepReport } f
 import { backtest } from './index.js';
 import { portfolio, type PortfolioReport } from './index.js';
 import { walkforward, type WalkforwardReport } from './index.js';
+import { parseTriStateFlag } from './flags.js';
 import type { RunResult, JobMetricsOptions, StrategyTrade } from './index.js';
 import {
   tradesToCsv,
@@ -211,6 +212,7 @@ async function runScan(args: string[]): Promise<void> {
       backend,
       mintick: opts.getNum('mintick'),
       minQty: opts.getNum('min-qty'),
+      calcOnOrderFills: coofOverride(opts),
       includeTrades,
       metrics,
       resolveSecurity,
@@ -337,6 +339,7 @@ async function runBacktest(args: string[]): Promise<void> {
         backend,
         mintick: opts.getNum('mintick'),
         minQty: opts.getNum('min-qty'),
+        calcOnOrderFills: coofOverride(opts),
         metrics,
         resolveSecurity,
       });
@@ -374,6 +377,7 @@ async function runBacktest(args: string[]): Promise<void> {
     backend,
     mintick: opts.getNum('mintick'),
     minQty: opts.getNum('min-qty'),
+    calcOnOrderFills: coofOverride(opts),
     metrics,
     resolveSecurity,
     onSecurityError: warnSecurityError,
@@ -719,6 +723,9 @@ function printTearsheet(
 
   console.log('');
   console.log(`  backtest: ${result.symbol} @ ${timeframe} — ${result.bars} bars${span}`);
+  // Multiple fills per bar read surprisingly in a trade list — say why upfront.
+  if (s.calcOnOrderFills)
+    console.log('  fill model: calc_on_order_fills (intrabar re-execution after each fill)');
   console.log('');
   console.log('  RETURNS');
   line('net profit', fmtNum(s.netProfit), fmtPct(s.netProfitPercent));
@@ -1142,6 +1149,7 @@ async function runSweep(args: string[]): Promise<void> {
       backend,
       mintick: opts.getNum('mintick'),
       minQty: opts.getNum('min-qty'),
+      calcOnOrderFills: coofOverride(opts),
       includeTrades,
       metrics,
       resolveSecurity,
@@ -1305,6 +1313,7 @@ async function runWalkforward(args: string[]): Promise<void> {
       backend,
       mintick: opts.getNum('mintick'),
       minQty: opts.getNum('min-qty'),
+      calcOnOrderFills: coofOverride(opts),
       metrics,
       resolveSecurity,
       onSecurityError: warnSecurityError,
@@ -1334,7 +1343,12 @@ async function runWalkforward(args: string[]): Promise<void> {
           oosBars: report.oosBars,
           // Full-window RunResults are heavy — keep JSON to the verdict per
           // window (the CLI table's data); rerun via backtest for one window's detail.
-          windows: report.windows.map(({ result: _result, ...w }) => w),
+          // Window RunResults are stripped for size, but the effective fill
+          // model must stay observable (Phase 3 audit §6): carry the marker.
+          windows: report.windows.map(({ result, ...w }) => ({
+            ...w,
+            calcOnOrderFills: result?.strategy?.calcOnOrderFills,
+          })),
           aggregate: report.aggregate,
           ...(report.warnings.length ? { warnings: report.warnings } : {}),
           elapsedMs: elapsed,
@@ -1809,6 +1823,26 @@ function safeFileName(s: string): string {
 }
 
 /** Host conventions for piner's derived risk-adjusted metrics, from CLI flags. */
+/** --calc-on-order-fills / --no-calc-on-order-fills (or =true|false): override
+ *  the script's calc_on_order_fills — TV's "After order is filled" Properties
+ *  checkbox. Absent → the script's own declaration decides. Joins the
+ *  determinism key (a sweep must never mix cached variants). `portfolio` takes
+ *  the flag from the script header only (the sleeve engine has no per-run
+ *  override channel yet). Rejected at run time when the loaded piner engine
+ *  does not model the flag (execute.ts capability check). */
+function coofOverride(opts: Args): boolean | undefined {
+  try {
+    return parseTriStateFlag(
+      opts.get('calc-on-order-fills'),
+      opts.has('calc-on-order-fills'),
+      opts.has('no-calc-on-order-fills'),
+      'calc-on-order-fills',
+    );
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+}
+
 function buildMetricsOpts(opts: Args): JobMetricsOptions | undefined {
   const periodsPerYear = opts.getNum('periods-per-year');
   const riskFreeRate = opts.getNum('risk-free-rate');
@@ -2095,6 +2129,13 @@ INIT EXAMPLE
                           quantities to this step (TV parity). Default: the
                           provider's exchange metadata (e.g. Binance LOT_SIZE
                           stepSize), else 0.001
+  --calc-on-order-fills / --no-calc-on-order-fills
+                        Override the script's calc_on_order_fills (TV's
+                          "After order is filled" checkbox): intrabar
+                          re-execution after each broker fill. Absent → the
+                          strategy() declaration decides. Needs a piner engine
+                          that models the flag; portfolio takes it from the
+                          script header only
   --no-security         Skip request.security dependency resolution (cross-symbol
                           / lower-TF fetch + inject); those requests degrade to na
   --no-cache            Disable the on-disk history cache
@@ -2120,8 +2161,8 @@ EXAMPLE
                           DRAWDOWNS tables always print)
   --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
-  --mintick, --min-qty, --csv, --plot, --no-security, --no-cache,
-  --cache-dir, --refresh, --json   (as scan)
+  --mintick, --min-qty, --calc-on-order-fills / --no-calc-on-order-fills, --csv,
+  --plot, --no-security, --no-cache, --cache-dir, --refresh, --json   (as scan)
 
   Prints a full tearsheet: returns (net/gross, buy & hold, CAGR), risk (drawdown,
   volatility, Sharpe/Sortino/Calmar, exposure), and trade quality (win rate,
@@ -2222,7 +2263,8 @@ PORTFOLIO EXAMPLE
                           pandas-ready; cheap (no ledgers, unlike --csv)
   --tf, --from, --to, --limit, --rank, --top, --asc, --trades, --no-chart,
   --concurrency, --workers, --backend, --provider, --asset-class, --data-dir, --api-key,
-  --api-secret, --feed, --periods-per-year, --risk-free-rate, --csv, --plot,
+  --api-secret, --feed, --periods-per-year, --risk-free-rate, --mintick, --min-qty,
+  --calc-on-order-fills / --no-calc-on-order-fills, --csv, --plot,
   --no-security, --no-cache, --cache-dir, --refresh, --json   (as scan;
                           exports are per ranked combo, labeled <symbol>-<combo>;
                           with --trades the table gains an EQUITY sparkline and
@@ -2259,8 +2301,9 @@ SWEEP EXAMPLES
                           (default strategy.netProfit)
   --tf, --from, --to, --limit, --concurrency, --workers, --backend, --provider,
   --asset-class, --data-dir, --api-key, --api-secret, --feed, --periods-per-year,
-  --risk-free-rate, --max-combos, --no-security, --no-cache, --cache-dir,
-  --refresh, --json (as sweep)
+  --risk-free-rate, --max-combos, --mintick, --min-qty,
+  --calc-on-order-fills / --no-calc-on-order-fills, --no-security, --no-cache,
+  --cache-dir, --refresh, --json (as sweep)
 
   Each window sweeps the grid on the in-sample segment, picks the winner by
   --rank, then measures that winner on the following out-of-sample segment

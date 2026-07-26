@@ -9,6 +9,42 @@ README). The workspace packages run from TypeScript source and version in
 lockstep with the release tag; publishing the library to npm remains a possible
 follow-up.
 
+## [0.4.0] - 2026-07-26
+
+### Added
+
+- **`--calc-on-order-fills` / `--no-calc-on-order-fills`** on `backtest`,
+  `scan`, `sweep`, and `walkforward` — override the script's
+  `calc_on_order_fills` declaration (TradingView's "After order is filled"
+  Properties checkbox) without editing the source. Tri-state: absent → the
+  `strategy()` header decides; `true`/`false` force it either way (also
+  `--calc-on-order-fills=true|false`). Walk-forward applies the override to
+  both the in-sample sweeps and each window's winner run. `portfolio` has no
+  host override — the script header still applies there. Programmatic
+  equivalents: `calcOnOrderFills` on `Job`, `BacktestOptions`, `ScanOptions`,
+  `SweepOptions`, and `WalkforwardOptions`; the override joins the
+  determinism key, so sweep/scan variants never share memoized results.
+  Requires `@heyphat/piner` ≥ 0.10.0 (the engine that models the flag) — on
+  an older engine an explicit override **fails with an actionable error**
+  rather than running inertly; a source-declared header flag still runs
+  (ignored) but is never reported as active. See
+  [`docs/common-options.md`](./docs/common-options.md#fill-model--calc_on_order_fills).
+- **Effective fill-model reporting** — `strategy.calcOnOrderFills` in JSON
+  results and a `fill model: calc_on_order_fills` tearsheet line, read from
+  the engine's actual state (never the requested configuration); walk-forward
+  `--json` carries the marker per window as `calcOnOrderFills`. `portfolio`
+  results intentionally carry no fill-model marker.
+
+### Changed
+
+- **`@heyphat/piner` pinned to 0.10.0** (was 0.9.0), and `@heyphat/pinerun`'s
+  peer dependency floor is now `>=0.10.0`. piner 0.10.0 brings the
+  TV-parity `calc_on_order_fills` engine (path-point fill model verified
+  fill-for-fill and excursion-for-excursion against a TradingView export)
+  plus chronological account marks, exposure-interval margin, and per-pass
+  risk timing — see piner's 0.10.0 changelog. Flag-off backtest results are
+  unchanged.
+
 ## [0.3.0] - 2026-07-19
 
 ### Added
@@ -156,6 +192,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.4.0]: https://github.com/heyphat/pinestack/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/heyphat/pinestack/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/heyphat/pinestack/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/heyphat/pinestack/compare/v0.1.1...v0.1.2

@@ -23,6 +23,12 @@ export interface AlertResult {
 /** Strategy performance metrics, sourced directly from piner's broker (the same
  *  values a Pine script reads via the `strategy.*` namespace / TradingView reports). */
 export interface StrategySummary {
+  /** Set (true) only when the ENGINE actually ran calc_on_order_fills — read
+   *  from the broker's effective settings, never from the requested
+   *  configuration (an engine that ignores the field is never reported as
+   *  running it). Intrabar re-execution can fill several times per bar, which
+   *  reads surprisingly in a trade list without this marker. */
+  calcOnOrderFills?: boolean;
   initialCapital: number;
   netProfit: number;
   netProfitPercent: number;

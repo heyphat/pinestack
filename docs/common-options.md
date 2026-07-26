@@ -86,6 +86,47 @@ BTC 1e-5). Lookups ride the history cache (daily-keyed).
 | `--min-qty <n>` | provider metadata, else `0.001` | Lot-step override — the broker's quantity truncation unit.             |
 | `--mintick <n>` | provider metadata, else `0.01`  | Tick-size override (`syminfo.mintick`, level rounding, slippage unit). |
 
+## Fill model — `calc_on_order_fills`
+
+Pine's `strategy(calc_on_order_fills = true)` re-executes a strategy after
+each order fill on **historical** bars — the broker walks each bar's intrabar
+path and a script can fill several times per bar (TradingView's "After order
+is filled" Properties checkbox). The host override mirrors that checkbox
+without editing the script:
+
+| Flag                          | Default                | Description                                       |
+| ----------------------------- | ---------------------- | ------------------------------------------------- |
+| `--calc-on-order-fills`       | script header decides  | Force fill-triggered recalculation ON (`=true`).  |
+| `--no-calc-on-order-fills`    | script header decides  | Force it OFF (`=false` also works).               |
+
+Semantics and caveats:
+
+- **Tri-state.** Absent → the script's own `strategy()` declaration decides;
+  `true`/`false` override the header either way. The override joins the
+  determinism cache key, so sweep/scan variants never share memoized results.
+- **Commands.** Supported on `backtest`, `scan`, `sweep`, and `walkforward`
+  (the walk-forward in-sample search and winner run use the same setting).
+  **`portfolio` has no host override** — the script header still applies
+  there. Programmatic equivalents: the `calcOnOrderFills` field on
+  `BacktestOptions`, `ScanOptions`, `SweepOptions`, `WalkforwardOptions`,
+  and `Job`.
+- **Historical only.** The flag models TradingView's historical intrabar
+  fill points; there is no realtime/tick execution in pinerun.
+- **Engine requirement.** Needs a `@heyphat/piner` release newer than 0.9.0
+  (the historical `calc_on_order_fills` engine). On an older engine the
+  override is **rejected with an error** rather than silently ignored — and
+  a source-declared header flag runs (inertly) but is never reported as
+  active.
+- **Reporting.** The effective mode — read from the engine's actual state,
+  never from the requested configuration — appears as
+  `strategy.calcOnOrderFills` in JSON results (backtest/scan/sweep results;
+  walk-forward JSON carries it per window as `calcOnOrderFills`) and as a
+  `fill model: calc_on_order_fills` line in the backtest tearsheet, since a
+  multiple-fills-per-bar trade list reads surprisingly without it.
+  **`portfolio` results carry no fill-model marker** — the command has no
+  host override channel; a source-declared flag still executes on a capable
+  engine but is not surfaced in the portfolio summary.
+
 ## History cache
 
 pinerun caches fetched bars on disk so repeat runs are instant and offline.

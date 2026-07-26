@@ -199,6 +199,11 @@ interface Job {
   //                  truncation unit for derived order sizes and margin-call
   //                  liquidations (default 0.001)
   backend?: 'js' | 'interp'; // piner backend (default 'js')
+  calcOnOrderFills?: boolean; // override the script's calc_on_order_fills
+  //                  (TV "After order is filled"): true/false force it, unset
+  //                  keeps the source header. Part of the determinism key.
+  //                  Needs @heyphat/piner > 0.9.0 — an explicit override on an
+  //                  older engine REJECTS the job with an actionable error
 }
 ```
 
@@ -228,6 +233,9 @@ interface RunResult {
 
 interface StrategySummary {
   // sourced directly from piner's broker
+  calcOnOrderFills?: boolean; // true ONLY when the engine actually ran
+  //                  calc_on_order_fills (read from effective broker state,
+  //                  never the requested configuration); omitted when off
   initialCapital: number;
   netProfit: number;
   netProfitPercent: number;
@@ -288,7 +296,7 @@ or inside a worker. Compile errors and runtime errors are captured into
 ### `jobHash(job) → string`
 
 The determinism key: a fast FNV-1a hash over `source + timeframe + backend +
-mintick + minQty + a numeric digest of the bars + inputs + metrics options`. Two jobs with
+mintick + minQty + calcOnOrderFills + a numeric digest of the bars + inputs + metrics options`. Two jobs with
 identical inputs hash equal (so results memoize); changing any input changes the
 hash.
 
@@ -396,6 +404,9 @@ interface ScanOptions {
   provider: HistoryProvider;
   range?: HistoryRange;
   rank?: string; // rank spec, default "last"
+  calcOnOrderFills?: boolean; // host override of the script's
+  //                  calc_on_order_fills (unset → source header decides);
+  //                  needs piner > 0.9.0, rejected otherwise
   direction?: 'asc' | 'desc';
   top?: number;
   concurrency?: number; // job execution default: worker-pool size (4 for LocalRunner)
@@ -852,6 +863,9 @@ const { result, fetchError } = await backtest({
   provider: new BinanceProvider(),
   range: { limit: 500 },
   inputs: { fast: 10, slow: 50 }, // fixed overrides (optional)
+  calcOnOrderFills: true, // TV "After order is filled" override (optional;
+  //                         result.strategy.calcOnOrderFills reports the
+  //                         EFFECTIVE mode — true only when the engine ran it)
   metrics: { periodsPerYear: 252 }, // annualization convention (optional)
   // mintick?, backend?, resolveSecurity? (default true), onFetch?
 });
@@ -1168,6 +1182,8 @@ interface SweepOptions {
   axes: Axis[]; // the input grid (cartesian product)
   baseInputs?: Record<string, unknown>; // fixed inputs applied under every combo
   rank?: string; // default: strategy.netProfit for strategies, else "last"
+  calcOnOrderFills?: boolean; // host override of calc_on_order_fills, applied
+  //                  to every combo (part of each job's determinism key)
   direction?: 'asc' | 'desc';
   top?: number;
   concurrency?: number; // default: worker-pool size (4 for LocalRunner)
@@ -1282,6 +1298,8 @@ const report = await walkforward({
   provider: new BinanceProvider(),
   range: { limit: 2000 },
   axes: parseAxes(['fast=5,10,15,20', 'slow=30:100:10']),
+  calcOnOrderFills: true, // optional: applied to BOTH the in-sample sweeps
+  //                         and each window's full-window winner run
   windows: 5, // default 5; 1 = plain IS/OOS split
   oosFraction: 0.25, // default
   anchored: false, // default: rolling IS

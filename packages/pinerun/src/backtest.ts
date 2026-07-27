@@ -13,6 +13,12 @@ import { toPinerTimeframe } from '@heyphat/pinery';
 import type { Job, JobMetricsOptions } from './job.js';
 import type { RunResult } from './result.js';
 import { executeJob } from './execute.js';
+import {
+  preflightBarMagnifier,
+  resolveBarMagnifier,
+  type MagnifierResolutionScope,
+} from './magnifier.js';
+import { assertBooleanOverride, exactRunFailure, failedJobResult } from './command-failure.js';
 import { resolveSecurity } from './security.js';
 import { resolveInstrument } from './instrument.js';
 
@@ -32,11 +38,17 @@ export interface BacktestOptions {
   /** Override the script's calc_on_order_fills (TV's "After order is filled"
    *  checkbox). Unset → the script's own flag. */
   calcOnOrderFills?: boolean;
+  /** Override strategy()'s use_bar_magnifier Properties toggle. Unset keeps
+   *  the source declaration; true/false wins in either direction. */
+  useBarMagnifier?: boolean;
   backend?: 'js' | 'interp';
   /** Host conventions for the derived risk-adjusted metrics. */
   metrics?: JobMetricsOptions;
   /** Resolve request.security dependencies (fetch + inject). Default true. */
   resolveSecurity?: boolean;
+  /** Operation-local exact acquisition reuse (for compare/fan-out). Never keep
+   *  this scope across watch refresh cycles. */
+  magnifierScope?: MagnifierResolutionScope;
   onFetch?: (symbol: string, bars: number) => void;
   /** A request.security dependency failed to fetch; its series degrades to na/[]. */
   onSecurityError?: (label: string, error: string) => void;
@@ -51,7 +63,26 @@ export interface BacktestReport {
 }
 
 export async function backtest(opts: BacktestOptions): Promise<BacktestReport> {
+  assertBooleanOverride(opts.useBarMagnifier);
   const pinerTf = toPinerTimeframe(opts.timeframe);
+
+  // Metadata preflight is provider-free. Typed exact-mode failures become the
+  // same serializable RunResult shape as execution failures; ordinary compile
+  // errors are deliberately deferred to executeJob to preserve legacy output.
+  let magnifierRequested = false;
+  try {
+    magnifierRequested = preflightBarMagnifier(
+      opts.source,
+      pinerTf,
+      opts.useBarMagnifier,
+    ).requested;
+  } catch (error) {
+    if (exactRunFailure(error)) {
+      return {
+        result: failedJobResult({ symbol: opts.symbol, timeframe: pinerTf, bars: [] }, error),
+      };
+    }
+  }
 
   let bars;
   try {
@@ -72,12 +103,26 @@ export async function backtest(opts: BacktestOptions): Promise<BacktestReport> {
     mintick: inst.mintick,
     minQty: inst.minQty,
     calcOnOrderFills: opts.calcOnOrderFills,
+    useBarMagnifier: opts.useBarMagnifier,
     backend: opts.backend,
     metrics: opts.metrics,
     includeTrades: true, // the whole point of a backtest is the full detail
   };
 
-  if (opts.resolveSecurity !== false) {
+  if (magnifierRequested) {
+    try {
+      // Exact mode resolves the complete static security plan internally even
+      // when legacy --no-security was requested; under-fetching is not allowed.
+      await resolveBarMagnifier(job, opts.timeframe, opts.provider, {
+        securityConcurrency: 4,
+        onSecurityFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+        onSecurityError: opts.onSecurityError,
+        scope: opts.magnifierScope,
+      });
+    } catch (error) {
+      return { result: failedJobResult(job, error) };
+    }
+  } else if (opts.resolveSecurity !== false) {
     await resolveSecurity(opts.source, [job], opts.timeframe, pinerTf, opts.provider, {
       range: opts.range,
       inputs: opts.inputs,

@@ -6,39 +6,11 @@
  */
 import { Worker } from 'node:worker_threads';
 import { cpus } from 'node:os';
-import type { Bar, Job } from './job.js';
+import { randomBytes } from 'node:crypto';
+import type { Job } from './job.js';
 import type { RunResult } from './result.js';
 import { fanOut, type RunAllOptions, type Runner } from './runner.js';
-
-/**
- * Wire form of a Job. Bar arrays cross the thread boundary as refs: the bars
- * travel only the first time a handle sends a given dataset, and the worker
- * caches the datasets of its most recent message. A sweep (thousands of jobs
- * sharing ONE bar set) thus serializes the series once per worker instead of
- * once per combo; a scan (unique bars per job) behaves exactly as before.
- */
-export interface BarsRef {
-  id: number;
-  /** Present only when this handle hasn't already sent the dataset. */
-  bars?: Bar[];
-}
-
-export interface WireJob extends Omit<Job, 'bars' | 'securityBars'> {
-  bars: BarsRef;
-  securityBars?: Record<string, BarsRef>;
-}
-
-/** Stable process-wide id per bar array (identity-keyed). */
-const datasetIds = new WeakMap<Bar[], number>();
-let nextDatasetId = 1;
-function datasetId(bars: Bar[]): number {
-  let id = datasetIds.get(bars);
-  if (id == null) {
-    id = nextDatasetId++;
-    datasetIds.set(bars, id);
-  }
-  return id;
-}
+import { senderCacheAfterHydration, toWireJob } from './wire.js';
 
 export interface WorkerPoolOptions {
   /** Number of worker threads. Default: CPU count (clamped to 1..16). */
@@ -59,13 +31,18 @@ const WORKER_URL = new URL(COMPILED ? './worker-entry.js' : './worker-entry.ts',
 interface Pending {
   resolve: (r: RunResult) => void;
   reject: (e: Error) => void;
+  /** Exact dataset ids referenced by this message; committed only after the
+   *  worker acknowledges successful hydration. */
+  sent: Set<number>;
 }
 
 class WorkerHandle {
   private readonly worker: Worker;
+  private readonly datasetAuthSecret: string;
   private seq = 0;
   private readonly pending = new Map<number, Pending>();
-  /** Dataset ids sent in the previous message — exactly what the worker has cached. */
+  /** Dataset ids referenced by the most recent successfully hydrated message —
+   *  exactly what the worker has cached. Cleared after a hydration error. */
   private cachedIds = new Set<number>();
   /** Set once the thread has errored or exited. postMessage to a terminated
    *  worker is a silent no-op, so a dead handle must never accept another job —
@@ -73,21 +50,33 @@ class WorkerHandle {
   dead = false;
 
   constructor() {
-    this.worker = new Worker(WORKER_URL);
-    this.worker.on('message', (msg: { seq: number; result?: RunResult; error?: string }) => {
-      const p = this.pending.get(msg.seq);
-      if (!p) return;
-      this.pending.delete(msg.seq);
-      if (msg.error != null) p.reject(new Error(msg.error));
-      else p.resolve(msg.result!);
+    this.datasetAuthSecret = randomBytes(32).toString('hex');
+    this.worker = new Worker(WORKER_URL, {
+      workerData: { datasetAuthSecret: this.datasetAuthSecret },
     });
+    this.worker.on(
+      'message',
+      (msg: { seq: number; result?: RunResult; error?: string; hydrated: boolean }) => {
+        const p = this.pending.get(msg.seq);
+        if (!p) return;
+        this.pending.delete(msg.seq);
+        this.cachedIds = senderCacheAfterHydration(p.sent, msg.hydrated);
+        if (msg.error != null) p.reject(new Error(msg.error));
+        else p.resolve(msg.result!);
+      },
+    );
     this.worker.on('error', (err) => {
       this.dead = true;
       this.failAll(err instanceof Error ? err : new Error(String(err)));
     });
     this.worker.on('exit', (code) => {
       this.dead = true;
-      if (code !== 0) this.failAll(new Error(`pinerun worker exited with code ${code}`));
+      // A clean-looking exit while a job is pending is still a failed worker:
+      // without rejection the promise would never settle and the dead handle
+      // could not be released/replaced by the pool.
+      if (code !== 0 || this.pending.size > 0) {
+        this.failAll(new Error(`pinerun worker exited with code ${code}`));
+      }
     });
   }
 
@@ -101,31 +90,11 @@ class WorkerHandle {
       return Promise.reject(new Error('pinerun worker: worker thread is no longer running'));
     }
     const seq = this.seq++;
-    const wire = this.toWire(job);
+    const { wire, sent } = toWireJob(job, this.cachedIds, this.datasetAuthSecret);
     return new Promise<RunResult>((resolve, reject) => {
-      this.pending.set(seq, { resolve, reject });
+      this.pending.set(seq, { resolve, reject, sent });
       this.worker.postMessage({ seq, job: wire });
     });
-  }
-
-  /** Replace bar arrays with refs, omitting datasets the worker already holds. */
-  private toWire(job: Job): WireJob {
-    const sent = new Set<number>();
-    const ref = (bars: Bar[]): BarsRef => {
-      const id = datasetId(bars);
-      const known = this.cachedIds.has(id) || sent.has(id);
-      sent.add(id);
-      return known ? { id } : { id, bars };
-    };
-    const { bars, securityBars, ...rest } = job;
-    const wire: WireJob = { ...rest, bars: ref(bars) };
-    if (securityBars) {
-      const refs: Record<string, BarsRef> = {};
-      for (const [key, value] of Object.entries(securityBars)) refs[key] = ref(value);
-      wire.securityBars = refs;
-    }
-    this.cachedIds = sent;
-    return wire;
   }
 
   terminate(): Promise<number> {
@@ -149,22 +118,27 @@ export class WorkerPoolRunner implements Runner {
     return this.workers.length;
   }
 
+  private replaceDead(w: WorkerHandle): WorkerHandle {
+    const replacement = new WorkerHandle();
+    const index = this.workers.indexOf(w);
+    if (index >= 0) this.workers[index] = replacement;
+    else this.workers.push(replacement);
+    return replacement;
+  }
+
   private acquire(): Promise<WorkerHandle> {
-    const w = this.idle.pop();
-    if (w) return Promise.resolve(w);
+    let handle = this.idle.pop();
+    // A worker may exit while idle. Replace it before assignment so a fresh job
+    // is never sacrificed merely to trigger release-time recovery.
+    if (handle?.dead && !this.closed) handle = this.replaceDead(handle);
+    if (handle) return Promise.resolve(handle);
     return new Promise<WorkerHandle>((resolve) => this.waiters.push(resolve));
   }
 
   /** Return a handle to the pool, replacing it with a fresh worker if its
    *  thread died — otherwise the dead handle would be handed to the next job. */
   private release(w: WorkerHandle): void {
-    let handle = w;
-    if (w.dead && !this.closed) {
-      handle = new WorkerHandle();
-      const i = this.workers.indexOf(w);
-      if (i >= 0) this.workers[i] = handle;
-      else this.workers.push(handle);
-    }
+    const handle = w.dead && !this.closed ? this.replaceDead(w) : w;
     const next = this.waiters.shift();
     if (next) next(handle);
     else this.idle.push(handle);

@@ -30,7 +30,37 @@ pinerun portfolio <script.pine> --symbols <a,b,c> [options]
 - **`isolated`** (default) — N sub-accounts, each funded `wᵢ·P`. This equals running each symbol standalone and summing the equity curves; it is the equal-weight (or, with `--weights`, weighted-allocation) baseline. The engine reproduces that per-symbol sum bit-for-bit.
 - **`shared`** — ONE pot. `percent_of_equity` sizing, funds checks, margin, and `strategy.risk.*` rules all read **portfolio** equity, and sleeves compete for capital in basket (priority) order at each timestamp. This is a genuinely different backtest: one symbol's gains fund another's next entry, and an order can be rejected because an earlier sleeve already spent the cash. Trades can differ from any per-symbol run.
 
-A symbol that fails to fetch is dropped with a warning; under `shared` mode a smaller basket is a _different_ backtest, so the drop is called out loudly. Strategy scripts only.
+Without a source-requested Bar Magnifier, a symbol that fails to fetch is
+dropped with a warning; under `shared` mode a smaller basket is a _different_
+backtest, so the drop is called out loudly. When the source requests Bar
+Magnifier, every requested sleeve must resolve or the whole portfolio aborts
+before `PortfolioSleeveSpec` conversion. Strategy scripts only.
+
+### Bar Magnifier sleeves
+
+Portfolio has no v1-wide `--bar-magnifier` override. Each sleeve independently
+resolves the strategy source's `use_bar_magnifier` declaration, complete chart
+window, provider-specific exact dataset, and all static security dependencies
+before the atomic engine run. A malformed/unsupported/provider-limited sleeve
+or runtime-dynamic security identity aborts the basket; no magnified sleeve is
+dropped and no smaller portfolio is reported as success.
+
+Target/LTF timestamps are injected only into that sleeve and never join the
+portfolio master clock, which remains the union of chart-bar opens in original
+basket order. Piner is the sole fill, timestamp, and report authority; pinerun
+does not invent intrabar ledger times. The shipped self-contained binary pins
+`@heyphat/piner` 0.10.0, so any source-effective request aborts the portfolio at
+capability preflight before exact sleeve/security/provider acquisition. A future
+contract-capable piner whose traversal remains disabled may prepare all sleeves
+atomically, but must authoritatively report requested/inactive and continue with
+chart-OHLC fills.
+
+The optional aggregate block is omitted when no sleeve requested magnification.
+Otherwise per-sleeve authoritative blocks are retained and aggregate counters
+are their sums. Coverage uses summed sleeve processed chart bars—not master-
+clock length—as its denominator; state precedence is `mixed-data-fallback`,
+then `tv-cap-fallback`, then `complete` (or `no-data` when none is active), and
+the reported percentage is validated within 0–100%.
 
 ## Common options
 
@@ -52,7 +82,12 @@ The tearsheet also prints **MONTHLY RETURNS** and **TOP DRAWDOWNS**, plus — fo
 
 **Artifacts.** `--csv <dir>` writes `portfolio-equity.csv` (its `bar` column is the master clock) and `portfolio-trades.csv` (symbol-tagged, exit-time sorted; its `entryBar`/`exitBar` are _sleeve-local_ indices, so join trades to the combined curve on `entryTime`/`exitTime`) plus per-sleeve `<SYMBOL>-equity.csv`/`<SYMBOL>-trades.csv`. `--plot <dir>` writes `portfolio.html` plus per-sleeve equity/drawdown charts.
 
-**JSON.** `--json` emits the full `PortfolioReport` instead of the tearsheet: `equityCurve` and `times` (master clock), `initialCapital`, `summary`, `metrics`, `trades` (merged, symbol-tagged), `sleeves` (contribution), `fetchErrors` (dropped symbols), `mode`, and `elapsedMs`.
+**JSON.** `--json` emits the full `PortfolioReport` instead of the tearsheet:
+`equityCurve` and `times` (chart-only master clock), `initialCapital`, `summary`,
+`metrics`, `trades` (merged, symbol-tagged), `sleeves` (contribution plus each
+optional authoritative Bar Magnifier block), optional aggregate `barMagnifier`
+with its sleeve-sum denominator, `fetchErrors`, `mode`, and `elapsedMs`. A
+permanent exact-mode abort is emitted as `{ ok: false, error, failure }`.
 
 ## Examples
 

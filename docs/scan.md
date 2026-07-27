@@ -32,7 +32,7 @@ flags — see [common options](./common-options.md):
 - **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--concurrency` · `--workers` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
-- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills))
+- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills)) · `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier exact mode](./common-options.md#fill-model--bar-magnifier))
 - **Metrics:** `--periods-per-year` · `--risk-free-rate`
 - **Output:** `--json`
 
@@ -49,7 +49,11 @@ A single-symbol scan run with `--trades` additionally prints a PRICE chart with
 trades marked at their fill prices, above the closed-trade ledger.
 
 With `--json`, the full report is emitted as JSON instead of the table —
-including the trade ledger and equity curve — for piping into other tools.
+including the trade ledger and equity curve — for piping into other tools. In
+Bar Magnifier exact mode, every requested symbol remains represented: permanent
+unsupported/malformed/provider-limited resolutions appear in `errors[]` as
+typed failures, while successful symbols remain rankable. No magnified symbol
+is silently removed from the reported universe.
 
 ## Examples
 

@@ -10,6 +10,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import {
   InstrumentRouter,
+  ExactHistoryError,
   isDataProvider,
   isAssetClass,
   supportsPair,
@@ -20,14 +21,19 @@ import {
   type HistoryRange,
 } from '@heyphat/pinery';
 import { cached, CsvProvider } from '@heyphat/pinery/node';
-import { scan, type ScanReport } from './index.js';
+import { createMagnifierResolutionScope, scan, type ScanReport } from './index.js';
 import { LocalRunner, parseRankSpec, rankResults, selectPlot, type Runner } from './index.js';
 import { sweep, parseAxes, assertComboBudget, validateAxes, type SweepReport } from './index.js';
 import { backtest } from './index.js';
 import { portfolio, type PortfolioReport } from './index.js';
 import { walkforward, type WalkforwardReport } from './index.js';
 import { parseTriStateFlag } from './flags.js';
-import type { RunResult, JobMetricsOptions, StrategyTrade } from './index.js';
+import {
+  formatFillModel as fillModelPresentation,
+  type FillModelPresentation,
+} from './fill-model.js';
+import type { RunFailure, RunResult, JobMetricsOptions, StrategyTrade } from './index.js';
+import { BarMagnifierError } from './index.js';
 import {
   tradesToCsv,
   equityToCsv,
@@ -90,6 +96,8 @@ function main(argv: string[]): Promise<void> {
     printHelp(command);
     return Promise.resolve();
   }
+  validatePortfolioMagnifierOptions(command, rest);
+  validateMagnifierPositionals(command, rest);
   switch (command) {
     case 'init':
       runInit(rest);
@@ -213,6 +221,7 @@ async function runScan(args: string[]): Promise<void> {
       mintick: opts.getNum('mintick'),
       minQty: opts.getNum('min-qty'),
       calcOnOrderFills: coofOverride(opts),
+      useBarMagnifier: magnifierOverride(opts),
       includeTrades,
       metrics,
       resolveSecurity,
@@ -259,7 +268,11 @@ async function runScan(args: string[]): Promise<void> {
                 }
               : {}),
           })),
-          errors: report.errors.map((e) => ({ symbol: e.symbol, error: e.error })),
+          errors: report.errors.map((e) => ({
+            symbol: e.symbol,
+            error: e.error,
+            ...(e.failure ? { failure: e.failure } : {}),
+          })),
           fetchErrors: report.fetchErrors,
           elapsedMs: elapsed,
         },
@@ -340,6 +353,7 @@ async function runBacktest(args: string[]): Promise<void> {
         mintick: opts.getNum('mintick'),
         minQty: opts.getNum('min-qty'),
         calcOnOrderFills: coofOverride(opts),
+        useBarMagnifier: magnifierOverride(opts),
         metrics,
         resolveSecurity,
       });
@@ -349,9 +363,12 @@ async function runBacktest(args: string[]): Promise<void> {
         `  watch: ${symbol} @ ${timeframe} — every ${interval}s, Ctrl-C to exit · ` +
           `updated ${new Date().toISOString().slice(11, 19)} UTC`,
       );
-      // Transient failures (network blips) report and retry next cycle.
+      // Transient failures (network blips) report and retry next cycle. Exact
+      // unsupported/malformed/provider-limited outcomes are permanent: stop.
       if (report.fetchError) console.error(`\n  fetch failed: ${report.fetchError}`);
-      else if (!report.result!.ok) console.error(`\n  run failed: ${report.result!.error}`);
+      else if (!report.result!.ok && report.result!.failure?.permanent) {
+        fail(`backtest watch: ${formatFailure(report.result!.failure)}`);
+      } else if (!report.result!.ok) console.error(`\n  run failed: ${report.result!.error}`);
       else if (!report.result!.strategy) {
         fail(
           `backtest: ${scriptPath} is an indicator (no strategy() call) — watch needs a strategy`,
@@ -378,6 +395,7 @@ async function runBacktest(args: string[]): Promise<void> {
     mintick: opts.getNum('mintick'),
     minQty: opts.getNum('min-qty'),
     calcOnOrderFills: coofOverride(opts),
+    useBarMagnifier: magnifierOverride(opts),
     metrics,
     resolveSecurity,
     onSecurityError: warnSecurityError,
@@ -388,7 +406,12 @@ async function runBacktest(args: string[]): Promise<void> {
   const result = report.result!;
   if (!result.ok) {
     if (result.diagnostics) for (const d of result.diagnostics) console.error(`  ${d}`);
-    fail(`backtest: ${result.error}`);
+    if (asJson && result.failure) {
+      console.log(JSON.stringify({ ...result, elapsedMs: elapsed }, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+    fail(`backtest: ${result.failure ? formatFailure(result.failure) : result.error}`);
   }
   if (!result.strategy) {
     fail(
@@ -459,6 +482,9 @@ async function runCompare(args: string[]): Promise<void> {
   const resolveSecurity = !opts.has('no-security');
   const provider = buildProvider(opts);
 
+  const useBarMagnifier = magnifierOverride(opts);
+  const magnifierScope = createMagnifierResolutionScope();
+
   const started = Date.now();
   // Sequential on one provider: the second run's fetch hits the disk cache.
   const run = async (source: string, inputs?: Record<string, unknown>) =>
@@ -470,6 +496,8 @@ async function runCompare(args: string[]): Promise<void> {
       range,
       inputs,
       backend,
+      useBarMagnifier,
+      magnifierScope,
       metrics,
       resolveSecurity,
       onSecurityError: warnSecurityError,
@@ -483,7 +511,8 @@ async function runCompare(args: string[]): Promise<void> {
     const r = rep.result!;
     if (!r.ok) {
       if (r.diagnostics) for (const d of r.diagnostics) console.error(`  ${d}`);
-      fail(`compare: ${path}: ${r.error}`);
+      if (r.failure && opts.has('json')) return r;
+      fail(`compare: ${path}: ${r.failure ? formatFailure(r.failure) : r.error}`);
     }
     if (!r.strategy) {
       fail(`compare: ${path} is an indicator (no strategy() call) — compare needs strategies`);
@@ -501,6 +530,7 @@ async function runCompare(args: string[]): Promise<void> {
         2,
       ),
     );
+    if (!a.ok || !b.ok) process.exitCode = 1;
     return;
   }
 
@@ -536,6 +566,11 @@ function printCompare(
   console.log('');
   row('', headA, headB);
   console.log(`    ${'-'.repeat(22 + colW * 2)}`);
+  const fillA = fillModelPresentation(sa);
+  const fillB = fillModelPresentation(sb);
+  row('fill model', fillA.line.replace('fill model: ', ''), fillB.line.replace('fill model: ', ''));
+  if (fillA.detail) console.log(`    A ${fillA.detail}`);
+  if (fillB.detail) console.log(`    B ${fillB.detail}`);
   row('net profit', fmtNum(sa.netProfit), fmtNum(sb.netProfit));
   row('net profit %', fmtPct(sa.netProfitPercent), fmtPct(sb.netProfitPercent));
   row('profit factor', fmtPf(sa.profitFactor), fmtPf(sb.profitFactor));
@@ -703,6 +738,27 @@ function printPriceChart(result: RunResult, label = ''): void {
   );
 }
 
+function printFillModel(summary: Parameters<typeof fillModelPresentation>[0]): void {
+  const presentation = fillModelPresentation(summary);
+  console.log(`  ${presentation.line}`);
+  if (presentation.detail) console.log(`  ${presentation.detail}`);
+}
+
+function serializedExactFailure(error: unknown): RunFailure | undefined {
+  if (error instanceof BarMagnifierError || error instanceof ExactHistoryError) {
+    return error.toJSON();
+  }
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (cause instanceof BarMagnifierError || cause instanceof ExactHistoryError) {
+    return cause.toJSON();
+  }
+  return undefined;
+}
+
+function formatFailure(failure: RunFailure): string {
+  return `${failure.kind}/${failure.code}: ${failure.message}`;
+}
+
 /** The full-stats block for one strategy run: returns, risk, and trade quality. */
 function printTearsheet(
   result: RunResult,
@@ -723,9 +779,7 @@ function printTearsheet(
 
   console.log('');
   console.log(`  backtest: ${result.symbol} @ ${timeframe} — ${result.bars} bars${span}`);
-  // Multiple fills per bar read surprisingly in a trade list — say why upfront.
-  if (s.calcOnOrderFills)
-    console.log('  fill model: calc_on_order_fills (intrabar re-execution after each fill)');
+  printFillModel(s);
   console.log('');
   console.log('  RETURNS');
   line('net profit', fmtNum(s.netProfit), fmtPct(s.netProfitPercent));
@@ -869,7 +923,21 @@ async function runPortfolio(args: string[]): Promise<void> {
       onSecurityError: warnSecurityError,
     });
   } catch (err) {
-    fail(`portfolio: ${err instanceof Error ? err.message : String(err)}`);
+    const failure = serializedExactFailure(err);
+    if (asJson && failure) {
+      console.log(
+        JSON.stringify(
+          { ok: false, error: err instanceof Error ? err.message : String(err), failure },
+          null,
+          2,
+        ),
+      );
+      process.exitCode = 1;
+      return;
+    }
+    fail(
+      `portfolio: ${failure ? formatFailure(failure) : err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   // csv/plot: the portfolio curve + merged ledger, plus each sleeve. The
@@ -951,6 +1019,18 @@ function printPortfolioTearsheet(report: PortfolioReport, timeframe: string, cha
     `  portfolio: ${report.symbols.length} symbols @ ${timeframe} — mode=${report.mode}, ` +
       `${fmtNum(report.initialCapital)} initial${span}`,
   );
+  printFillModel(s);
+  if (report.barMagnifier) {
+    console.log(
+      `  portfolio magnifier denominator: ${report.barMagnifier.processedBars.toLocaleString('en-US')} sleeve chart bars`,
+    );
+    for (const sleeve of report.sleeves) {
+      if (!sleeve.barMagnifier) continue;
+      const presentation = fillModelPresentation({ barMagnifier: sleeve.barMagnifier });
+      console.log(`    ${sleeve.symbol}: ${presentation.line.replace('fill model: ', '')}`);
+      if (presentation.detail) console.log(`      ${presentation.detail}`);
+    }
+  }
   console.log('');
   console.log('  RETURNS');
   line('net profit', fmtNum(s.netProfit), fmtPct(s.netProfitPercent));
@@ -1150,6 +1230,7 @@ async function runSweep(args: string[]): Promise<void> {
       mintick: opts.getNum('mintick'),
       minQty: opts.getNum('min-qty'),
       calcOnOrderFills: coofOverride(opts),
+      useBarMagnifier: magnifierOverride(opts),
       includeTrades,
       metrics,
       resolveSecurity,
@@ -1219,7 +1300,12 @@ async function runSweep(args: string[]): Promise<void> {
                 }
               : {}),
           })),
-          errors: report.errors.map((e) => ({ symbol: e.symbol, id: e.id, error: e.error })),
+          errors: report.errors.map((e) => ({
+            symbol: e.symbol,
+            id: e.id,
+            error: e.error,
+            ...(e.failure ? { failure: e.failure } : {}),
+          })),
           fetchErrors: report.fetchErrors,
           elapsedMs: elapsed,
         },
@@ -1314,6 +1400,7 @@ async function runWalkforward(args: string[]): Promise<void> {
       mintick: opts.getNum('mintick'),
       minQty: opts.getNum('min-qty'),
       calcOnOrderFills: coofOverride(opts),
+      useBarMagnifier: magnifierOverride(opts),
       metrics,
       resolveSecurity,
       onSecurityError: warnSecurityError,
@@ -1348,8 +1435,10 @@ async function runWalkforward(args: string[]): Promise<void> {
           windows: report.windows.map(({ result, ...w }) => ({
             ...w,
             calcOnOrderFills: result?.strategy?.calcOnOrderFills,
+            barMagnifier: result?.strategy?.barMagnifier,
           })),
           aggregate: report.aggregate,
+          ...(report.failure ? { failure: report.failure } : {}),
           ...(report.warnings.length ? { warnings: report.warnings } : {}),
           elapsedMs: elapsed,
         },
@@ -1371,6 +1460,8 @@ function printWalkforwardTable(report: WalkforwardReport, elapsedMs: number, spa
     `  walk-forward: ${report.symbol} — ${report.windows.length} window${report.windows.length === 1 ? '' : 's'} ` +
       `(IS ${report.isBars} → OOS ${report.oosBars} bars, ${mode}), rank ${report.rank}`,
   );
+  if (report.failure) console.log(`  failed: ${formatFailure(report.failure)}`);
+  printResultFillModels(report.windows.flatMap((window) => (window.result ? [window.result] : [])));
   console.log('');
 
   // Each window's OOS equity segment, sparklined: the "did the edge survive out
@@ -1393,7 +1484,8 @@ function printWalkforwardTable(report: WalkforwardReport, elapsedMs: number, spa
     const isSpan = `${isoDay(w.isFromTime ?? NaN)} → ${isoDay(w.oosFromTime ?? NaN)}`.padEnd(spanW);
     const oosSpan = `${isoDay(w.oosFromTime ?? NaN)} → ${isoDay(w.oosToTime ?? NaN)}`.padEnd(spanW);
     if (w.error) {
-      console.log(`  ${no} ${isSpan}  ${oosSpan}  (${w.error})`);
+      const error = w.failure ? formatFailure(w.failure) : w.error;
+      console.log(`  ${no} ${isSpan}  ${oosSpan}  (${error})`);
       continue;
     }
     console.log(
@@ -1510,10 +1602,11 @@ function printSweepFooter(report: SweepReport, multiSymbol: boolean, elapsedMs: 
     console.log(`\n  ${report.errors.length} run error(s):`);
     for (const e of report.errors.slice(0, 10)) {
       const label = multiSymbol ? `${e.symbol} ${e.id}` : e.id;
-      console.log(`    ${label}: ${e.error}`);
+      console.log(`    ${label}: ${e.failure ? formatFailure(e.failure) : e.error}`);
     }
     if (report.errors.length > 10) console.log(`    … and ${report.errors.length - 10} more`);
   }
+  printResultFillModels(report.points.map((point) => point.result));
   const ok = report.total - report.errors.length;
   console.log(`\n  ${ok}/${report.total} ran  ${report.ranked.length} ranked  in ${elapsedMs}ms`);
 }
@@ -1660,15 +1753,32 @@ function printLedger(result: RunResult): void {
   }
 }
 
+function printResultFillModels(results: readonly RunResult[]): void {
+  const states = new Map<string, FillModelPresentation>();
+  for (const result of results) {
+    if (!result.strategy) continue;
+    const presentation = fillModelPresentation(result.strategy);
+    states.set(`${presentation.line}\n${presentation.detail ?? ''}`, presentation);
+  }
+  if (states.size === 0) return;
+  console.log('');
+  for (const presentation of states.values()) {
+    console.log(`  ${presentation.line}`);
+    if (presentation.detail) console.log(`  ${presentation.detail}`);
+  }
+}
+
 function printFooters(report: ScanReport, rank: string, elapsedMs: number): void {
   if (report.errors.length > 0) {
     console.log(`\n  ${report.errors.length} run error(s):`);
-    for (const e of report.errors) console.log(`    ${e.symbol}: ${e.error}`);
+    for (const e of report.errors)
+      console.log(`    ${e.symbol}: ${e.failure ? formatFailure(e.failure) : e.error}`);
   }
   if (report.fetchErrors.length > 0) {
     console.log(`\n  ${report.fetchErrors.length} fetch error(s):`);
     for (const e of report.fetchErrors) console.log(`    ${e.symbol}: ${e.error}`);
   }
+  printResultFillModels(report.results);
   const ok = report.results.filter((r) => r.ok).length;
   console.log(
     `\n  rank="${rank}"  ${ok}/${report.results.length} ran  ${report.ranked.length} ranked  in ${elapsedMs}ms`,
@@ -1843,6 +1953,25 @@ function coofOverride(opts: Args): boolean | undefined {
   }
 }
 
+/** Boolean-only Properties override. The target timeframe is always piner's
+ * automatic TradingView mapping; a value other than true/false is rejected. */
+function magnifierOverride(opts: Args): boolean | undefined {
+  const invalidNegatedValue = opts.get('no-bar-magnifier');
+  if (invalidNegatedValue != null) {
+    fail('invalid --no-bar-magnifier: the negated flag does not take a value');
+  }
+  try {
+    return parseTriStateFlag(
+      opts.get('bar-magnifier'),
+      opts.has('bar-magnifier'),
+      opts.has('no-bar-magnifier'),
+      'bar-magnifier',
+    );
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+}
+
 function buildMetricsOpts(opts: Args): JobMetricsOptions | undefined {
   const periodsPerYear = opts.getNum('periods-per-year');
   const riskFreeRate = opts.getNum('risk-free-rate');
@@ -1921,6 +2050,59 @@ const MULTI_KEYS = new Set(['input', 'weights', 'input-a', 'input-b']);
  *  (followed by another flag or nothing) is a plain flag. */
 const OPTIONAL_VALUE_KEYS = new Set(['watch']);
 
+/** Boolean flags accept only explicit true/false tokens as optional values.
+ *  Any other following token remains positional, so a bare flag may precede
+ *  the script path without consuming it. `--flag=<value>` is validated later. */
+const BOOLEAN_VALUE_KEYS = new Set(['bar-magnifier', 'no-bar-magnifier']);
+
+const MAGNIFIER_POSITIONAL_COUNTS: Readonly<Record<string, number>> = Object.freeze({
+  backtest: 1,
+  compare: 2,
+  scan: 1,
+  sweep: 1,
+  walkforward: 1,
+});
+
+/** Portfolio v1 has no basket-wide override. Reject it before script/universe I/O. */
+function validatePortfolioMagnifierOptions(command: string | undefined, args: string[]): void {
+  if (command !== 'portfolio') return;
+  const supplied = args.some(
+    (value) =>
+      value === '--bar-magnifier' ||
+      value.startsWith('--bar-magnifier=') ||
+      value === '--no-bar-magnifier' ||
+      value.startsWith('--no-bar-magnifier='),
+  );
+  if (!supplied) return;
+  fail(
+    'portfolio: v1 has no portfolio-wide Bar Magnifier override; each sleeve follows strategy(use_bar_magnifier=...) from the source header',
+  );
+}
+
+/**
+ * A bare boolean flag may precede a script path, so parseArgs intentionally
+ * leaves non-boolean followers positional. Once the command's required script
+ * count is known, however, any additional positional is an unambiguous spaced
+ * non-boolean value (for example `--bar-magnifier 10m`) and must not be ignored.
+ * Commands without a magnifier option retain their existing positional rules.
+ */
+function validateMagnifierPositionals(command: string | undefined, args: string[]): void {
+  const expected = command == null ? undefined : MAGNIFIER_POSITIONAL_COUNTS[command];
+  if (expected == null) return;
+  const opts = parseArgs(args);
+  const supplied =
+    opts.has('bar-magnifier') ||
+    opts.has('no-bar-magnifier') ||
+    opts.get('bar-magnifier') !== undefined ||
+    opts.get('no-bar-magnifier') !== undefined;
+  if (!supplied || opts.positional.length <= expected) return;
+  const extras = opts.positional
+    .slice(expected)
+    .map((value) => `"${value}"`)
+    .join(', ');
+  fail(`invalid --bar-magnifier value: expected true or false; unexpected positional ${extras}`);
+}
+
 function parseArgs(args: string[]): Args {
   const positional: string[] = [];
   const values = new Map<string, string>();
@@ -1944,7 +2126,11 @@ function parseArgs(args: string[]): Args {
       } else {
         const key = a.slice(2);
         if (VALUE_KEYS.has(key)) record(key, args[++i] ?? '');
-        else if (OPTIONAL_VALUE_KEYS.has(key)) {
+        else if (BOOLEAN_VALUE_KEYS.has(key)) {
+          const next = args[i + 1];
+          if (next === 'true' || next === 'false') record(key, args[++i]!);
+          else flags.add(key);
+        } else if (OPTIONAL_VALUE_KEYS.has(key)) {
           const next = args[i + 1];
           if (next != null && next !== '' && !next.startsWith('--')) record(key, args[++i]!);
           else flags.add(key);
@@ -2049,6 +2235,23 @@ USAGE
   pinerun <command> --help                      Show a command's options
   pinerun --version                             Print the pinerun version`;
 
+const BAR_MAGNIFIER_EXACT_HELP = `BAR MAGNIFIER
+  Piner is the semantic authority. Its versioned TradingView mapping chooses the
+  target timeframe automatically; custom target timeframes are rejected. Exact
+  mode fails closed on unsupported/incomplete provider coverage and runtime-
+  dynamic request.security identities. The 200,000 eligible-target-bar policy
+  applies to the full execution envelope (the complete IS+OOS fold for walk-
+  forward). Matching TradingView also requires matching feed, session,
+  adjustments, and OHLC.
+
+  The shipped self-contained binary embeds the root-pinned @heyphat/piner 0.10.0.
+  Any effective request therefore fails capability preflight with
+  piner-bar-magnifier-capability-unavailable before exact provider, static-
+  security, or execution I/O; no exact dataset is prepared. A future piner that
+  implements the contract but keeps traversal disabled may prepare exact data,
+  but must authoritatively report requested/inactive and use chart-OHLC fills.
+  Only a compatible runtime that reports active may be presented as magnified.`;
+
 const HELP_SECTIONS: Record<string, string> = {
   init: `INIT OPTIONS
   [file.pine]           Output path (default strategy.pine); parent dirs created
@@ -2136,6 +2339,21 @@ INIT EXAMPLE
                           strategy() declaration decides. Needs a piner engine
                           that models the flag; portfolio takes it from the
                           script header only
+  --bar-magnifier / --no-bar-magnifier
+                        Override strategy()'s use_bar_magnifier Properties toggle.
+                          The target timeframe is automatic from piner's versioned
+                          TradingView mapping; no custom timeframe is accepted.
+                          Exact mode fails closed on unsupported/missing coverage,
+                          rejects dynamic request.security identities, and piner
+                          enforces the newest-200,000 eligible-target-bar rule.
+                          Provider data can match TV fills only when feed/session/
+                          adjustments/OHLC match. The shipped self-contained
+                          binary embeds @heyphat/piner 0.10.0, so an effective
+                          request fails capability preflight with
+                          piner-bar-magnifier-capability-unavailable before exact
+                          data I/O. A future contract-capable runtime with
+                          traversal disabled may prepare data but must report
+                          requested/inactive and keep chart-OHLC fills.
   --no-security         Skip request.security dependency resolution (cross-symbol
                           / lower-TF fetch + inject); those requests degrade to na
   --no-cache            Disable the on-disk history cache
@@ -2161,7 +2379,8 @@ EXAMPLE
                           DRAWDOWNS tables always print)
   --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
-  --mintick, --min-qty, --calc-on-order-fills / --no-calc-on-order-fills, --csv,
+  --mintick, --min-qty, --calc-on-order-fills / --no-calc-on-order-fills,
+  --bar-magnifier / --no-bar-magnifier, --csv,
   --plot, --no-security, --no-cache, --cache-dir, --refresh, --json   (as scan)
 
   Prints a full tearsheet: returns (net/gross, buy & hold, CAGR), risk (drawdown,
@@ -2173,6 +2392,8 @@ EXAMPLE
   panel (close line, each trade marked at its fill price — ▲ long / ▼ short
   entry, ● win / ○ loss exit, colored green/red on a TTY), then EQUITY and
   DRAWDOWN.
+
+${BAR_MAGNIFIER_EXACT_HELP}
 
 BACKTEST EXAMPLE
   pinerun backtest examples/sma-cross-param.pine --symbol BTCUSDT --tf 1h \\
@@ -2190,7 +2411,11 @@ BACKTEST EXAMPLE
   --no-chart            Skip the equity overlay
   --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
-  --no-security, --no-cache, --cache-dir, --refresh, --json   (as scan)
+  --bar-magnifier / --no-bar-magnifier, --no-security, --no-cache,
+  --cache-dir, --refresh, --json   (as scan; one shared magnifier override is
+                          applied to both sides, while source headers remain independent)
+
+${BAR_MAGNIFIER_EXACT_HELP}
 
 COMPARE EXAMPLES
   pinerun compare examples/sma-cross-param.pine examples/rsi-mean-reversion.pine \\
@@ -2229,7 +2454,13 @@ COMPARE EXAMPLES
 
   Portfolio drawdown/run-up are CLOSE-TO-CLOSE on the combined curve (cross-
   symbol intrabar paths are not modeled); per-sleeve reports keep intrabar
-  extremes. Semantics spec: piner docs/portfolio-semantics.md.
+  extremes. Each sleeve independently honors the script header's
+  use_bar_magnifier setting and must resolve exact data before the atomic run;
+  v1 has no portfolio-wide CLI override, and LTF times never enter the master
+  clock. Piner is the sole fill/report authority. Semantics spec: piner docs/
+  portfolio-semantics.md.
+
+${BAR_MAGNIFIER_EXACT_HELP}
 
 PORTFOLIO EXAMPLE
   pinerun portfolio examples/sma-cross-param.pine --symbols BTCUSDT,ETHUSDT,SOLUSDT \\
@@ -2264,7 +2495,8 @@ PORTFOLIO EXAMPLE
   --tf, --from, --to, --limit, --rank, --top, --asc, --trades, --no-chart,
   --concurrency, --workers, --backend, --provider, --asset-class, --data-dir, --api-key,
   --api-secret, --feed, --periods-per-year, --risk-free-rate, --mintick, --min-qty,
-  --calc-on-order-fills / --no-calc-on-order-fills, --csv, --plot,
+  --calc-on-order-fills / --no-calc-on-order-fills,
+  --bar-magnifier / --no-bar-magnifier, --csv, --plot,
   --no-security, --no-cache, --cache-dir, --refresh, --json   (as scan;
                           exports are per ranked combo, labeled <symbol>-<combo>;
                           with --trades the table gains an EQUITY sparkline and
@@ -2272,6 +2504,8 @@ PORTFOLIO EXAMPLE
   --max-combos <n>      Cap on total runs: combos × symbols (default 5000)
 
   Rank defaults to strategy.netProfit for strategies, else "last".
+
+${BAR_MAGNIFIER_EXACT_HELP}
 
 SWEEP EXAMPLES
   pinerun sweep examples/sma-cross-param.pine --symbol BTCUSDT --tf 1h \\
@@ -2302,7 +2536,8 @@ SWEEP EXAMPLES
   --tf, --from, --to, --limit, --concurrency, --workers, --backend, --provider,
   --asset-class, --data-dir, --api-key, --api-secret, --feed, --periods-per-year,
   --risk-free-rate, --max-combos, --mintick, --min-qty,
-  --calc-on-order-fills / --no-calc-on-order-fills, --no-security, --no-cache,
+  --calc-on-order-fills / --no-calc-on-order-fills,
+  --bar-magnifier / --no-bar-magnifier, --no-security, --no-cache,
   --cache-dir, --refresh, --json (as sweep)
 
   Each window sweeps the grid on the in-sample segment, picks the winner by
@@ -2310,6 +2545,12 @@ SWEEP EXAMPLES
   (IS doubles as indicator warmup). OOS segments tile the tail of history, so
   every OOS bar is traded by parameters chosen strictly on earlier data.
   Verdict: WFE (per-bar OOS/IS profit ratio) ~1 = real edge, << 1 = overfit.
+  With Bar Magnifier, each fold acquires one exact full IS+OOS envelope before
+  ranking. A fold with more than 200,000 eligible mapped target bars is rejected
+  (including when the moving cap boundary falls inside IS), preserving IS-prefix
+  identity at or below the limit.
+
+${BAR_MAGNIFIER_EXACT_HELP}
 
 WALKFORWARD EXAMPLE
   pinerun walkforward examples/sma-cross-param.pine --symbol BTCUSDT --tf 1h \\

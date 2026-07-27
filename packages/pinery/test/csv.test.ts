@@ -2,7 +2,15 @@ import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { barsFromCsv, InstrumentRouter, createProvider } from '../src/index.js';
+import {
+  acquireExactHistory,
+  barsFromCsv,
+  ExactHistoryError,
+  halfOpenIntervalSec,
+  InstrumentRouter,
+  createProvider,
+  unixSecond,
+} from '../src/index.js';
 import { CsvProvider } from '../src/node.js';
 
 let dir: string;
@@ -213,4 +221,312 @@ test('router with csv fallback serves bare tickers from files', async () => {
     providers: { csv: new CsvProvider({ dir }) },
   });
   expect(await router.history('ETHUSDT', '1h')).toHaveLength(3);
+});
+
+test('CsvProvider exact source rejects subsecond opens while legacy history keeps rounding', async () => {
+  const subsecond = mkdtempSync(join(tmpdir(), 'pinery-csv-subsecond-'));
+  try {
+    writeFileSync(
+      join(subsecond, 'BTC_1s.csv'),
+      'time,open,high,low,close,volume\n1970-01-01T00:00:01.500Z,1,2,0.5,1.5,10\n',
+    );
+    const provider = new CsvProvider({
+      dir: subsecond,
+      alignment: 'utc-24x7',
+      timeframes: ['1s'],
+    });
+    expect((await provider.history('BTC', '1s'))[0]!.time).toBe(1);
+
+    const source = await provider.resolveHistorySource('BTC');
+    await expect(
+      source.history({
+        timeframe: '1s',
+        requested: halfOpenIntervalSec(1, 2),
+      }),
+    ).rejects.toBeInstanceOf(ExactHistoryError);
+    await expect(
+      source.history({
+        timeframe: '1s',
+        requested: halfOpenIntervalSec(1, 2),
+      }),
+    ).rejects.toMatchObject({ kind: 'unsupported', code: 'subsecond-bar-boundary' });
+  } finally {
+    rmSync(subsecond, { recursive: true, force: true });
+  }
+});
+
+test('CsvProvider source identity changes when relevant file content changes', async () => {
+  const mutable = mkdtempSync(join(tmpdir(), 'pinery-csv-identity-'));
+  try {
+    const file = join(mutable, 'BTC_1m.csv');
+    writeFileSync(file, 'time,open,high,low,close,volume\n0,1,2,0.5,1.5,10\n');
+    const provider = new CsvProvider({
+      dir: mutable,
+      alignment: 'utc-24x7',
+      timeframes: ['1m'],
+    });
+    const before = await provider.resolveHistorySource('BTC');
+    expect((await provider.history('BTC', '1m'))[0]!.close).toBe(1.5);
+
+    writeFileSync(file, 'time,open,high,low,close,volume\n0,1,3,0.5,2.5,20\n');
+    await expect(
+      before.history({ timeframe: '1m', requested: halfOpenIntervalSec(0, 60) }),
+    ).rejects.toMatchObject({
+      type: 'exact-history-error',
+      kind: 'provider-limited',
+      code: 'csv-source-changed',
+    });
+    const after = await provider.resolveHistorySource('BTC');
+    expect(after.cacheIdentity).not.toBe(before.cacheIdentity);
+    expect((await provider.history('BTC', '1m'))[0]!.close).toBe(2.5);
+  } finally {
+    rmSync(mutable, { recursive: true, force: true });
+  }
+});
+
+test('CsvProvider resolves per-symbol timeframes and types post-resolution file loss', async () => {
+  const scoped = mkdtempSync(join(tmpdir(), 'pinery-csv-scoped-'));
+  try {
+    const btcFile = join(scoped, 'BTC_1m.csv');
+    writeFileSync(btcFile, 'time,open,high,low,close,volume\n0,1,2,0.5,1.5,10\n');
+    writeFileSync(join(scoped, 'ETH_5m.csv'), 'time,open,high,low,close,volume\n0,2,3,1,2.5,20\n');
+    const provider = new CsvProvider({
+      dir: scoped,
+      alignment: 'utc-24x7',
+      timeframes: ['1m', '5m'],
+    });
+    const btc = await provider.resolveHistorySource('BTC');
+    const eth = await provider.resolveHistorySource('ETH');
+    const missing = await provider.resolveHistorySource('DOGE');
+
+    expect(btc.capabilities.timeframes).toEqual(['1m']);
+    expect(eth.capabilities.timeframes).toEqual(['5m']);
+    expect(missing.capabilities.timeframes).toEqual([]);
+
+    rmSync(btcFile);
+    await expect(
+      btc.history({ timeframe: '1m', requested: halfOpenIntervalSec(0, 60) }),
+    ).rejects.toMatchObject({
+      type: 'exact-history-error',
+      kind: 'provider-limited',
+      code: 'csv-source-changed',
+    });
+  } finally {
+    rmSync(scoped, { recursive: true, force: true });
+  }
+});
+
+test('CsvProvider snapshots caller-owned calendar metadata for identity and coverage', async () => {
+  const scoped = mkdtempSync(join(tmpdir(), 'pinery-csv-calendar-'));
+  try {
+    writeFileSync(
+      join(scoped, 'XYZ_1m.csv'),
+      'time,open,high,low,close,volume\n0,1,2,0.5,1.5,10\n',
+    );
+    const calendar = {
+      calendarId: 'TEST',
+      version: 'v1',
+      coverage: halfOpenIntervalSec(0, 120),
+      sessions: [halfOpenIntervalSec(0, 60)],
+      periods: { '1d': [halfOpenIntervalSec(0, 120)] },
+    };
+    const timeframes = ['1m'];
+    const provider = new CsvProvider({
+      dir: scoped,
+      alignment: 'exchange-calendar',
+      calendar,
+      timeframes,
+    });
+
+    // Both declarations are snapshotted by the constructor, before resolution.
+    timeframes.splice(0, 1, '5m');
+    calendar.calendarId = 'MUTATED';
+    calendar.version = 'v2';
+    calendar.coverage = halfOpenIntervalSec(0, 180);
+    calendar.sessions.splice(0, 1, halfOpenIntervalSec(0, 120));
+    (calendar.periods['1d'][0] as unknown as { to: number }).to = 60;
+    calendar.periods['1d'].push(halfOpenIntervalSec(60, 120));
+
+    const source = await provider.resolveHistorySource('XYZ');
+    const identity = source.cacheIdentity;
+    expect(() => (source.capabilities.timeframes as unknown as string[]).push('5m')).toThrow();
+    expect(() => {
+      (source.capabilities.calendar as unknown as { version: string }).version = 'v3';
+    }).toThrow();
+
+    const acquisition = await source.history({
+      timeframe: '1m',
+      requested: halfOpenIntervalSec(0, 120),
+    });
+    expect(acquisition.complete).toBe(true);
+    expect(acquisition.provenance.alignment).toBe('exchange-calendar:TEST@v1');
+    expect(source.cacheIdentity).toBe(identity);
+    expect(source.cacheIdentity).toContain('"capabilities":');
+    expect(source.capabilities.timeframes).toEqual(['1m']);
+    expect(source.capabilities.calendar).toMatchObject({
+      calendarId: 'TEST',
+      version: 'v1',
+      coverage: halfOpenIntervalSec(0, 120),
+      sessions: [halfOpenIntervalSec(0, 60)],
+      periods: { '1d': [halfOpenIntervalSec(0, 120)] },
+    });
+    expect(source.cacheIdentity).toContain('"calendarId":"TEST"');
+    expect(source.cacheIdentity).toContain('"periods":');
+    expect(source.cacheIdentity).not.toContain('MUTATED');
+    expect(Object.isFrozen(source)).toBe(true);
+    expect(Object.isFrozen(source.capabilities)).toBe(true);
+    expect(Object.isFrozen(source.capabilities.timeframes)).toBe(true);
+    expect(Object.isFrozen(source.capabilities.calendar)).toBe(true);
+    expect(Object.isFrozen(source.capabilities.calendar?.coverage)).toBe(true);
+    expect(Object.isFrozen(source.capabilities.calendar?.sessions)).toBe(true);
+    expect(Object.isFrozen(source.capabilities.calendar?.sessions[0])).toBe(true);
+    expect(Object.isFrozen(source.capabilities.calendar?.periods)).toBe(true);
+    expect(Object.isFrozen(source.capabilities.calendar?.periods?.['1d'])).toBe(true);
+    expect(Object.isFrozen(source.capabilities.calendar?.periods?.['1d']?.[0])).toBe(true);
+  } finally {
+    rmSync(scoped, { recursive: true, force: true });
+  }
+});
+
+test('CsvProvider exact acquisitions own deeply frozen parse-cache-safe bar snapshots', async () => {
+  const immutable = mkdtempSync(join(tmpdir(), 'pinery-csv-immutable-'));
+  try {
+    writeFileSync(
+      join(immutable, 'BTC_1m.csv'),
+      ['time,open,high,low,close,volume', '0,1,2,0.5,1.5,10', '60,2,3,1.5,2.5,20'].join('\n'),
+    );
+    const provider = new CsvProvider({
+      dir: immutable,
+      alignment: 'utc-24x7',
+      timeframes: ['1m'],
+    });
+    const source = await provider.resolveHistorySource('BTC');
+    const identity = source.cacheIdentity;
+    const request = { timeframe: '1m', requested: halfOpenIntervalSec(0, 120) };
+
+    const first = await source.history(request);
+    expect(Object.isFrozen(first.bars)).toBe(true);
+    expect(first.bars.every(Object.isFrozen)).toBe(true);
+    expect(() =>
+      (first.bars as unknown as Array<{ close: number }>).push({ close: 999 }),
+    ).toThrow();
+    expect(() => {
+      (first.bars[0] as { close: number }).close = 999;
+    }).toThrow();
+
+    const second = await source.history(request);
+    expect(second.bars).not.toBe(first.bars);
+    expect(second.bars[0]).not.toBe(first.bars[0]);
+    expect(second.bars).toEqual([
+      { time: 0, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 },
+      { time: 60, open: 2, high: 3, low: 1.5, close: 2.5, volume: 20 },
+    ]);
+    expect(second.provenance.cacheIdentity).toBe(identity);
+    expect(source.cacheIdentity).toBe(identity);
+  } finally {
+    rmSync(immutable, { recursive: true, force: true });
+  }
+});
+
+test('CsvProvider exact parsing rejects malformed raw rows before range repair', async () => {
+  const malformed = mkdtempSync(join(tmpdir(), 'pinery-csv-malformed-exact-'));
+  try {
+    const header = 'time,open,high,low,close,volume\n';
+    writeFileSync(
+      join(malformed, 'UNSORTED_1m.csv'),
+      header + '0,1,2,0.5,1.5,10\n120,2,3,1.5,2.5,20\n60,3,4,2.5,3.5,30\n',
+    );
+    writeFileSync(
+      join(malformed, 'DUPLICATE_1m.csv'),
+      header + '0,1,2,0.5,1.5,10\n0,2,3,1.5,2.5,20\n60,3,4,2.5,3.5,30\n',
+    );
+    writeFileSync(
+      join(malformed, 'NONFINITE_1m.csv'),
+      header + '0,1,2,0.5,1.5,10\n60,2,Infinity,1.5,2.5,20\n',
+    );
+    writeFileSync(
+      join(malformed, 'BAD_OHLC_1m.csv'),
+      header + '0,1,2,0.5,1.5,10\n60,1,1.2,0.5,1.5,20\n',
+    );
+    writeFileSync(
+      join(malformed, 'LEGACY_1m.csv'),
+      header + '60,2,3,1.5,2.5,20\n0,1,2,0.5,1.5,10\n60,3,4,2.5,3.5,30\n',
+    );
+
+    const provider = new CsvProvider({
+      dir: malformed,
+      alignment: 'utc-24x7',
+      timeframes: ['1m'],
+    });
+    const cases = [
+      ['UNSORTED', 'bar-order', halfOpenIntervalSec(0, 60)],
+      ['DUPLICATE', 'bar-order', halfOpenIntervalSec(60, 120)],
+      ['NONFINITE', 'bar-value', halfOpenIntervalSec(0, 60)],
+      ['BAD_OHLC', 'bar-ohlc', halfOpenIntervalSec(0, 60)],
+    ] as const;
+
+    for (const [symbol, code, requested] of cases) {
+      const source = await provider.resolveHistorySource(symbol);
+      let failure: unknown;
+      try {
+        await source.history({ timeframe: '1m', requested });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(ExactHistoryError);
+      expect(failure).toMatchObject({ kind: 'malformed', code });
+    }
+
+    const legacy = await provider.history('LEGACY', '1m');
+    expect(legacy.map((bar) => bar.time)).toEqual([0, 60]);
+    expect(legacy[1]).toEqual({
+      time: 60,
+      open: 3,
+      high: 4,
+      low: 2.5,
+      close: 3.5,
+      volume: 30,
+    });
+  } finally {
+    rmSync(malformed, { recursive: true, force: true });
+  }
+});
+
+test('CsvProvider requires and preserves caller-supplied UTC weekly anchor evidence', async () => {
+  const weekly = mkdtempSync(join(tmpdir(), 'pinery-csv-weekly-anchor-'));
+  try {
+    const mondayAnchor = unixSecond(4 * 86_400);
+    writeFileSync(
+      join(weekly, 'BTC_1w.csv'),
+      `time,open,high,low,close,volume\n${mondayAnchor},1,2,0.5,1.5,10\n`,
+    );
+    const anchored = new CsvProvider({
+      dir: weekly,
+      alignment: 'utc-24x7',
+      weekAnchorSec: mondayAnchor,
+      timeframes: ['1w'],
+    });
+    const anchoredSource = await anchored.resolveHistorySource('BTC');
+    const acquisition = await acquireExactHistory(anchoredSource, {
+      targetTimeframe: '1w',
+      requested: halfOpenIntervalSec(mondayAnchor, mondayAnchor + 7 * 86_400),
+    });
+    expect(anchoredSource.capabilities.weekAnchorSec).toBe(mondayAnchor);
+    expect(acquisition.complete).toBe(true);
+    expect(acquisition.provenance.weekAnchorSec).toBe(mondayAnchor);
+
+    const anchorless = new CsvProvider({
+      dir: weekly,
+      alignment: 'utc-24x7',
+      timeframes: ['1w'],
+    });
+    await expect(
+      acquireExactHistory(await anchorless.resolveHistorySource('BTC'), {
+        targetTimeframe: '1w',
+        requested: halfOpenIntervalSec(mondayAnchor, mondayAnchor + 7 * 86_400),
+      }),
+    ).rejects.toMatchObject({ kind: 'unsupported', code: 'weekly-anchor-missing' });
+  } finally {
+    rmSync(weekly, { recursive: true, force: true });
+  }
 });

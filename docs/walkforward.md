@@ -30,7 +30,7 @@ Plus shared flags — see [common options](./common-options.md):
 - **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--concurrency` · `--workers` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
-- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills))
+- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills)) · `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier exact mode](./common-options.md#fill-model--bar-magnifier))
 - **Metrics:** `--periods-per-year` · `--risk-free-rate`
 - **Output:** `--json`
 
@@ -41,6 +41,14 @@ Plus shared flags — see [common options](./common-options.md):
 **Rolling vs anchored.** By default the IS is _rolling_: a fixed-width window that slides forward alongside its OOS. With `--anchored`, the IS is _expanding_ — it always starts at bar 0 and grows, so later windows optimize on more history.
 
 **IS as warmup.** Each window's winner runs over the full window (IS + OOS): the IS stretch doubles as indicator warmup. Because a piner run is deterministic bar by bar, the winner's IS prefix is identical to the sweep run that selected it. OOS performance is the equity-curve difference across the IS/OOS boundary; OOS trades are those that exit inside the segment (a position opened in-sample and carried across counts, as it would live).
+
+**Bar Magnifier fold rule.** When requested, each fold resolves one exact
+dataset over its complete IS+OOS chart envelope before candidate ranking. The
+IS sweep receives only a prefix view of that same immutable acquisition and the
+winner reuses the full dataset. A fold with 200,000 eligible mapped target bars
+is allowed; 200,001 is a typed permanent failure, including when the retained-
+suffix boundary would be inside IS. Failed folds remain in `windows[]` with a
+serializable `failure` diagnostic.
 
 **Reading the verdict.** WFE is per-bar OOS profit ÷ per-bar IS profit across all windows. ≈ 1 means the edge holds out of sample; ≪ 1 means the sweep was fitting noise. Also watch the OOS-positive count and whether the winning combo is _stable_ across windows — a different winner every window is itself a red flag.
 
@@ -57,7 +65,11 @@ A header names the run (symbol, window count, IS/OOS bar sizes, rolling vs ancho
 
 The closing **aggregate** line is the verdict: OOS-positive count, mean IS%, mean OOS%, and the headline **WFE**.
 
-`--json` emits the structured `WalkforwardReport` instead of the table: `windows[]` (each with `isFrom`/`isTo`/`oosFrom`/`oosTo` bar indices and times, `winner`, `winnerId`, `isProfitPercent`, `oosProfitPercent`, `oosTrades`, `efficiency`, `result`) and `aggregate` (`oosPositive`, `meanIsProfitPercent`, `meanOosProfitPercent`, `walkForwardEfficiency`, `windows`, `failed`).
+`--json` emits the structured verdict instead of the table: `windows[]`
+(each with bar indices/times, winner and IS/OOS metrics, plus any typed
+`failure`; the heavy full-window result is omitted, while authoritative
+`calcOnOrderFills` / `barMagnifier` markers are projected) and `aggregate`
+(`oosPositive`, means, WFE, window count, and failed count).
 
 ## Examples
 

@@ -17,15 +17,26 @@
 import type { HistoryProvider, HistoryRange } from '@heyphat/pinery';
 import { toPinerTimeframe } from '@heyphat/pinery';
 import {
-  compile,
   CompileError,
   PortfolioEngine,
   type PortfolioSleeveSpec,
   type StrategyMetrics,
 } from '@heyphat/piner';
 import type { Job, JobMetricsOptions, Bar } from './job.js';
-import type { StrategySummary, StrategyTrade } from './result.js';
-import { resolveSecurity } from './security.js';
+import type { BarMagnifierSummary, StrategySummary, StrategyTrade } from './result.js';
+import {
+  assertResolvedMagnifierDatasetForJob,
+  projectAuthoritativeBarMagnifierReport,
+  toPinerBarMagnifierData,
+} from './execute.js';
+import {
+  createMagnifierResolutionScope,
+  preflightBarMagnifier,
+  resolveBarMagnifier,
+} from './magnifier.js';
+import { compilePinerSource } from './piner-capabilities.js';
+import { BarMagnifierError } from './failure.js';
+import { assertResolvedSecurityForBarMagnifier, resolveSecurity } from './security.js';
 import { resolveInstrument } from './instrument.js';
 import { alignEquity, returnCorrelation, type Sleeve } from './align.js';
 
@@ -62,6 +73,10 @@ export interface PortfolioOptions {
 
 export interface SleeveContribution {
   symbol: string;
+  /** Chart bars processed by this sleeve (portfolio magnifier denominator input). */
+  barsProcessed: number;
+  /** Piner's authoritative optional per-sleeve block, never inferred from data. */
+  barMagnifier?: BarMagnifierSummary;
   /** wᵢ·P (isolated); 0 under shared — the pot is not pre-split. */
   funding: number;
   netProfit: number;
@@ -79,6 +94,13 @@ export interface SleeveContribution {
   trades: StrategyTrade[];
 }
 
+export interface PortfolioBarMagnifierSummary extends BarMagnifierSummary {
+  /** Sum of sleeve processed chart bars; never the master-clock union length. */
+  processedBars: number;
+  /** magnifiedBars / processedBars, validated to remain within 0..100. */
+  coveragePercent: number;
+}
+
 export interface PortfolioReport {
   mode: 'isolated' | 'shared';
   symbols: string[];
@@ -90,6 +112,9 @@ export interface PortfolioReport {
   /** Broker-verbatim-shaped portfolio stats (percent fields relative to the pot;
    *  fields with no portfolio meaning — avgTradePercent, maxContractsHeld — are NaN). */
   summary: StrategySummary;
+  /** Piner aggregate block plus its sleeve-sum denominator. Omitted when no
+   *  sleeve requested magnification. */
+  barMagnifier?: PortfolioBarMagnifierSummary;
   /** piner's computeStrategyMetrics over the portfolio curve on the master clock. */
   metrics: StrategyMetrics;
   /** Merged ledger: symbol-tagged, exit-time sorted, cumProfit portfolio-wide. */
@@ -107,10 +132,11 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
   const pinerTf = toPinerTimeframe(opts.timeframe);
   const fetchConcurrency = Math.max(1, opts.concurrency ?? 4);
 
-  // Compile first — a bad script should fail before any network I/O.
+  // Compile/preflight first — bad scripts and exact-mode capability errors must
+  // fail before any provider I/O or partial sleeve selection.
   let compiled;
   try {
-    compiled = compile(opts.source);
+    compiled = compilePinerSource(opts.source);
   } catch (err) {
     throw new Error(`portfolio: ${err instanceof CompileError ? err.message : String(err)}`);
   }
@@ -121,10 +147,13 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     throw new Error(
       'portfolio: the script is an indicator (no strategy() call) — portfolio needs a strategy',
     );
+  const magnifierPreflight = preflightBarMagnifier(opts.source, pinerTf, undefined);
+  const magnifierRequested = magnifierPreflight.requested;
 
   // Fetch every sleeve's history (bounded concurrency, slots keep basket order).
   const slots = new Array<Job | undefined>(opts.symbols.length);
   const fetchErrors: { symbol: string; error: string }[] = [];
+  const fetchCauses = new Array<unknown>(opts.symbols.length);
   await mapLimit(opts.symbols, fetchConcurrency, async (symbol, i) => {
     try {
       const bars = await opts.provider.history(symbol, opts.timeframe, opts.range);
@@ -143,15 +172,56 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
       };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      fetchCauses[i] = err;
       fetchErrors.push({ symbol, error });
       opts.onFetchError?.(symbol, error);
     }
   });
+  if (magnifierRequested && fetchErrors.length > 0) {
+    const index = fetchCauses.findIndex((cause) => cause !== undefined);
+    const symbol = opts.symbols[index] ?? 'unknown';
+    const cause = fetchCauses[index];
+    throw cause instanceof Error
+      ? new Error(
+          `portfolio: magnified sleeve ${symbol} failed before atomic run: ${cause.message}`,
+          {
+            cause,
+          },
+        )
+      : new Error(
+          `portfolio: magnified sleeve ${symbol} failed before atomic run: ${String(cause)}`,
+        );
+  }
   const jobs = slots.filter((j): j is Job => j != null);
   if (jobs.length === 0) throw new Error('portfolio: no symbols with history to run');
 
-  // request.security host protocol, per sleeve — exactly scan's path.
-  if (opts.resolveSecurity !== false) {
+  if (magnifierRequested) {
+    // Resolve every sleeve's full symbol/window/provider-specific exact dataset
+    // before constructing a PortfolioSleeveSpec. Any rejection aborts the whole
+    // basket; no magnified sleeve is ever dropped.
+    const magnifierScope = createMagnifierResolutionScope();
+    await mapLimit(jobs, fetchConcurrency, async (job) => {
+      await resolveBarMagnifier(job, opts.timeframe, opts.provider, {
+        securityConcurrency: fetchConcurrency,
+        onSecurityFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+        onSecurityError: opts.onSecurityError,
+        scope: magnifierScope,
+      });
+    });
+    // Portfolio bypasses executeJob and calls piner's multi-sleeve engine
+    // directly, so apply the same serialized Job/data boundary before creating
+    // any sleeve spec. This keeps local, worker, and portfolio execution equally
+    // fail-closed against stale or tampered envelopes/security proofs.
+    for (const job of jobs) {
+      assertResolvedMagnifierDatasetForJob(job, magnifierPreflight);
+      assertResolvedSecurityForBarMagnifier(
+        job.source,
+        magnifierPreflight.securityDependencies,
+        job,
+      );
+    }
+  } else if (opts.resolveSecurity !== false) {
+    // Legacy request.security host protocol, per sleeve — exactly scan's path.
     await resolveSecurity(opts.source, jobs, opts.timeframe, pinerTf, opts.provider, {
       range: opts.range,
       inputs: opts.inputs,
@@ -182,6 +252,7 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     securityBars: j.securityBars
       ? Object.fromEntries(Object.entries(j.securityBars).map(([k, v]) => [k, toPinerBars(v)]))
       : undefined,
+    magnifierData: j.magnifier ? toPinerBarMagnifierData(j.magnifier) : undefined,
   }));
   const engine = new PortfolioEngine(compiled, {
     mode,
@@ -205,8 +276,14 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
       equityCurve: s.report.equityCurve,
       initialCapital: s.funding,
     };
+    const barMagnifier = projectAuthoritativeBarMagnifierReport(
+      s.report as unknown,
+      magnifierRequested,
+    );
     return {
       symbol: s.symbol,
+      barsProcessed: s.report.barsProcessed,
+      ...(barMagnifier ? { barMagnifier } : {}),
       funding: s.funding,
       netProfit: s.report.netProfit,
       closedTrades: s.report.closedTrades.length,
@@ -222,7 +299,91 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     };
   });
 
+  const aggregateBarMagnifier = projectAuthoritativeBarMagnifierReport(
+    r as unknown,
+    magnifierRequested,
+  );
+  let portfolioBarMagnifier: PortfolioBarMagnifierSummary | undefined;
+  if (aggregateBarMagnifier) {
+    const processedBars = res.sleeves.reduce((sum, sleeve) => sum + sleeve.report.barsProcessed, 0);
+    const blocks = sleeveContribs.flatMap((sleeve) =>
+      sleeve.barMagnifier ? [sleeve.barMagnifier] : [],
+    );
+    const sum = (
+      field: keyof Pick<
+        BarMagnifierSummary,
+        'magnifiedBars' | 'fallbackBars' | 'capFallbackBars' | 'dataFallbackBars' | 'intrabarsUsed'
+      >,
+    ): number => blocks.reduce((total, block) => total + block[field], 0);
+    const mismatches = [
+      'magnifiedBars',
+      'fallbackBars',
+      'capFallbackBars',
+      'dataFallbackBars',
+      'intrabarsUsed',
+    ].filter(
+      (field) =>
+        aggregateBarMagnifier[field as keyof BarMagnifierSummary] !==
+        sum(field as Parameters<typeof sum>[0]),
+    );
+    const active = blocks.some((block) => block.active);
+    const coverage = blocks.some((block) => block.coverage === 'mixed-data-fallback')
+      ? 'mixed-data-fallback'
+      : blocks.some((block) => block.coverage === 'tv-cap-fallback')
+        ? 'tv-cap-fallback'
+        : active
+          ? 'complete'
+          : 'no-data';
+    if (aggregateBarMagnifier.active !== active) mismatches.push('active');
+    if (aggregateBarMagnifier.coverage !== coverage) mismatches.push('coverage');
+    if (blocks.some((block) => block.targetTimeframe !== aggregateBarMagnifier.targetTimeframe)) {
+      mismatches.push('targetTimeframe');
+    }
+    const classified = aggregateBarMagnifier.magnifiedBars + aggregateBarMagnifier.fallbackBars;
+    if (
+      blocks.length !== res.sleeves.length ||
+      mismatches.length > 0 ||
+      classified !== processedBars
+    ) {
+      throw new BarMagnifierError({
+        kind: 'malformed',
+        code: 'malformed-piner-portfolio-bar-magnifier-report',
+        message:
+          'Piner portfolio Bar Magnifier state/counters must match per-sleeve reports and the processed-bar denominator',
+        details: {
+          sleeves: res.sleeves.length,
+          blocks: blocks.length,
+          mismatches,
+          classified,
+          processedBars,
+          expectedActive: active,
+          expectedCoverage: coverage,
+        },
+      });
+    }
+    const coveragePercent =
+      processedBars > 0 ? (aggregateBarMagnifier.magnifiedBars / processedBars) * 100 : 0;
+    if (!(coveragePercent >= 0 && coveragePercent <= 100)) {
+      throw new BarMagnifierError({
+        kind: 'malformed',
+        code: 'piner-portfolio-bar-magnifier-coverage-out-of-range',
+        message: 'Piner portfolio Bar Magnifier coverage must be between 0% and 100%',
+        details: {
+          coveragePercent,
+          processedBars,
+          magnifiedBars: aggregateBarMagnifier.magnifiedBars,
+        },
+      });
+    }
+    portfolioBarMagnifier = {
+      ...aggregateBarMagnifier,
+      processedBars,
+      coveragePercent,
+    };
+  }
+
   const summary: StrategySummary = {
+    ...(aggregateBarMagnifier ? { barMagnifier: aggregateBarMagnifier } : {}),
     initialCapital: r.initialCapital,
     netProfit: r.netProfit,
     netProfitPercent: pct(r.netProfit, r.initialCapital),
@@ -258,6 +419,7 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     equityCurve: r.equityCurve,
     initialCapital: r.initialCapital,
     summary,
+    ...(portfolioBarMagnifier ? { barMagnifier: portfolioBarMagnifier } : {}),
     metrics,
     trades: r.closedTrades.map((t) => ({ ...t })),
     sleeves: sleeveContribs,

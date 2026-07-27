@@ -24,6 +24,15 @@ pinerun backtest <script.pine> --symbol <sym> [options]
 
 The ledger and equity curve are **always** computed, so `--csv`, `--plot`, and `--json` need no extra flags (unlike `scan`).
 
+With Bar Magnifier requested, metadata and the complete exact/static-security
+plan must resolve before execution. A permanent exact-mode failure is emitted as
+a typed failed `RunResult`; live `--watch` stops instead of retrying an
+unsupported configuration forever. In the shipped self-contained binary,
+`@heyphat/piner` 0.10.0 fails an effective request at capability preflight before
+that exact plan is prepared. A future contract-capable but traversal-disabled
+piner may prepare the plan, but must report requested/inactive and retain chart-
+OHLC fills.
+
 ## Common options
 
 Plus shared flags — see [common options](./common-options.md):
@@ -31,7 +40,7 @@ Plus shared flags — see [common options](./common-options.md):
 - **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
-- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills))
+- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills)) · `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier](./common-options.md#fill-model--bar-magnifier))
 - **Metrics:** `--periods-per-year` · `--risk-free-rate`
 - **Output:** `--json`
 

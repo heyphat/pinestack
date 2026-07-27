@@ -5,9 +5,10 @@ engine. Pinerun turns a single deterministic piner run into a programmable
 fan-out: run one Pine script across many symbols — or one script across many
 parameter sets on a single symbol — in parallel, then rank the results.
 
-Because a piner run is a pure function of `(source, bars, inputs, backend)`, every
-run is cacheable and reproducible — pinerun leans on that for memoization and for
-trivial parallelism across worker threads.
+Because a piner run is a pure function of its source, chart/security/magnifier
+datasets, inputs, and execution options, every run is cacheable and reproducible —
+pinerun leans on that for memoization and for trivial parallelism across worker
+threads.
 
 - **Browser-safe core** (`@heyphat/pinerun`): the job model, the pure run
   primitive, an in-process runner, the ranker, the `scan` fan-out, the single-run
@@ -61,9 +62,10 @@ bun run build:bin --list       # supported targets
 
 ### Programmatic use
 
-The packages run from TypeScript source in this workspace (`bun install`); an npm
-release for external consumption is planned. Until then, consume `@heyphat/pinerun`
-and `@heyphat/pinery` from a checkout — see [Quick start](#quick-start-programmatic).
+The TypeScript workspace entry points are available when developing from a source
+checkout (`bun install`). Pinestack releases the self-contained `pinerun` binary;
+`@heyphat/pinerun` and `@heyphat/pinery` are not separately published npm
+artifacts. See [Quick start](#quick-start-programmatic) for checkout-based API use.
 
 ## Quick start (programmatic)
 
@@ -100,9 +102,10 @@ try {
 
 ## Architecture
 
-`scan()` is the orchestrator: it pulls history from **pinery**, fans the work out
-across a **Runner**, and ranks what comes back. Every run is a pure function of
-`(source, bars, inputs)`, which is what makes the fan-out and the memoization safe.
+`scan()` is the orchestrator: it pulls history from **pinery**, resolves any
+exact lower-timeframe and static-security datasets before fan-out, sends work
+through a **Runner**, and ranks what comes back. Every run is a pure function of
+its complete serialized `Job`, which is what makes fan-out and memoization safe.
 
 ```mermaid
 flowchart TB
@@ -167,7 +170,7 @@ collapsed to a ranked table:
    Pine **source string** (not a compiled object — functions can't cross a worker
    boundary).
 3. **Fan out** — `runner.runAll` sends jobs through `fanOut`, which caps concurrency
-   and memoizes by `jobHash` so identical `(source, bars, inputs)` never run twice.
+   and memoizes by `jobHash` so complete execution-equivalent jobs never run twice.
 4. **Execute** — each worker runs the pure `executeJob`: compile the source (cached
    per worker, so one script scanned across N symbols compiles once per worker), run
    piner's `Engine` over the bars, and project the outputs into a `RunResult`.
@@ -204,6 +207,11 @@ interface Job {
   //                  keeps the source header. Part of the determinism key.
   //                  Needs @heyphat/piner > 0.9.0 — an explicit override on an
   //                  older engine REJECTS the job with an actionable error
+  useBarMagnifier?: boolean; // strict tri-state host override of the script's
+  //                  use_bar_magnifier: unset keeps the header; true/false wins
+  magnifier?: ResolvedMagnifierDataset; // exact, piner-ready LTF data resolved
+  //                  before execution; includes chart closes, coverage,
+  //                  provenance, contract/mapping versions, and acquisition key
 }
 ```
 
@@ -228,6 +236,8 @@ interface RunResult {
   securityRequests?: SecurityRequest[]; // request.security[_lower_tf] deps this run declared
   diagnostics?: string[]; // compile diagnostics ("error: ..." / "warning: ...")
   error?: string; // present when ok === false
+  failure?: RunFailure; // serializable permanent Bar Magnifier / exact-history
+  //                  rejection; ordinary compile/runtime errors keep `error`
   elapsedMs?: number;
 }
 
@@ -236,6 +246,8 @@ interface StrategySummary {
   calcOnOrderFills?: boolean; // true ONLY when the engine actually ran
   //                  calc_on_order_fills (read from effective broker state,
   //                  never the requested configuration); omitted when off
+  barMagnifier?: BarMagnifierSummary; // piner's optional authoritative report;
+  //                  never inferred from the request or injected data
   initialCapital: number;
   netProfit: number;
   netProfitPercent: number;
@@ -263,6 +275,24 @@ interface StrategySummary {
   barsInMarket: number; // bars with an open position
   metrics: StrategyMetrics; // derived analytics, computed BY PINER (below)
 }
+
+interface BarMagnifierSummary {
+  requested: true;
+  active: boolean;
+  targetTimeframe: string; // piner's automatically mapped Pine timeframe
+  magnifiedBars: number;
+  fallbackBars: number;
+  capFallbackBars: number;
+  dataFallbackBars: number;
+  intrabarsUsed: number;
+  firstMagnifiedBar?: number;
+  coverage: 'complete' | 'tv-cap-fallback' | 'mixed-data-fallback' | 'no-data';
+}
+
+type RunFailure = BarMagnifierFailure | ExactHistoryFailure;
+// Both variants are serializable, permanent exact-boundary outcomes with a
+// stable kind/code/message/details payload. Provider/network errors outside
+// that boundary retain each command's existing bounded-retry/fetch behavior.
 
 // piner's `Engine.strategyMetrics()` projected verbatim — derived risk-adjusted
 // analytics, kept distinct from the broker-verbatim numbers above.
@@ -295,10 +325,13 @@ or inside a worker. Compile errors and runtime errors are captured into
 
 ### `jobHash(job) → string`
 
-The determinism key: a fast FNV-1a hash over `source + timeframe + backend +
-mintick + minQty + calcOnOrderFills + a numeric digest of the bars + inputs + metrics options`. Two jobs with
-identical inputs hash equal (so results memoize); changing any input changes the
-hash.
+The determinism key is a strong full-content digest over the complete executable
+job: source, symbol/timeframe, chart and security bars, inputs, backend,
+instrument/metric/projection options, the tri-state overrides, and the resolved
+Bar Magnifier contract, mapping, chart-close, coverage, provenance, acquisition,
+and LTF-bar content. Equal jobs hash equally across local/worker paths; changing
+any execution-relevant byte changes the key. No sampled numeric digest or weak
+FNV shortcut is used.
 
 ## Runners
 
@@ -407,6 +440,8 @@ interface ScanOptions {
   calcOnOrderFills?: boolean; // host override of the script's
   //                  calc_on_order_fills (unset → source header decides);
   //                  needs piner > 0.9.0, rejected otherwise
+  useBarMagnifier?: boolean; // strict tri-state host override; target timeframe
+  //                  is always piner's automatic TradingView mapping
   direction?: 'asc' | 'desc';
   top?: number;
   concurrency?: number; // job execution default: worker-pool size (4 for LocalRunner)
@@ -426,14 +461,17 @@ interface ScanReport {
   spec: RankSpec;
   ranked: RankedResult[]; // sorted, top-N applied
   results: RunResult[]; // every run (incl. failures), symbol order
-  errors: RunResult[]; // runs that failed (compile/runtime)
+  errors: RunResult[]; // compile/runtime and typed exact-mode failures
   fetchErrors: { symbol: string; error: string }[];
 }
 ```
 
 `scan` maps the canonical `timeframe` to piner's label with pinery's
-`toPinerTimeframe`, fetches history with bounded concurrency, and continues past
-per-symbol fetch failures (collected in `fetchErrors`).
+`toPinerTimeframe`. Ordinary mode fetches with bounded concurrency and preserves
+its established per-symbol `fetchErrors` behavior. When Bar Magnifier is
+effective, every symbol is preflighted and resolved exactly before fan-out;
+unsupported, malformed, dynamic-security, or provider-limited symbols remain in
+`results`/`errors` as typed failures rather than silently shrinking the universe.
 
 On a live terminal, long `scan` and `sweep` runs show a self-erasing progress
 line on stderr (`scan: 132/500 ran · 2 errors · 12.3s · ~40s left`); when
@@ -458,6 +496,76 @@ Every command takes `--help` for its full flag list (e.g. `pinerun scan --help`)
 and `pinerun --version` (or `-v`) prints the CLI version and build commit.
 During development, run the CLI straight from source instead of building the
 binary: `bun packages/pinerun/src/cli.ts <command> …`.
+
+### Bar Magnifier exact mode
+
+`backtest`, `compare`, `scan`, `sweep`, and `walkforward` accept strict tri-state
+`--bar-magnifier` / `--no-bar-magnifier` flags (including explicit boolean
+forms). Absent means the source's `strategy(use_bar_magnifier=...)` declaration
+decides; true or false overrides it. `compare` applies one shared override while
+keeping each source header independent. No custom target timeframe is accepted:
+piner's versioned TradingView mapping chooses it automatically. `portfolio` has
+no basket-wide v1 override; each sleeve follows the source declaration, and the
+CLI rejects either portfolio flag before script/provider I/O.
+
+Pinerun performs metadata preflight, resolves every static
+`request.security[_lower_tf]` dependency through the coverage-aware exact seam,
+and acquires a complete mapped dataset before execution or fan-out. Runtime-
+dynamic security identities, unsupported alignment/timeframes, malformed data,
+incomplete coverage, gaps/truncation, and provider limits fail closed as typed
+permanent outcomes. Ordinary non-magnifier security discovery still uses the
+legacy `history(): Bar[]` path. Backtest/compare fail, watch stops, portfolio
+aborts atomically, and scan/sweep/walk-forward retain explicit failed runs or
+folds. Transient provider/network handling outside the exact boundary is
+unchanged.
+
+Walk-forward acquires one complete IS+OOS dataset per fold before ranking. At
+most 200,000 eligible mapped target bars are allowed (`200,000` succeeds;
+`200,001` fails), including a cap boundary that falls inside IS. Portfolio
+resolves every requested sleeve before creating engine specs, keeps LTF times out
+of the master clock, and reports coverage against the sum of sleeve processed
+chart bars.
+
+#### Runtime and release matrix
+
+| Runtime                                                                         | Effective request                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Shipped self-contained binary / this root checkout: `@heyphat/piner` 0.10.0** | Permanent `piner-bar-magnifier-capability-unavailable` during metadata preflight, before exact provider/static-security I/O or piner execution. No exact dataset is prepared. Explicit/source-effective false continues on chart OHLC. |
+| **Future contract-capable piner, traversal disabled**                           | May map, prepare, validate, and inject exact data, but piner must report `requested: true`, `active: false`; fills remain chart OHLC.                                                                                                  |
+| **Future contract-capable piner, traversal enabled**                            | Reported as magnified only when piner's authoritative block says `active: true`; piner owns target, counters, coverage, and fill timestamps.                                                                                           |
+
+The release binary bakes in the Bun runtime, pinery, and the root-pinned piner
+version. Workspace packages are source/API entry points, not independently
+published npm artifacts that can replace the engine inside an existing binary.
+
+#### Provider matrix behind the runtime gate
+
+| Provider         | Exact source evidence                                                                                     | Limits / current posture                                                                                                                                                                                                                                          |
+| ---------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Binance spot     | UTC 24×7; `1s` plus `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `3d`, `1w` | 1,000/page, newest-first, default 50,000 source-bar cap.                                                                                                                                                                                                          |
+| Binance futures  | UTC 24×7; same common list, no `1s`                                                                       | 1,000/page, default 50,000 source-bar cap.                                                                                                                                                                                                                        |
+| OKX spot/swap    | UTC variants; `1s`, common minute/hour steps, `1d`, `2d`, `3d`, `1w`                                      | 300/page recent, 100/page history, 200 pages; default effective 50,000 cap (60,000 page-capacity ceiling).                                                                                                                                                        |
+| Kraken spot      | UTC 24×7; `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `15d`                                         | Recent 720 bars only; older requested coverage fails provider-limited.                                                                                                                                                                                            |
+| Alpaca / Massive | Advertised equity cadences through weekly                                                                 | Alignment is `unknown` without versioned exchange-session evidence, so exact planning fails closed. Their feed/adjustment and cap settings remain part of source identity.                                                                                        |
+| Static / CSV     | Default: unknown alignment and no declared exact timeframes                                               | Programmatic callers must provide alignment/timeframe evidence (plus a calendar for exchange alignment); content is fingerprinted and `cacheIdentity` can version the dataset. CLI CSV exposes no evidence flags, so it cannot currently establish exact support. |
+| Legacy provider  | No `resolveHistorySource` exact contract                                                                  | Rejected in exact mode; non-magnifier `history()` behavior is preserved.                                                                                                                                                                                          |
+
+Provider caps apply to acquired source bars and are independent of piner's
+200,000 eligible target-bar cap; either limit fails rather than attaching a
+partial fragment. See the complete provider lists and evidence requirements in
+[common options](../../docs/common-options.md#provider-exact-acquisition-matrix).
+
+Results mirror only piner's optional authoritative `strategy.barMagnifier`
+block. `formatFillModel()` distinguishes standard chart OHLC,
+requested/inactive, and active states without inspecting injected data. Under
+the shipped 0.10.0 runtime effective requests never reach data preparation. A
+future compatible but traversal-disabled runtime may prepare exact data and
+then authoritatively report requested/inactive; only an enabled piner report can
+claim active magnification.
+
+Provider exactness is not TradingView-feed parity. Matching TradingView also
+requires its feed, sessions/calendar, timezone, adjustment policy, and OHLC
+construction; TradingView-observed fixtures remain the semantic parity evidence.
 
 ### `init` — scaffold a starter strategy
 
@@ -866,6 +974,8 @@ const { result, fetchError } = await backtest({
   calcOnOrderFills: true, // TV "After order is filled" override (optional;
   //                         result.strategy.calcOnOrderFills reports the
   //                         EFFECTIVE mode — true only when the engine ran it)
+  useBarMagnifier: true, // optional strict boolean override; target TF is
+  //                        automatic and exact data resolves before execution
   metrics: { periodsPerYear: 252 }, // annualization convention (optional)
   // mintick?, backend?, resolveSecurity? (default true), onFetch?
 });
@@ -914,8 +1024,10 @@ compare fairly) and overlaid on one chart — **A cyan, B yellow** on a TTY.
 Piped output can't rely on color, so it prints two stacked monochrome charts
 instead. Flags: `--input-a` / `--input-b` (repeatable, one value each,
 validated per script), `--label-a` / `--label-b` (default: the filenames),
-`--no-chart`, `--json` (both full `RunResult`s), plus the usual
-history/provider/backend/metrics flags. Strategy scripts only.
+`--bar-magnifier` / `--no-bar-magnifier` (one shared tri-state override; absent
+leaves the two source headers independent), `--no-chart`, `--json` (both full
+`RunResult`s), plus the usual history/provider/backend/metrics flags. Strategy
+scripts only; the Bar Magnifier target timeframe is always automatic.
 
 The overlay builder is exported and pure: `overlayChartAscii(a, b, { times,
 guide, color, fmtLabel })` draws any two aligned series on a shared scale.
@@ -1019,10 +1131,12 @@ Sweep-specific flags (everything else — `--tf --from --to --limit --rank --top
 
 **Multi-symbol grid** — `--symbols a,b,c` (or `--universe <file>`) runs every
 combo on every symbol. Bars are fetched once per symbol (bounded concurrency)
-and shared across that symbol's combos; a symbol whose fetch fails is skipped
-and reported (`fetchErrors`) without sinking the rest. The table gains a
-`SYMBOL` column, exports are labeled `<symbol>-<combo>`, and the budget guard
-counts `combos × symbols`.
+and shared across that symbol's combos. Ordinary fetch failures retain the
+legacy `fetchErrors` behavior; when magnification is effective, each requested
+symbol's permanent exact-resolution failure is expanded into explicit failed
+points for all of its combos, so the reported universe never shrinks silently.
+The table gains a `SYMBOL` column, exports are labeled `<symbol>-<combo>`, and
+the budget guard counts `combos × symbols`.
 
 **Smart search** — `--sample 200` swaps the exhaustive grid for 200 randomly
 sampled distinct combos, so a `fast=1:100 slow=1:100` grid (10,000 combos)
@@ -1184,6 +1298,8 @@ interface SweepOptions {
   rank?: string; // default: strategy.netProfit for strategies, else "last"
   calcOnOrderFills?: boolean; // host override of calc_on_order_fills, applied
   //                  to every combo (part of each job's determinism key)
+  useBarMagnifier?: boolean; // strict tri-state override applied to every combo;
+  //                  one exact dataset is shared per symbol across the grid
   direction?: 'asc' | 'desc';
   top?: number;
   concurrency?: number; // default: worker-pool size (4 for LocalRunner)
@@ -1218,8 +1334,8 @@ interface SweepReport {
   gridTotal: number; // full cartesian size — > combos when sample was used
   ranked: SweepPoint[]; // sorted, top-N applied; NaN dropped, ±Infinity kept
   points: SweepPoint[]; // every run, symbols outermost then cartesian order
-  errors: RunResult[]; // runs that failed (compile/runtime)
-  warnings: string[]; // non-fatal caveats (e.g. dynamic request.security)
+  errors: RunResult[]; // compile/runtime and typed exact-mode failures
+  warnings: string[]; // non-fatal ordinary-mode caveats (e.g. dynamic security)
   fetchErrors: { symbol: string; error: string }[]; // symbols whose fetch failed
   fetchError?: string; // set when EVERY symbol's fetch failed
 }
@@ -1300,6 +1416,8 @@ const report = await walkforward({
   axes: parseAxes(['fast=5,10,15,20', 'slow=30:100:10']),
   calcOnOrderFills: true, // optional: applied to BOTH the in-sample sweeps
   //                         and each window's full-window winner run
+  useBarMagnifier: true, // optional tri-state override; each fold resolves one
+  //                        exact full IS+OOS dataset before candidate ranking
   windows: 5, // default 5; 1 = plain IS/OOS split
   oosFraction: 0.25, // default
   anchored: false, // default: rolling IS
@@ -1307,7 +1425,8 @@ const report = await walkforward({
   // baseInputs?, concurrency?, backend?, mintick?, metrics?, maxCombos?, runner?
 });
 // report.windows[i]: { isFrom/isTo/oosFrom/oosTo (+times), winner, winnerId,
-//   isProfitPercent, oosProfitPercent, oosTrades, efficiency, result }
+//   isProfitPercent, oosProfitPercent, oosTrades, efficiency, result, failure? }
+// report.failure: typed preflight rejection before folds could be planned
 // report.aggregate: { oosPositive, meanIsProfitPercent, meanOosProfitPercent,
 //   walkForwardEfficiency, windows, failed }
 ```
@@ -1317,12 +1436,18 @@ anchored)` returns the bar-index plan (`isFrom/isTo/oosFrom/oosTo`, half-open).
 
 > **Bars are fetched once** and shared across every combo (the worker pool also
 > serializes the shared series to each worker once, not once per combo).
-> `request.security` dependencies are likewise resolved once — with one caveat:
-> if a dependency's symbol/timeframe is _computed from a swept input_ (rare), a
-> single resolution can't cover every combo; use `--no-security` for that case.
-> When a sweep's script has _dynamic_ (runtime-computed) `request.security`
-> arguments, the report carries a warning (`report.warnings`, echoed by the CLI)
-> so this can't go unnoticed.
+> In ordinary mode, `request.security` dependencies are likewise resolved once;
+> dynamic runtime requests retain the legacy warning/degradation behavior and
+> `--no-security` remains available. In effective Bar Magnifier mode there is no
+> approximation: every static dependency is completed against the full fold,
+> runtime-dynamic symbol/timeframe/lookahead identities are permanently rejected,
+> and `--no-security` cannot bypass the exact requirement.
+>
+> A magnified fold acquires one full IS+OOS envelope before ranking. The exported
+> `inspectWalkforwardMagnifierCap` / `assertWalkforwardMagnifierCap` helpers enforce
+> the inclusive 200,000 eligible-target-bar limit and report whether the moving
+> cap boundary would fall inside IS; an over-cap fold is retained as a typed
+> failed diagnostic before any candidate runs.
 
 > **Overfitting.** Picking the single best of many combos usually fits past noise,
 > not a durable edge. Treat sweep as _candidate generation_ and validate the
@@ -1428,11 +1553,27 @@ Flags: `--symbols`/`--universe` (basket, priority order); `--mode
 isolated|shared`; `--capital <P>` (default N × the script's initial_capital);
 `--weights sym=frac,...` (isolated only; normalized); `--input` (applied to every
 sleeve); `--trades`/`--csv`/`--plot`/`--json`; plus the usual
-history/provider/backend/metrics flags. `--csv` writes `portfolio-equity.csv` +
-`portfolio-trades.csv` (symbol-tagged, exit-time sorted) plus per-sleeve files;
-`--plot` writes `portfolio.html` + per-sleeve charts. A symbol that fails to fetch
-is dropped with a warning (under `shared` mode a smaller basket is a _different_
-backtest, so it's called out loudly). Strategy scripts only.
+history/provider/backend/metrics flags. `portfolio` intentionally has no v1
+portfolio-wide Bar Magnifier override: every sleeve resolves the shared source's
+header setting against its own symbol/window/provider before any
+`PortfolioSleeveSpec` is created. If magnification is requested, every requested
+sleeve must fetch and resolve successfully or the whole basket aborts atomically;
+no sleeve is silently dropped. Exact LTF timestamps are data for that sleeve only
+and never join the master clock. In ordinary non-magnifier mode, a symbol that
+fails to fetch retains the existing drop-with-warning behavior (especially loud
+under `shared`, where a smaller basket is a different backtest).
+
+`--csv` writes `portfolio-equity.csv` + `portfolio-trades.csv` (symbol-tagged,
+exit-time sorted) plus per-sleeve files; `--plot` writes `portfolio.html` +
+per-sleeve charts. Strategy scripts only.
+
+The report mirrors piner's authoritative per-sleeve and aggregate Bar Magnifier
+blocks without inferring activation from injected data. Aggregate counters are
+sleeve sums, coverage precedence is `mixed-data-fallback` then
+`tv-cap-fallback` then `complete`/`no-data`, and coverage uses the sum of sleeve
+processed chart bars (never the master-clock union), validated within 0–100%.
+Current probe-gated piner traversal therefore remains requested-but-inactive and
+does not alter merged-ledger event times.
 
 > **CSV clocks.** In `portfolio-trades.csv` the `entryBar`/`exitBar` columns are
 > **sleeve-local** bar indices (they join that symbol's `<SYMBOL>-equity.csv`),
@@ -1486,11 +1627,13 @@ const report = await portfolio({
   mode: 'shared', // 'isolated' (default) | 'shared'
   capital: 30000, // default: N × the script's initial_capital
   weights: { BTCUSDT: 0.5, ETHUSDT: 0.3, SOLUSDT: 0.2 }, // isolated only
+  // No useBarMagnifier option in v1: each sleeve follows source metadata.
   // inputs?, backend?, mintick?, concurrency?, metrics?, resolveSecurity?
 });
-// report.equityCurve / times (master clock), initialCapital, summary (StrategySummary),
-// metrics (StrategyMetrics), trades (merged, symbol-tagged), sleeves (contribution),
-// fetchErrors (dropped symbols), mode, elapsedMs
+// report.equityCurve / times (chart-only master clock), initialCapital,
+// summary (StrategySummary), metrics (StrategyMetrics), trades (merged,
+// symbol-tagged), sleeves (contribution + optional authoritative barMagnifier),
+// barMagnifier (optional validated aggregate), fetchErrors, mode, elapsedMs
 ```
 
 The exact multi-symbol capital semantics (what `strategy.equity` reads under a
@@ -1534,9 +1677,14 @@ pinerun scan examples/rs-vs-eth.pine \
   --symbols BTCUSDT,SOLUSDT,BNBUSDT --tf 1h --limit 300 --rank "last(rs)"
 ```
 
-A dependency whose fetch fails or is disabled degrades to `na` (HTF) / `[]`
-(lower-TF) — exactly piner's no-feed behavior. Each run also surfaces what it
-asked for on `RunResult.securityRequests`.
+Outside exact mode, a dependency whose fetch fails or is disabled retains the
+legacy degradation to `na` (HTF) / `[]` (lower-TF), and each run surfaces its
+requests on `RunResult.securityRequests`. When Bar Magnifier is effective,
+preflight uses piner's static metadata and every static dependency must resolve
+completely before execution. Runtime-dynamic symbol/timeframe/lookahead
+identities fail permanently as
+`dynamic-security-unsupported-with-bar-magnifier`; neither discovery probing nor
+`--no-security` may silently degrade an exact run.
 
 > **Time units.** pinery/pinerun carry `Bar.time` in unix **seconds** (ergonomic
 > for CLI dates and cache keys); piner's engine expects **milliseconds** (its
@@ -1544,27 +1692,44 @@ asked for on `RunResult.securityRequests`.
 > convert at the engine boundary, so `request.security` HTF bucketing and
 > `time()`/`dayofweek`/session builtins compute correctly.
 
-> Dependency discovery is **static-first**: it reads piner's compile-time
-> `securityDependencies` and only runs a discovery pass when a symbol/timeframe is
-> dynamic. `RunResult.securityRequests` still reports what each run declared.
+> Dependency discovery is **static-first**: ordinary mode reads piner's
+> compile-time `securityDependencies` and only runs a discovery pass when a
+> symbol/timeframe is dynamic. `RunResult.securityRequests` still reports what
+> each run declared. Effective Bar Magnifier mode is stricter: it never performs
+> that dynamic probe and accepts only a complete static plan.
 
 ## API summary
 
 **`@heyphat/pinerun`**
 
-- Job: `Job`, `Bar`, `JobMetricsOptions`, `jobId`
-- Result: `RunResult`, `PlotResult`, `AlertResult`, `StrategySummary`, `StrategyTrade`, `StrategyMetrics`
-- Run: `executeJob`, `jobHash`
+- Job: `Job`, `Bar`, `JobMetricsOptions`, `ResolvedMagnifierCoverage`,
+  `ResolvedMagnifierDataset`, `jobId`
+- Result: `RunResult`, `RunFailure`, `PlotResult`, `AlertResult`, `StrategySummary`,
+  `StrategyTrade`, `StrategyMetrics`, `BarMagnifierSummary`; presentation:
+  `FillModelPresentation`, `formatFillModel`
+- Run: `executeJob`, `jobHash`, `assertResolvedMagnifierDatasetForJob`,
+  `toPinerBarMagnifierData`, `projectAuthoritativeBarMagnifierReport`
+- Exact failures/capabilities: `BarMagnifierFailure`, `BarMagnifierFailureKind`,
+  `BarMagnifierError`, `isBarMagnifierFailure`, `PinerCapabilityAdapter`,
+  `pinerCapabilities`, `createPinerCapabilityAdapter`,
+  `SUPPORTED_BAR_MAGNIFIER_CONTRACT_VERSION`
+- Magnifier resolution: `MagnifierPreflight`, `MagnifierResolution`,
+  `ResolveBarMagnifierOptions`, `MagnifierAcquisitionKeyInput`,
+  `magnifierMetadataKey`, `magnifierAcquisitionKey`, `preflightBarMagnifier`,
+  `resolveBarMagnifier`
 - Runners: `Runner`, `RunAllOptions`, `LocalRunner`, `fanOut`
 - Ranking: `Aggregate`, `RankSpec`, `RankedResult`, `RankOptions`, `parseRankSpec`,
   `evalRank`, `rankResults`, `sortRanked`, `selectPlot`
 - Scan: `ScanOptions`, `ScanReport`, `scan`
 - Backtest: `BacktestOptions`, `BacktestReport`, `backtest`
-- Portfolio: `PortfolioOptions`, `PortfolioReport`, `SleeveContribution`, `portfolio`;
-  align helpers `Sleeve`, `unionTimes`, `alignEquity`, `combineEquity`, `returnCorrelation`
+- Portfolio: `PortfolioOptions`, `PortfolioReport`, `SleeveContribution`,
+  `PortfolioBarMagnifierSummary`, `portfolio`; align helpers `Sleeve`, `unionTimes`,
+  `alignEquity`, `combineEquity`, `returnCorrelation`
 - Sweep: `SweepOptions`, `SweepReport`, `SweepPoint`, `sweep`, `validateAxes`
 - Walkforward: `WalkforwardOptions`, `WalkforwardReport`, `WalkforwardWindow`,
-  `WalkforwardAggregate`, `WindowPlan`, `walkforward`, `planWindows`
+  `WalkforwardAggregate`, `WindowPlan`, `WalkforwardMagnifierCapObservation`,
+  `walkforward`, `planWindows`, `inspectWalkforwardMagnifierCap`,
+  `assertWalkforwardMagnifierCap`, `WALKFORWARD_MAGNIFIER_TARGET_BAR_LIMIT`
 - CSV export: `tradesToCsv`, `equityToCsv`, `equityPlotHtml`, `sweepPointsToCsv`,
   `sweepHeatmap`, `SweepHeatmapOptions`
 - Terminal charts: `EquityChartOptions`, `equityChartAscii`, `PriceChartOptions`,
@@ -1581,8 +1746,9 @@ asked for on `RunResult.securityRequests`.
   `parseSpec`, `coerceToken`, `expandRange`, `cartesian`, `comboAt`, `sampleCombos`,
   `comboId`, `countCombos`, `assertComboBudget`, `DEFAULT_MAX_COMBOS`, `DEFAULT_SAMPLE_SEED`
 - Security: `resolveSecurity`, `discoverSecurityRequests`, `classifyRequests`,
-  `planFromStatic`, `resolveLowerFetchTf`, `resolveSameSymbolFetchTf`, `PROBE_SYMBOL`,
-  `ClassifiedRequests`, `DiscoverOptions`, `ResolveSecurityOptions`
+  `planFromStatic`, `resolveLowerFetchTf`, `resolveSameSymbolFetchTf`,
+  `assertStaticSecurityForBarMagnifier`, `assertResolvedSecurityForBarMagnifier`,
+  `PROBE_SYMBOL`, `ClassifiedRequests`, `DiscoverOptions`, `ResolveSecurityOptions`
 
 **`@heyphat/pinerun/node`**
 

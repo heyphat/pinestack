@@ -15,6 +15,9 @@ export function parseTriStateFlag(
   negatedSet: boolean,
   name: string,
 ): boolean | undefined {
+  if ((value != null || bareSet) && negatedSet) {
+    throw new RangeError(`invalid flags: --${name} and --no-${name} cannot be used together`);
+  }
   if (value != null) {
     if (value !== 'true' && value !== 'false')
       throw new RangeError(`invalid --${name}: "${value}" (expected true or false)`);

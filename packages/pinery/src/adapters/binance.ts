@@ -1,17 +1,40 @@
-/**
+/*
  * Binance provider — Spot and USDⓈ-M Futures public klines. Keyless REST, so it
- * works in the browser and Node with no credentials. Pages through `startTime`
- * when a range is given; otherwise returns the most-recent `limit` bars.
+ * works in the browser and Node with no credentials. Ranged loads page newest
+ * to oldest so a safety cap preserves the newest coverage.
  *
  * Canonical pinery timeframes map 1:1 onto Binance intervals.
  */
-import type { Bar, InstrumentInfo } from '../provider.js';
-import { dropUnclosedBars, type HistoryProvider, type HistoryRange } from '../provider.js';
+import type {
+  Bar,
+  HistoryAcquisition,
+  HistoryProvider,
+  HistoryRange,
+  HistoryRequest,
+  HistoryTruncation,
+  InstrumentInfo,
+  ResolvedHistorySource,
+} from '../provider.js';
+import {
+  applyExactQueryRange,
+  applyRange,
+  boundedHistoryRangeToHalfOpenMs,
+  dropUnclosedBars,
+  historyRequestRange,
+  unixSecond,
+} from '../provider.js';
 import type { AssetClass } from '../asset-class.js';
 import { timeframeSeconds } from '../timeframe.js';
 import { fetchJson } from '../http.js';
+import {
+  createHistoryCacheIdentity,
+  historyAcquisitionFromBars,
+  nonSecretBaseUrl,
+  snapshotHistoryCapabilities,
+  snapshotResolvedHistorySource,
+} from '../coverage.js';
 
-const BINANCE_INTERVALS = new Set([
+const BINANCE_COMMON_EXACT_TIMEFRAMES = [
   '1m',
   '3m',
   '5m',
@@ -26,10 +49,14 @@ const BINANCE_INTERVALS = new Set([
   '1d',
   '3d',
   '1w',
-  '1M',
-]);
+] as const;
+const BINANCE_SPOT_EXACT_TIMEFRAMES = ['1s', ...BINANCE_COMMON_EXACT_TIMEFRAMES] as const;
 
+const BINANCE_INTERVALS = new Set<string>([...BINANCE_SPOT_EXACT_TIMEFRAMES, '1M']);
 const MAX_PER_REQUEST = 1000;
+const DEFAULT_MAX_BARS = 50_000;
+/** Binance spot/futures 1w klines open Monday 00:00 UTC. */
+const BINANCE_WEEK_ANCHOR_SEC = unixSecond(4 * 86_400);
 
 export type BinanceMarket = 'spot' | 'futures';
 
@@ -46,103 +73,88 @@ export interface BinanceProviderOptions {
 
 type Kline = [number, string, string, string, string, string, ...unknown[]];
 
+interface LoadedHistory {
+  readonly bars: Bar[];
+  readonly truncated?: HistoryTruncation;
+}
+
 export class BinanceProvider implements HistoryProvider {
   readonly id: string;
   readonly assetClass: AssetClass;
+  private readonly market: BinanceMarket;
   private readonly baseUrl: string;
   private readonly klinesPath: string;
   private readonly maxBars: number;
   private readonly fetchImpl?: typeof fetch;
 
   constructor(opts: BinanceProviderOptions = {}) {
-    const market: BinanceMarket = opts.market ?? 'spot';
-    this.id = market === 'futures' ? 'binance-futures' : 'binance';
-    this.assetClass = market === 'futures' ? 'futures' : 'crypto';
+    this.market = opts.market ?? 'spot';
+    this.id = this.market === 'futures' ? 'binance-futures' : 'binance';
+    this.assetClass = this.market === 'futures' ? 'futures' : 'crypto';
     const defaultBase =
-      market === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com';
+      this.market === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com';
     this.baseUrl = (opts.baseUrl ?? defaultBase).replace(/\/$/, '');
-    this.klinesPath = market === 'futures' ? '/fapi/v1/klines' : '/api/v3/klines';
-    this.maxBars = opts.maxBars ?? 50_000;
+    this.klinesPath = this.market === 'futures' ? '/fapi/v1/klines' : '/api/v3/klines';
+    this.maxBars = positiveLimit(opts.maxBars, DEFAULT_MAX_BARS, 'binance maxBars');
     this.fetchImpl = opts.fetchImpl;
   }
 
   async history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
-    if (!BINANCE_INTERVALS.has(timeframe)) {
-      throw new Error(`binance: unsupported interval "${timeframe}"`);
-    }
-    const sym = symbol.trim().toUpperCase().replace(/\//g, '');
-    const stepMs = timeframeSeconds(timeframe) * 1000;
-
-    // No lower bound → "the most-recent N bars (before `to`)": page BACKWARDS via
-    // endTime so a limit above Binance's 1000-per-request cap is honored instead
-    // of silently truncated to one page.
-    if (range?.from == null) {
-      const target = Math.min(range?.limit ?? 500, this.maxBars);
-      let endMs = range?.to != null ? range.to * 1000 : undefined;
-      const out: Bar[] = [];
-      while (out.length < target) {
-        const perPage = Math.min(MAX_PER_REQUEST, target - out.length);
-        const klines = await this.fetchKlines(sym, timeframe, { endTime: endMs, limit: perPage });
-        if (klines.length === 0) break;
-        for (const k of klines) out.push(toBar(k));
-        endMs = klines[0]![0] - 1; // next page ends just before this page's oldest open
-        if (klines.length < perPage) break;
-      }
-      let bars = dropUnclosedBars(dedupeAscending(out), timeframe);
-      if (bars.length > target) bars = bars.slice(bars.length - target);
-      return bars;
-    }
-
-    const endMs = range.to != null ? range.to * 1000 : Date.now();
-    let startMs = range.from * 1000;
-
-    const out: Bar[] = [];
-    let truncated = false;
-    while (startMs <= endMs) {
-      if (out.length >= this.maxBars) {
-        truncated = true;
-        break;
-      }
-      const klines = await this.fetchKlines(sym, timeframe, {
-        startTime: startMs,
-        endTime: endMs,
-        limit: MAX_PER_REQUEST,
-      });
-      if (klines.length === 0) break;
-      for (const k of klines) out.push(toBar(k));
-      const lastOpen = klines[klines.length - 1]![0];
-      const next = lastOpen + stepMs;
-      if (next <= startMs) break;
-      startMs = next;
-      if (klines.length < MAX_PER_REQUEST) break;
-    }
-    if (truncated) {
+    const normalizedSymbol = normalizeBinanceSymbol(symbol);
+    const loaded = await this.loadHistory(normalizedSymbol, timeframe, range);
+    if (loaded.truncated) {
       console.warn(
-        `${this.id}: ${sym} ${timeframe} range hit the ${this.maxBars}-bar safety cap — ` +
-          `newest bars in the range were NOT fetched (raise maxBars or narrow the range)`,
+        `${this.id}: ${normalizedSymbol} ${timeframe} range hit the ${loaded.truncated.limit}-bar ` +
+          'safety cap — oldest bars in the range were not fetched (raise maxBars or narrow the range)',
       );
     }
-
-    let bars = dropUnclosedBars(dedupeAscending(out), timeframe);
-    if (range.limit != null && bars.length > range.limit)
-      bars = bars.slice(bars.length - range.limit);
-    return bars;
+    return loaded.bars;
   }
 
-  private async fetchKlines(
-    symbol: string,
-    interval: string,
-    params: { startTime?: number; endTime?: number; limit?: number },
-  ): Promise<Kline[]> {
-    const url = new URL(this.klinesPath, this.baseUrl);
-    url.searchParams.set('symbol', symbol);
-    url.searchParams.set('interval', interval);
-    if (params.startTime != null) url.searchParams.set('startTime', String(params.startTime));
-    if (params.endTime != null) url.searchParams.set('endTime', String(params.endTime));
-    if (params.limit != null) url.searchParams.set('limit', String(params.limit));
-    return fetchJson<Kline[]>(url.toString(), {
-      label: `${this.id} /klines`,
-      fetchImpl: this.fetchImpl,
+  async resolveHistorySource(symbol: string): Promise<ResolvedHistorySource> {
+    const normalizedSymbol = normalizeBinanceSymbol(symbol);
+    const exactTimeframes =
+      this.market === 'spot' ? BINANCE_SPOT_EXACT_TIMEFRAMES : BINANCE_COMMON_EXACT_TIMEFRAMES;
+    const capabilities = snapshotHistoryCapabilities({
+      timeframes: [...exactTimeframes],
+      maxBarsPerRequest: MAX_PER_REQUEST,
+      maxBarsPerAcquisition: this.maxBars,
+      alignment: 'utc-24x7',
+      weekAnchorSec: BINANCE_WEEK_ANCHOR_SEC,
+    });
+    const cacheIdentity = createHistoryCacheIdentity(this.id, {
+      symbol: normalizedSymbol,
+      market: this.market,
+      baseUrl: nonSecretBaseUrl(this.baseUrl),
+      path: this.klinesPath,
+      maxBars: this.maxBars,
+      maxBarsPerRequest: MAX_PER_REQUEST,
+      pagination: 'newest-first',
+      capabilities,
+    });
+
+    return snapshotResolvedHistorySource({
+      provider: this,
+      normalizedSymbol,
+      cacheIdentity,
+      capabilities,
+      history: async (request: HistoryRequest): Promise<HistoryAcquisition> => {
+        const loaded = await this.loadHistory(
+          normalizedSymbol,
+          request.timeframe,
+          historyRequestRange(request),
+          true,
+        );
+        return historyAcquisitionFromBars({
+          bars: loaded.bars,
+          request,
+          cacheIdentity,
+          normalizedSymbol,
+          alignment: capabilities.alignment,
+          weekAnchorSec: capabilities.weekAnchorSec,
+          truncated: loaded.truncated,
+        });
+      },
     });
   }
 
@@ -154,7 +166,7 @@ export class BinanceProvider implements HistoryProvider {
    *  exchangeInfo. Spot supports a per-symbol query; USDⓈ-M futures does not,
    *  so both markets fetch the full map once and answer from the memo. */
   async instrument(symbol: string): Promise<InstrumentInfo | undefined> {
-    const sym = symbol.trim().toUpperCase().replace(/\//g, '');
+    const sym = normalizeBinanceSymbol(symbol);
     this.instruments ??= this.fetchInstruments();
     try {
       return (await this.instruments).get(sym);
@@ -162,6 +174,80 @@ export class BinanceProvider implements HistoryProvider {
       this.instruments = undefined; // don't memoize a transient failure
       throw err;
     }
+  }
+
+  private async loadHistory(
+    symbol: string,
+    timeframe: string,
+    range?: HistoryRange,
+    exactTimestamps = false,
+  ): Promise<LoadedHistory> {
+    if (!BINANCE_INTERVALS.has(timeframe) || (timeframe === '1s' && this.market !== 'spot')) {
+      throw new Error(`binance: unsupported interval "${timeframe}"`);
+    }
+
+    const stepMs = (timeframe === '1s' ? 1 : timeframeSeconds(timeframe)) * 1000;
+    const exactRangeMs =
+      exactTimestamps && range ? boundedHistoryRangeToHalfOpenMs(range) : undefined;
+    const startMs = exactRangeMs?.from ?? (range?.from != null ? range.from * 1000 : undefined);
+    let endMs =
+      exactRangeMs != null ? exactRangeMs.to - 1 : range?.to != null ? range.to * 1000 : undefined;
+    const defaultTarget = startMs == null ? 500 : this.maxBars;
+    const target = Math.min(range?.limit ?? defaultTarget, this.maxBars);
+    if (target <= 0) return { bars: [] };
+
+    const out: Bar[] = [];
+    let oldestFetched: number | undefined;
+    while (out.length < target) {
+      const perPage = Math.min(MAX_PER_REQUEST, target - out.length);
+      const klines = await this.fetchKlines(symbol, timeframe, { endTime: endMs, limit: perPage });
+      if (klines.length === 0) break;
+      const accepted = klines.length > perPage ? klines.slice(klines.length - perPage) : klines;
+      for (const kline of accepted) out.push(toBar(kline, exactTimestamps));
+
+      const oldest = accepted[0]![0];
+      oldestFetched = oldest;
+      if (startMs != null && oldest <= startMs) break;
+      const nextEnd = oldest - 1;
+      if (endMs != null && nextEnd >= endMs) break;
+      endMs = nextEnd;
+      if (klines.length < perPage) break;
+    }
+
+    const providerSafetyCap = range?.limit == null || range.limit >= this.maxBars;
+    const truncated =
+      providerSafetyCap &&
+      startMs != null &&
+      out.length >= target &&
+      oldestFetched != null &&
+      oldestFetched > startMs
+        ? ({
+            side: 'before',
+            reason: 'binance-max-bars',
+            limit: this.maxBars,
+          } satisfies HistoryTruncation)
+        : undefined;
+
+    const filteredBars = exactTimestamps
+      ? applyExactQueryRange(dropClosedBars(dedupeAscending(out), timeframe), range)
+      : applyRange(dropClosedBars(dedupeAscending(out), timeframe), range);
+    return { bars: filteredBars, ...(truncated ? { truncated } : {}) };
+  }
+
+  private async fetchKlines(
+    symbol: string,
+    interval: string,
+    params: { endTime?: number; limit?: number },
+  ): Promise<Kline[]> {
+    const url = new URL(this.klinesPath, this.baseUrl);
+    url.searchParams.set('symbol', symbol);
+    url.searchParams.set('interval', interval);
+    if (params.endTime != null) url.searchParams.set('endTime', String(params.endTime));
+    if (params.limit != null) url.searchParams.set('limit', String(params.limit));
+    return fetchJson<Kline[]>(url.toString(), {
+      label: `${this.id} /klines`,
+      fetchImpl: this.fetchImpl,
+    });
   }
 
   private async fetchInstruments(): Promise<Map<string, InstrumentInfo>> {
@@ -189,9 +275,23 @@ export class BinanceProvider implements HistoryProvider {
   }
 }
 
-function toBar(k: Kline): Bar {
+function normalizeBinanceSymbol(symbol: string): string {
+  const normalized = symbol.trim().toUpperCase().replace(/\//g, '');
+  if (!normalized) throw new Error('binance: cannot normalize empty symbol');
+  return normalized;
+}
+
+function positiveLimit(value: number | undefined, fallback: number, label: string): number {
+  const limit = value ?? fallback;
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new RangeError(`${label} must be a positive safe integer`);
+  }
+  return limit;
+}
+
+function toBar(k: Kline, exactTimestamps = false): Bar {
   return {
-    time: Math.floor(k[0] / 1000),
+    time: exactTimestamps ? k[0] / 1000 : Math.floor(k[0] / 1000),
     open: Number(k[1]),
     high: Number(k[2]),
     low: Number(k[3]),
@@ -200,14 +300,22 @@ function toBar(k: Kline): Bar {
   };
 }
 
+function dropClosedBars(bars: Bar[], timeframe: string): Bar[] {
+  if (timeframe !== '1s') return dropUnclosedBars(bars, timeframe);
+  const nowSec = Math.floor(Date.now() / 1000);
+  let end = bars.length;
+  while (end > 0 && bars[end - 1]!.time + 1 > nowSec) end--;
+  return end === bars.length ? bars : bars.slice(0, end);
+}
+
 function dedupeAscending(bars: Bar[]): Bar[] {
   bars.sort((a, b) => a.time - b.time);
   const out: Bar[] = [];
-  let last = -1;
-  for (const b of bars) {
-    if (b.time !== last) {
-      out.push(b);
-      last = b.time;
+  let last: number | undefined;
+  for (const bar of bars) {
+    if (bar.time !== last) {
+      out.push(bar);
+      last = bar.time;
     }
   }
   return out;

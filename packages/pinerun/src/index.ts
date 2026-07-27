@@ -5,7 +5,18 @@
  * the ranker, and the `scan` fan-out. The Node worker-thread pool lives behind the
  * separate `@heyphat/pinerun/node` entry.
  */
-export type { Job, Bar, JobMetricsOptions } from './job.js';
+export type {
+  Job,
+  Bar,
+  JobMetricsOptions,
+  ResolvedMagnifierCoverage,
+  ResolvedMagnifierAlignmentEvidence,
+  ResolvedMagnifierDataset,
+  ResolvedSecurityAlignmentEvidence,
+  ResolvedSecurityDependencyIdentity,
+  ResolvedSecurityDatasetProof,
+  ResolvedSecurityRequestKind,
+} from './job.js';
 export { jobId } from './job.js';
 export type {
   RunResult,
@@ -14,16 +25,31 @@ export type {
   StrategySummary,
   StrategyTrade,
   StrategyMetrics,
+  BarMagnifierSummary,
+  RunFailure,
 } from './result.js';
+export type { FillModelPresentation } from './fill-model.js';
+export { formatFillModel } from './fill-model.js';
 export { jobHash } from './hash.js';
-export { executeJob } from './execute.js';
+export {
+  executeJob,
+  assertResolvedMagnifierDatasetForJob,
+  toPinerBarMagnifierData,
+  projectAuthoritativeBarMagnifierReport,
+} from './execute.js';
+export type { PinerBarMagnifierDataLike } from './execute.js';
 export type { Runner, RunAllOptions } from './runner.js';
 export { LocalRunner, fanOut } from './runner.js';
 export type { Aggregate, RankSpec, RankedResult, RankOptions } from './rank.js';
 export { parseRankSpec, evalRank, rankResults, sortRanked, selectPlot } from './rank.js';
 export type { ScanOptions, ScanReport } from './scan.js';
 export { scan } from './scan.js';
-export type { PortfolioOptions, PortfolioReport, SleeveContribution } from './portfolio.js';
+export type {
+  PortfolioOptions,
+  PortfolioReport,
+  SleeveContribution,
+  PortfolioBarMagnifierSummary,
+} from './portfolio.js';
 export { portfolio } from './portfolio.js';
 export type { Sleeve } from './align.js';
 export { unionTimes, alignEquity, combineEquity, returnCorrelation } from './align.js';
@@ -35,8 +61,15 @@ export type {
   WalkforwardWindow,
   WalkforwardAggregate,
   WindowPlan,
+  WalkforwardMagnifierCapObservation,
 } from './walkforward.js';
-export { walkforward, planWindows } from './walkforward.js';
+export {
+  walkforward,
+  planWindows,
+  inspectWalkforwardMagnifierCap,
+  assertWalkforwardMagnifierCap,
+  WALKFORWARD_MAGNIFIER_TARGET_BAR_LIMIT,
+} from './walkforward.js';
 export {
   tradesToCsv,
   equityToCsv,
@@ -104,6 +137,42 @@ export {
   planFromStatic,
   resolveLowerFetchTf,
   resolveSameSymbolFetchTf,
+  assertStaticSecurityForBarMagnifier,
+  assertResolvedSecurityForBarMagnifier,
+  deriveResolverIssuedSecurityPrefix,
+  securityRangeForBarMagnifier,
+  securityDatasetAcquisitionKey,
   PROBE_SYMBOL,
 } from './security.js';
-export type { ClassifiedRequests, DiscoverOptions, ResolveSecurityOptions } from './security.js';
+export type {
+  ClassifiedRequests,
+  DiscoverOptions,
+  ResolveSecurityOptions,
+  ResolverIssuedSecurityPrefix,
+  SecurityDatasetAcquisitionKeyInput,
+} from './security.js';
+
+export type { BarMagnifierFailure, BarMagnifierFailureKind } from './failure.js';
+export { BarMagnifierError, isBarMagnifierFailure } from './failure.js';
+export type { PinerCapabilityAdapter } from './piner-capabilities.js';
+export {
+  SUPPORTED_BAR_MAGNIFIER_CONTRACT_VERSION,
+  createPinerCapabilityAdapter,
+  pinerCapabilities,
+} from './piner-capabilities.js';
+export type {
+  MagnifierPreflight,
+  MagnifierResolution,
+  ResolveBarMagnifierOptions,
+  MagnifierAcquisitionKeyInput,
+  MagnifierDatasetAcquisitionKeyInput,
+  MagnifierResolutionScope,
+} from './magnifier.js';
+export {
+  createMagnifierResolutionScope,
+  magnifierMetadataKey,
+  magnifierAcquisitionKey,
+  magnifierDatasetAcquisitionKey,
+  preflightBarMagnifier,
+  resolveBarMagnifier,
+} from './magnifier.js';

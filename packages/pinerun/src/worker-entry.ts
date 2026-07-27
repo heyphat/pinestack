@@ -6,50 +6,44 @@
  * per worker rather than once per job; the dataset cache likewise lets a sweep's
  * shared bar set cross the thread boundary once instead of once per combo.
  */
-import { parentPort } from 'node:worker_threads';
-import type { Bar, Job } from './job.js';
-import type { BarsRef, WireJob } from './pool.js';
+import { parentPort, workerData } from 'node:worker_threads';
+import type { Bar } from './job.js';
+import { hydrateWireJob, type WireJob } from './wire.js';
 import { executeJob } from './execute.js';
+import { initializeWorkerMagnifierDatasetAuthentication } from './magnifier.js';
+import { initializeWorkerSecurityProofAuthentication } from './security.js';
 
 if (!parentPort) {
   throw new Error('pinerun worker-entry: expected to run inside a worker_thread');
 }
 
-/** Datasets from the most recent message — mirrors the pool's `cachedIds`. */
-let datasets = new Map<number, Bar[]>();
-
-/** Resolve every BarsRef against the cache; the new cache is exactly this job's datasets. */
-function hydrate(wire: WireJob): Job {
-  const next = new Map<number, Bar[]>();
-  const resolve = (ref: BarsRef): Bar[] => {
-    const bars = ref.bars ?? datasets.get(ref.id);
-    if (!bars) throw new Error(`pinerun worker: dataset ${ref.id} missing from cache`);
-    next.set(ref.id, bars);
-    return bars;
-  };
-  const { bars, securityBars, ...rest } = wire;
-  const job: Job = { ...rest, bars: resolve(bars) };
-  if (securityBars) {
-    const out: Record<string, Bar[]> = {};
-    for (const [key, ref] of Object.entries(securityBars)) out[key] = resolve(ref);
-    job.securityBars = out;
-  }
-  datasets = next;
-  return job;
+const datasetAuthSecret = (workerData as { datasetAuthSecret?: unknown } | null)?.datasetAuthSecret;
+if (typeof datasetAuthSecret !== 'string') {
+  throw new Error('pinerun worker-entry: missing dataset authentication secret');
 }
+initializeWorkerSecurityProofAuthentication(datasetAuthSecret);
+initializeWorkerMagnifierDatasetAuthentication(datasetAuthSecret);
+
+/** Datasets from the most recent successfully hydrated message. */
+let datasets = new Map<number, readonly Bar[]>();
 
 const port = parentPort;
 port.on('message', (msg: { seq: number; job: WireJob }) => {
-  let job: Job;
+  let hydrated: ReturnType<typeof hydrateWireJob>;
   try {
-    job = hydrate(msg.job);
+    hydrated = hydrateWireJob(msg.job, datasets);
+    // Commit only after every ref in the message resolved. A partial hydration
+    // failure leaves the previous cache intact.
+    datasets = hydrated.next;
   } catch (err) {
-    port.postMessage({ seq: msg.seq, error: errMessage(err) });
+    port.postMessage({ seq: msg.seq, error: errMessage(err), hydrated: false });
     return;
   }
-  executeJob(job)
-    .then((result) => port.postMessage({ seq: msg.seq, result }))
-    .catch((err: unknown) => port.postMessage({ seq: msg.seq, error: errMessage(err) }));
+  executeJob(hydrated.job)
+    .then((result) => port.postMessage({ seq: msg.seq, result, hydrated: true }))
+    .catch((err: unknown) =>
+      port.postMessage({ seq: msg.seq, error: errMessage(err), hydrated: true }),
+    );
 });
 
 function errMessage(err: unknown): string {

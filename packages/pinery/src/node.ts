@@ -1,88 +1,302 @@
 /**
- * @heyphat/pinery/node — Node-only additions: a fetch-once/replay-many on-disk
- * cache so scans and sweeps don't re-hit provider APIs, and the CSV file
- * provider for backtests on exported/offline data. Never bundled into the
- * browser build.
+ * @heyphat/pinery/node — Node-only filesystem cache and CSV provider.
+ * Exact acquisitions use a separate versioned payload containing identity,
+ * range, bars, coverage, gaps, truncation, and provenance.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Bar, HistoryProvider, HistoryRange, InstrumentInfo } from './provider.js';
+import type {
+  Bar,
+  HistoryAcquisition,
+  HistoryProvider,
+  HistoryRange,
+  HistoryRequest,
+  InstrumentInfo,
+  ResolvedHistorySource,
+} from './provider.js';
+import { resolveHistorySource } from './acquisition.js';
+import {
+  snapshotHistoryCapabilities,
+  snapshotResolvedHistorySource,
+  validateHistoryAcquisition,
+} from './coverage.js';
 
+export * from './index.js';
 export { CsvProvider, type CsvProviderOptions } from './adapters/csv.js';
 
 export interface DiskCacheOptions {
   /** Cache directory. Default `.pinery-cache` under the current working directory. */
   dir?: string;
-  /** Bypass reads (still writes) — useful for a forced refresh. Default false. */
+  /** Bypass reads (still writes). Default false. */
   refresh?: boolean;
 }
 
-/** Wrap a provider so identical (symbol, timeframe, range) requests are served from disk. */
+interface LegacyHistoryPayload {
+  readonly schema: 'pinery.history';
+  readonly version: 2;
+  readonly key: {
+    readonly cacheIdentity: string;
+    readonly normalizedSymbol: string;
+    readonly timeframe: string;
+    readonly range: HistoryRange | null;
+  };
+  readonly bars: Bar[];
+}
+
+interface ExactHistoryPayload {
+  readonly schema: 'pinery.history-acquisition';
+  readonly version: 2;
+  readonly key: {
+    readonly cacheIdentity: string;
+    readonly normalizedSymbol: string;
+    readonly sourceTimeframe: string;
+    readonly requested: HistoryRequest['requested'];
+    readonly query: HistoryRequest['query'] | null;
+    readonly weekAnchorSec: ResolvedHistorySource['capabilities']['weekAnchorSec'] | null;
+  };
+  readonly acquisition: HistoryAcquisition;
+}
+
+/** Wrap a provider so identical requests are served from disk. */
 export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): HistoryProvider {
   const dir = opts.dir ?? join(process.cwd(), '.pinery-cache');
   const wrapped: HistoryProvider = {
     id: `${provider.id}+cache`,
+    ...(provider.assetClass ? { assetClass: provider.assetClass } : {}),
+
     async history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
-      const key = cacheKey(provider.id, symbol, timeframe, range);
-      const file = join(dir, `${key}.json`);
-      if (!opts.refresh && existsSync(file)) {
-        try {
-          return JSON.parse(readFileSync(file, 'utf8')) as Bar[];
-        } catch {
-          // fall through to a fresh fetch on a corrupt cache entry
-        }
+      const source = await resolveHistorySource(provider, symbol);
+      const identity = legacyIdentity(source, timeframe, range);
+      const file = cacheFile(dir, provider.id, source.normalizedSymbol, timeframe, identity);
+      if (!opts.refresh) {
+        const payload = readJson(file);
+        if (isLegacyPayload(payload, identity)) return payload.bars;
       }
+
       const bars = await provider.history(symbol, timeframe, range);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(file, JSON.stringify(bars));
+      const payload: LegacyHistoryPayload = {
+        schema: 'pinery.history',
+        version: 2,
+        key: identity,
+        bars,
+      };
+      writeJsonAtomic(file, payload);
       return bars;
     },
+
+    async resolveHistorySource(symbol: string): Promise<ResolvedHistorySource> {
+      const source = await resolveHistorySource(provider, symbol);
+      const capabilities = snapshotHistoryCapabilities(source.capabilities);
+      return snapshotResolvedHistorySource({
+        provider: source.provider,
+        normalizedSymbol: source.normalizedSymbol,
+        cacheIdentity: source.cacheIdentity,
+        capabilities,
+        history: async (request: HistoryRequest): Promise<HistoryAcquisition> => {
+          const identity = exactIdentity(source, request);
+          const file = cacheFile(
+            dir,
+            provider.id,
+            source.normalizedSymbol,
+            request.timeframe,
+            identity,
+          );
+
+          if (!opts.refresh) {
+            const payload = readJson(file);
+            if (isExactPayload(payload, identity)) {
+              try {
+                validateHistoryAcquisition(payload.acquisition, {
+                  requested: request.requested,
+                  cacheIdentity: source.cacheIdentity,
+                  normalizedSymbol: source.normalizedSymbol,
+                  sourceTimeframe: request.timeframe,
+                  targetTimeframe: request.timeframe,
+                  aggregationVersion: 0,
+                  alignment: capabilities.alignment,
+                  weekAnchorSec: capabilities.weekAnchorSec,
+                  calendar: capabilities.calendar,
+                });
+                return payload.acquisition;
+              } catch {
+                // A stale/corrupt/forged payload is never accepted as coverage proof.
+              }
+            }
+          }
+
+          const acquisition = await source.history(request);
+          validateHistoryAcquisition(acquisition, {
+            requested: request.requested,
+            cacheIdentity: source.cacheIdentity,
+            normalizedSymbol: source.normalizedSymbol,
+            sourceTimeframe: request.timeframe,
+            targetTimeframe: request.timeframe,
+            aggregationVersion: 0,
+            alignment: capabilities.alignment,
+            weekAnchorSec: capabilities.weekAnchorSec,
+            calendar: capabilities.calendar,
+          });
+          const payload: ExactHistoryPayload = {
+            schema: 'pinery.history-acquisition',
+            version: 2,
+            key: identity,
+            acquisition,
+          };
+          writeJsonAtomic(file, payload);
+          return acquisition;
+        },
+      });
+    },
   };
-  // Instrument metadata caches like an open-ended range: keyed by UTC day so
-  // exchange trading-rule changes surface within a day. Only exposed when the
-  // wrapped provider knows how to answer, so capability detection stays honest.
+
+  // Instrument metadata is keyed by resolved source identity + normalized symbol
+  // and a UTC day, so feed/venue settings cannot alias and rules refresh daily.
   if (provider.instrument) {
     wrapped.instrument = async (symbol: string): Promise<InstrumentInfo | undefined> => {
+      const source = await resolveHistorySource(provider, symbol);
       const day = new Date().toISOString().slice(0, 10);
-      const safeSym = symbol.replace(/[^a-zA-Z0-9]+/g, '_');
-      const file = join(dir, `${provider.id}_${safeSym}_instrument_${day}.json`);
-      if (!opts.refresh && existsSync(file)) {
-        try {
-          return JSON.parse(readFileSync(file, 'utf8')) as InstrumentInfo;
-        } catch {
-          // fall through on a corrupt entry
-        }
+      const identity = {
+        schema: 'pinery.instrument',
+        version: 2,
+        cacheIdentity: source.cacheIdentity,
+        normalizedSymbol: source.normalizedSymbol,
+        day,
+      };
+      const file = cacheFile(dir, provider.id, source.normalizedSymbol, 'instrument', identity);
+      if (!opts.refresh) {
+        const payload = readJson(file);
+        if (isInstrumentPayload(payload, identity)) return payload.info;
       }
       const info = await provider.instrument!(symbol);
-      if (info) {
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(file, JSON.stringify(info));
-      }
+      if (info) writeJsonAtomic(file, { ...identity, info });
       return info;
     };
   }
   return wrapped;
 }
 
-function cacheKey(
+function legacyIdentity(
+  source: ResolvedHistorySource,
+  timeframe: string,
+  range?: HistoryRange,
+): LegacyHistoryPayload['key'] & { readonly day: string | null } {
+  return {
+    cacheIdentity: source.cacheIdentity,
+    normalizedSymbol: source.normalizedSymbol,
+    timeframe,
+    range: range ? { ...range } : null,
+    // Open-ended history is time-varying; expire it daily as before.
+    day: range?.to == null ? new Date().toISOString().slice(0, 10) : null,
+  };
+}
+
+function exactIdentity(
+  source: ResolvedHistorySource,
+  request: HistoryRequest,
+): ExactHistoryPayload['key'] {
+  return {
+    cacheIdentity: source.cacheIdentity,
+    normalizedSymbol: source.normalizedSymbol,
+    sourceTimeframe: request.timeframe,
+    requested: request.requested,
+    query: request.query ?? null,
+    weekAnchorSec: source.capabilities.weekAnchorSec ?? null,
+  };
+}
+
+function cacheFile(
+  dir: string,
   providerId: string,
   symbol: string,
   timeframe: string,
-  range?: HistoryRange,
+  identity: unknown,
 ): string {
-  const payload = JSON.stringify({
-    providerId,
-    symbol,
-    timeframe,
-    from: range?.from ?? null,
-    to: range?.to ?? null,
-    limit: range?.limit ?? null,
-    // An open-ended range (no `to`) means "history up to now" — bucket the key by
-    // UTC day so the entry expires daily instead of freezing that moment forever.
-    day: range?.to == null ? new Date().toISOString().slice(0, 10) : null,
-  });
-  const hash = createHash('sha1').update(payload).digest('hex').slice(0, 16);
-  const safeSym = symbol.replace(/[^a-zA-Z0-9]+/g, '_');
-  return `${providerId}_${safeSym}_${timeframe}_${hash}`;
+  const digest = createHash('sha256').update(stableStringify(identity)).digest('hex');
+  const safeProvider = sanitize(providerId);
+  const safeSymbol = sanitize(symbol);
+  const safeTimeframe = sanitize(timeframe);
+  return join(dir, `${safeProvider}_${safeSymbol}_${safeTimeframe}_${digest}.json`);
+}
+
+function readJson(file: string): unknown {
+  if (!existsSync(file)) return undefined;
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeJsonAtomic(file: string, value: unknown): void {
+  const dir = file.slice(0, Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\')));
+  if (dir) mkdirSync(dir, { recursive: true });
+  const temp = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  writeFileSync(temp, JSON.stringify(value));
+  renameSync(temp, file);
+}
+
+function isLegacyPayload(
+  value: unknown,
+  identity: ReturnType<typeof legacyIdentity>,
+): value is LegacyHistoryPayload {
+  if (!isRecord(value) || value.schema !== 'pinery.history' || value.version !== 2) return false;
+  if (!isRecord(value.key) || stableStringify(value.key) !== stableStringify(identity))
+    return false;
+  return Array.isArray(value.bars) && value.bars.every(isBar);
+}
+
+function isExactPayload(
+  value: unknown,
+  identity: ExactHistoryPayload['key'],
+): value is ExactHistoryPayload {
+  return (
+    isRecord(value) &&
+    value.schema === 'pinery.history-acquisition' &&
+    value.version === 2 &&
+    isRecord(value.key) &&
+    stableStringify(value.key) === stableStringify(identity) &&
+    isRecord(value.acquisition)
+  );
+}
+
+function isInstrumentPayload(
+  value: unknown,
+  identity: Record<string, unknown>,
+): value is Record<string, unknown> & { info: InstrumentInfo } {
+  if (!isRecord(value) || !isRecord(value.info)) return false;
+  return Object.entries(identity).every(([key, expected]) => value[key] === expected);
+}
+
+function isBar(value: unknown): value is Bar {
+  if (!isRecord(value)) return false;
+  return ['time', 'open', 'high', 'low', 'close', 'volume'].every((key) =>
+    Number.isFinite(value[key]),
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sanitize(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]+/g, '_');
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (value === undefined) return 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+      .sort()
+      .filter((key) => object[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(String(value));
 }

@@ -1,0 +1,51 @@
+{
+  "name": "@heyphat/pinelive",
+  "version": "0.1.0",
+  "description": "SDK-free forward runner and broker protocol for mirroring piner strategy positions into live or paper accounts.",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "author": "Phat Huynh (heyphat)",
+  "homepage": "https://github.com/heyphat/pinestack/tree/main/packages/pinelive#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heyphat/pinestack.git",
+    "directory": "packages/pinelive"
+  },
+  "bugs": {
+    "url": "https://github.com/heyphat/pinestack/issues"
+  },
+  "keywords": [
+    "pine-script",
+    "piner",
+    "forward-testing",
+    "paper-trading",
+    "broker",
+    "trading"
+  ],
+  "bin": {
+    "pinelive": "./src/cli.ts"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./node": {
+      "types": "./src/node.ts",
+      "default": "./src/node.ts"
+    },
+    "./testing": {
+      "types": "./src/testing/index.ts",
+      "default": "./src/testing/index.ts"
+    }
+  },
+  "dependencies": {
+    "@heyphat/pinery": "workspace:*"
+  },
+  "peerDependencies": {
+    "@heyphat/piner": "*"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  }
+}

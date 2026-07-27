@@ -1,0 +1,6 @@
+//@version=6
+strategy("Position toggle", default_qty_type=strategy.fixed, default_qty_value=1)
+if close > open
+    strategy.entry("long", strategy.long)
+else
+    strategy.close("long")

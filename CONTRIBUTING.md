@@ -7,7 +7,7 @@ docs.
 
 ## Scope
 
-pinestack is three workspace packages:
+pinestack is four workspace packages:
 
 - **`@heyphat/pinery`** — the data layer: OHLCV history providers that implement
   piner's `DataFeed` contract, timeframe helpers, and a Node on-disk cache.
@@ -17,6 +17,10 @@ pinestack is three workspace packages:
 - **`@heyphat/pinetop`** — the interactive layer: a terminal UI over that CLI.
   It computes nothing — it composes argv, spawns `pinerun … --json`, and renders
   the payload, reusing the CLI's own chart and table builders.
+- **`@heyphat/pinelive`** — the SDK-free forward-execution layer: Broker protocol,
+  closed-bar runner, position mirror, CSV replay, PaperBroker, JSONL ledger, and
+  shared adapter conformance utilities. Real adapters require a separate reviewed
+  transport decision and credentialed sandbox validation.
 
 Language-engine changes (Pine parsing, codegen, strategy semantics) belong in
 [piner](https://github.com/heyphat/piner), not here. `piner` is a **peer
@@ -41,6 +45,7 @@ tests and the CLI run with no build step:
 
 ```bash
 bun test           # full suite across every package
+bun test packages/pinelive/test # offline forward runner + broker suite
 bun run typecheck  # tsc -b across every package
 bun run format     # prettier --write .
 ```

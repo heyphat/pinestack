@@ -144,6 +144,16 @@ No change to `pinery` or to any output contract.
   `PINESTACK_INSTALL_DIR`. The older `PINERUN_VERSION` / `PINERUN_INSTALL_DIR`
   names keep working.
 
+## [Unreleased]
+
+### Added
+
+- **`@heyphat/pinelive` offline core** — a broker-SDK-free forward runner, Broker
+  protocol, position mirror, deterministic CSV replay, idempotent PaperBroker with
+  PnL accounting, append-only JSONL ledger, dry-run CLI, adapter conformance tools,
+  and live-vs-backtest target parity utility. Real Tiger/IC Markets transports and
+  credentialed sandbox validation remain intentionally pending.
+
 ## [0.6.1] - 2026-07-29
 
 ### Changed

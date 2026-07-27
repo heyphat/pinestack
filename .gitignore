@@ -52,4 +52,9 @@ coverage/
 # internal design/planning docs — not part of the public release
 # (promote individual files back into git when ready to publish them)
 dev-docs/
+
+# pinelive local ledgers and credential-bearing config
+.pinelive/
+pinelive*.local.*
+
 semantic-review

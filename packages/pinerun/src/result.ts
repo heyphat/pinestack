@@ -4,9 +4,12 @@
  * error. This is what workers return and what the ranker consumes.
  */
 
+import type { ExactHistoryFailure } from '@heyphat/pinery';
 import type { SecurityRequest, StrategyMetrics } from '@heyphat/piner';
+import type { BarMagnifierFailure } from './failure.js';
 
 export type { StrategyMetrics };
+export type RunFailure = BarMagnifierFailure | ExactHistoryFailure;
 
 export interface PlotResult {
   id: number;
@@ -20,6 +23,19 @@ export interface AlertResult {
   message: string;
 }
 
+export interface BarMagnifierSummary {
+  readonly requested: true;
+  readonly active: boolean;
+  readonly targetTimeframe: string;
+  readonly magnifiedBars: number;
+  readonly fallbackBars: number;
+  readonly capFallbackBars: number;
+  readonly dataFallbackBars: number;
+  readonly intrabarsUsed: number;
+  readonly firstMagnifiedBar?: number;
+  readonly coverage: 'complete' | 'tv-cap-fallback' | 'mixed-data-fallback' | 'no-data';
+}
+
 /** Strategy performance metrics, sourced directly from piner's broker (the same
  *  values a Pine script reads via the `strategy.*` namespace / TradingView reports). */
 export interface StrategySummary {
@@ -29,6 +45,9 @@ export interface StrategySummary {
    *  running it). Intrabar re-execution can fill several times per bar, which
    *  reads surprisingly in a trade list without this marker. */
   calcOnOrderFills?: boolean;
+  /** Piner's optional authoritative Bar Magnifier report block. Never inferred
+   *  from a request or from injected data. */
+  barMagnifier?: BarMagnifierSummary;
   initialCapital: number;
   netProfit: number;
   netProfitPercent: number;
@@ -117,6 +136,8 @@ export interface RunResult {
   diagnostics?: string[];
   /** Present when `ok === false`. */
   error?: string;
+  /** Serializable typed failure when the run was rejected at an exact feature boundary. */
+  failure?: RunFailure;
   /** Wall-clock milliseconds spent executing this job. */
   elapsedMs?: number;
 }

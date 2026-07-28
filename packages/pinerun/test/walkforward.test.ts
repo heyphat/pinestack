@@ -1,6 +1,14 @@
 import { test, expect } from 'bun:test';
 import { StaticProvider, type Bar } from '@heyphat/pinery';
-import { walkforward, planWindows, executeJob, parseAxes } from '../src/index.js';
+import {
+  walkforward,
+  planWindows,
+  executeJob,
+  parseAxes,
+  pinerCapabilities,
+} from '../src/index.js';
+
+const runtimeCapableTest = pinerCapabilities().capable ? test : test.skip;
 
 const T0 = 1_700_000_000;
 
@@ -159,3 +167,72 @@ test('walkforward rejects indicators and surfaces fetch failures', async () => {
   expect(report.fetchError).toBeTruthy();
   expect(report.windows).toHaveLength(0);
 });
+
+runtimeCapableTest(
+  'walkforward IS candidates receive resolver-issued self/cross lower-TF prefixes locally',
+  async () => {
+    const start = 1_700_002_800;
+    const chart = Array.from({ length: 3 }, (_, index) => ({
+      time: start + index * 3_600,
+      open: 100 + index,
+      high: 101 + index,
+      low: 99 + index,
+      close: 100.5 + index,
+      volume: 1_000,
+    }));
+    const lower = (base: number) =>
+      Array.from({ length: 18 }, (_, index) => ({
+        time: start + index * 600,
+        open: base + index,
+        high: base + index + 1,
+        low: base + index - 1,
+        close: base + index + 0.5,
+        volume: 100,
+      }));
+
+    for (const testCase of [
+      { label: 'self', symbol: 'syminfo.tickerid' },
+      { label: 'cross', symbol: '"B"' },
+    ]) {
+      const source = `//@version=6
+strategy("${testCase.label} lower prefix", use_bar_magnifier=true)
+choice = input.int(1, "choice")
+values = request.security_lower_tf(${testCase.symbol}, "10", close)
+score = array.size(values) == 6 ? choice : -choice
+plot(score, "score")`;
+      const provider = new StaticProvider(
+        {
+          A: chart,
+          'A|10m': lower(10),
+          'B|10m': lower(20),
+        },
+        {
+          alignment: 'utc-24x7',
+          timeframes: ['10m'],
+          cacheIdentity: `walkforward-${testCase.label}-lower-prefix`,
+        },
+      );
+      const report = await walkforward({
+        source,
+        symbol: 'A',
+        timeframe: '1h',
+        provider,
+        axes: parseAxes(['choice=1,2']),
+        rank: 'last(score)',
+        windows: 1,
+        oosFraction: 1 / 3,
+        runner: undefined,
+      });
+
+      const window = report.windows[0]!;
+      expect(window.error, testCase.label).toBeUndefined();
+      expect(window.winner, testCase.label).toEqual({ choice: 2 });
+      expect(window.winnerValue, testCase.label).toBe(2);
+      expect(
+        window.result?.plots.find((plot) => plot.title === 'score')?.data,
+        testCase.label,
+      ).toEqual([2, 2, 2]);
+    }
+  },
+  20_000,
+);

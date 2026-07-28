@@ -31,6 +31,10 @@ flags in full and links there for the rest.
 
 ## Concepts
 
+- [**Bar Magnifier exact mode**](./common-options.md#fill-model--bar-magnifier) —
+  strict tri-state overrides, automatic piner mapping, shipped 0.10.0
+  capability rejection, future requested/inactive reporting, provider support
+  matrices, typed outcomes, and the 200k fold guard.
 - [**How the portfolio model works**](./portfolio-model.md) — capital models
   (isolated vs shared), the union clock, per-bar execution order, and the exact
   identities behind the `portfolio` numbers.

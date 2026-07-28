@@ -1,10 +1,15 @@
-/**
+/*
  * Provider factory — turns a (provider, assetClass) pair into a configured
- * `HistoryProvider`, hiding each adapter's own vocabulary for the same idea
- * (Binance calls futures a `market: 'futures'`, OKX calls it `market: 'swap'`).
- * Unsupported pairs throw with a message naming the offending pair.
+ * `HistoryProvider`, hiding each adapter's own vocabulary for the same idea.
  */
-import type { Bar, HistoryProvider, HistoryRange, InstrumentInfo } from './provider.js';
+import type {
+  Bar,
+  HistoryProvider,
+  HistoryRange,
+  InstrumentInfo,
+  ResolvedHistorySource,
+} from './provider.js';
+import { resolveHistorySource as resolveProviderHistorySource } from './acquisition.js';
 import {
   coerceAssetClass,
   defaultAssetClassForProvider,
@@ -27,9 +32,13 @@ export interface CreateProviderOptions {
   apiSecret?: string;
   /** Alpaca data feed: 'iex' (free) or 'sip' (paid). */
   feed?: 'iex' | 'sip';
+  /** Alpaca corporate-action adjustment. */
+  adjustment?: 'raw' | 'split' | 'dividend' | 'all';
+  /** Massive split adjustment. */
+  adjusted?: boolean;
   /** Override the REST base (proxy, regional endpoint). */
   baseUrl?: string;
-  /** Safety cap on total bars fetched when paging a range (Binance, OKX). */
+  /** Safety/acquisition cap forwarded to every adapter that supports one. */
   maxBars?: number;
   /** Injectable fetch (defaults to global fetch). */
   fetchImpl?: typeof fetch;
@@ -49,7 +58,7 @@ export function createProvider(
   if (!supportsPair(provider, cls)) {
     throw new Error(`pinery: provider "${provider}" does not serve asset class "${cls}"`);
   }
-  const { apiKey, apiSecret, feed, baseUrl, maxBars, fetchImpl } = opts;
+  const { apiKey, apiSecret, feed, adjustment, adjusted, baseUrl, maxBars, fetchImpl } = opts;
   switch (provider) {
     case 'binance':
       return new BinanceProvider({
@@ -68,9 +77,17 @@ export function createProvider(
     case 'kraken':
       return new KrakenProvider({ baseUrl, fetchImpl });
     case 'alpaca':
-      return new AlpacaProvider({ keyId: apiKey, secretKey: apiSecret, feed, baseUrl, fetchImpl });
+      return new AlpacaProvider({
+        keyId: apiKey,
+        secretKey: apiSecret,
+        feed,
+        adjustment,
+        maxBars,
+        baseUrl,
+        fetchImpl,
+      });
     case 'massive':
-      return new MassiveProvider({ apiKey, baseUrl, fetchImpl });
+      return new MassiveProvider({ apiKey, adjusted, maxBars, baseUrl, fetchImpl });
     case 'csv':
       // The CSV adapter reads the filesystem, so it lives behind the Node-only
       // entry and can't be constructed from this browser-safe module. Build it
@@ -89,26 +106,18 @@ export interface InstrumentRouterOptions extends CreateProviderOptions {
   fallbackAssetClass?: AssetClass;
   /**
    * Wrap each created pair provider exactly once (e.g. with the node disk
-   * cache). Caching at the leaf keeps cache keys on the real provider ids
-   * ("binance-futures"), not the router's.
+   * cache). Caching at the leaf keeps cache keys on the real provider ids.
    */
   wrap?: (provider: HistoryProvider) => HistoryProvider;
   /**
    * Pre-built provider instances, keyed by provider name. A named provider is
    * used as-is for every asset class — neither created via `createProvider`
-   * nor passed through `wrap`. This is how Node-only providers (csv) join the
-   * router from this browser-safe module.
+   * nor passed through `wrap`.
    */
   providers?: Partial<Record<DataProvider, HistoryProvider>>;
 }
 
-/**
- * A `HistoryProvider` that resolves each symbol as an instrument address and
- * routes it to the right (provider, assetClass) adapter with the prefix
- * stripped — so one provider instance can serve a mixed universe like
- * `BI:FU:BTCUSDT, KR:BTC/USD, AAPL`. Bare tickers go to the fallback pair;
- * pair providers are created lazily and reused across calls.
- */
+/** Routes instrument addresses to lazily-created, reusable leaf providers. */
 export class InstrumentRouter implements HistoryProvider {
   readonly id = 'instrument-router';
   private readonly fallbackProvider: DataProvider;
@@ -128,24 +137,34 @@ export class InstrumentRouter implements HistoryProvider {
   }
 
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
-    const parsed = parseInstrumentAddress(symbol);
-    const provider = parsed.provider ?? this.fallbackProvider;
-    const assetClass = parsed.provider
-      ? coerceAssetClass(parsed.assetClass, provider)
-      : this.fallbackAssetClass;
-    return this.providerFor(provider, assetClass).history(parsed.ticker, timeframe, range);
+    const route = this.route(symbol);
+    return route.provider.history(route.ticker, timeframe, range);
+  }
+
+  /** Resolve exact history through the same route as history(), preserving the
+   * leaf/wrapper provider, its cache identity, and its adapter-normalized ticker. */
+  async resolveHistorySource(symbol: string): Promise<ResolvedHistorySource> {
+    const route = this.route(symbol);
+    return resolveProviderHistorySource(route.provider, route.ticker);
   }
 
   /** Route instrument metadata exactly like history(); undefined when the
-   *  target adapter has no instrument() of its own. */
+   * target adapter has no instrument() of its own. */
   async instrument(symbol: string): Promise<InstrumentInfo | undefined> {
+    const route = this.route(symbol);
+    return route.provider.instrument ? route.provider.instrument(route.ticker) : undefined;
+  }
+
+  private route(symbol: string): { provider: HistoryProvider; ticker: string } {
     const parsed = parseInstrumentAddress(symbol);
-    const provider = parsed.provider ?? this.fallbackProvider;
+    const providerName = parsed.provider ?? this.fallbackProvider;
     const assetClass = parsed.provider
-      ? coerceAssetClass(parsed.assetClass, provider)
+      ? coerceAssetClass(parsed.assetClass, providerName)
       : this.fallbackAssetClass;
-    const target = this.providerFor(provider, assetClass);
-    return target.instrument ? target.instrument(parsed.ticker) : undefined;
+    return {
+      provider: this.providerFor(providerName, assetClass),
+      ticker: parsed.ticker,
+    };
   }
 
   private providerFor(provider: DataProvider, assetClass: AssetClass): HistoryProvider {
@@ -169,12 +188,7 @@ export interface ResolvedInstrument {
   assetClass: AssetClass;
 }
 
-/**
- * Resolve a full instrument address (`BI:FU:BTCUSDT`, `AL:AAPL`, or a bare
- * `BTCUSDT`) into a configured provider + ticker. A bare ticker uses
- * `fallbackProvider`; an unserved or missing class falls back to the provider's
- * default rather than throwing, so untrusted input degrades gracefully.
- */
+/** Resolve a full instrument address into a configured provider + stripped ticker. */
 export function resolveInstrument(
   input: string,
   fallbackProvider: DataProvider = 'binance',

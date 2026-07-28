@@ -40,7 +40,7 @@ Plus shared flags — see [common options](./common-options.md):
 - **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--concurrency` · `--workers` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
-- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills))
+- **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills)) · `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier exact mode](./common-options.md#fill-model--bar-magnifier))
 - **Metrics:** `--periods-per-year` · `--risk-free-rate`
 - **Output:** `--json`
 
@@ -52,7 +52,12 @@ The default output is a **ranked table** with one row per combo and one column p
 
 `--points-csv <file>` writes every run (not just the ranked top) as one row — symbol, a column per axis, the ranked value, the strategy summary block, and the error for failed runs — needing no trade ledgers, so it is cheap on huge grids and pivots straight into pandas / Excel. `--csv` / `--plot` write per-combo artifacts labeled `<symbol>-<combo>`.
 
-`--json` emits the full report instead of the table, including `symbols`, `combos`, `gridTotal`, `sample`, and per-point fields (with the `symbol` on each point).
+`--json` emits the full report instead of the table, including `symbols`,
+`combos`, `gridTotal`, `sample`, and per-point fields (with the `symbol` on each
+point). In Bar Magnifier exact mode, one immutable symbol-specific dataset and
+static-security plan are resolved before its combos execute and shared only
+across those combos. A failed symbol keeps one typed failed point per combo, so
+the optimization surface and successful universe never shrink silently.
 
 The `--max-combos` guard (default `5000`) counts `combos × symbols` and fails fast before any fetch; an oversized exhaustive grid is rejected with a suggestion to use `--sample`.
 

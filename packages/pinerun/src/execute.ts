@@ -1,37 +1,42 @@
-/**
- * executeJob — the single, backend-agnostic run primitive. Compiles the Pine
- * source, runs it over the job's bars via piner's Engine, and projects the
- * outputs into a serializable `RunResult`. Pure (piner-only, no I/O), so it runs
- * identically in-process (LocalRunner) or inside a worker.
- */
-import { compile, CompileError, Engine, ArrayFeed, StrategyBroker } from '@heyphat/piner';
+/** Pure local/worker piner execution boundary. */
+import { ArrayFeed, CompileError, Engine, StrategyBroker } from '@heyphat/piner';
+import {
+  calendarSessionPeriods,
+  canonicalTimeframeSecondsExact,
+  isCalendarSessionTimeframe,
+  parseCanonicalTimeframeExact,
+  pineTimeframeToCanonicalExact,
+  snapshotHistorySessionCalendar,
+  utcTimeframeAnchor,
+  utcTimeframesNest,
+  type HistorySessionCalendar,
+  type UnixSecond,
+} from '@heyphat/pinery';
 import type { CompiledScript, EngineOptions } from '@heyphat/piner';
-
-/**
- * Does the loaded piner engine model calc_on_order_fills? Probed from a fresh
- * broker's DEFAULT settings: a feature-capable engine initializes the field
- * (`calcOnOrderFills: false`), piner ≤ 0.9.0 has no such key. Probing the
- * default is load-bearing — configure() Object.assigns overrides into the
- * settings, so a configured broker would show the key even on an engine that
- * ignores it (Phase 3 audit, findings 1-2).
- */
-const ENGINE_SUPPORTS_COOF = 'calcOnOrderFills' in new StrategyBroker().settings;
-import type { Job } from './job.js';
-import type { Bar } from './job.js';
+import { BarMagnifierError } from './failure.js';
+import type { Bar, Job, ResolvedMagnifierDataset } from './job.js';
 import { jobId } from './job.js';
-import type { RunResult, PlotResult, StrategySummary, StrategyTrade } from './result.js';
+import { marketDataDigest } from './digest.js';
+import {
+  exchangeCalendarChartOpensAligned,
+  isResolverIssuedMagnifierDataset,
+  magnifierDatasetAcquisitionKey,
+  preflightCompiledBarMagnifier,
+  utcFixedChartOpensAligned,
+  type MagnifierPreflight,
+} from './magnifier.js';
+import { compilePinerSource, pinerCapabilities } from './piner-capabilities.js';
+import { assertResolvedSecurityForBarMagnifier } from './security.js';
+import type {
+  BarMagnifierSummary,
+  PlotResult,
+  RunResult,
+  StrategySummary,
+  StrategyTrade,
+} from './result.js';
 
-// Per-process compile cache: scanning one script across N symbols recompiles once.
-const compileCache = new Map<string, CompiledScript>();
-
-function compileCached(source: string): CompiledScript {
-  let compiled = compileCache.get(source);
-  if (!compiled) {
-    compiled = compile(source);
-    compileCache.set(source, compiled);
-  }
-  return compiled;
-}
+/** See calc_on_order_fills audit: defaults, not configured extra keys, prove support. */
+const ENGINE_SUPPORTS_COOF = 'calcOnOrderFills' in new StrategyBroker().settings;
 
 export async function executeJob(job: Job): Promise<RunResult> {
   const id = jobId(job);
@@ -48,7 +53,7 @@ export async function executeJob(job: Job): Promise<RunResult> {
 
   let compiled: CompiledScript;
   try {
-    compiled = compileCached(job.source);
+    compiled = compilePinerSource(job.source);
   } catch (err) {
     return {
       ...base,
@@ -57,19 +62,42 @@ export async function executeJob(job: Job): Promise<RunResult> {
     };
   }
 
-  const errors = compiled.diagnostics.filter((d) => d.severity === 'error');
+  const errors = compiled.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
   if (errors.length > 0) {
     return {
       ...base,
       diagnostics: compiled.diagnostics.map(fmtDiag),
-      error: `compile: ${errors.map((d) => d.message).join('; ')}`,
+      error: `compile: ${errors.map((diagnostic) => diagnostic.message).join('; ')}`,
       elapsedMs: Date.now() - started,
     };
   }
 
-  // An explicit calc_on_order_fills override on an engine that ignores the
-  // field must fail loudly, not run once-per-bar under a distinct memo key
-  // while reporting the mode as active (Phase 3 audit, findings 1-2).
+  const adapter = pinerCapabilities();
+  let magnifierPreflight;
+  let magnifierDataset: ResolvedMagnifierDataset | undefined;
+  try {
+    magnifierPreflight = preflightCompiledBarMagnifier(
+      job.source,
+      job.timeframe,
+      job.useBarMagnifier,
+      compiled,
+      adapter,
+    );
+    if (magnifierPreflight.requested) {
+      magnifierDataset = assertResolvedMagnifierDatasetForJob(job, magnifierPreflight);
+      assertResolvedSecurityForBarMagnifier(
+        job.source,
+        magnifierPreflight.securityDependencies,
+        job,
+      );
+    }
+  } catch (error) {
+    if (error instanceof BarMagnifierError) {
+      return permanentFailure(base, error, started);
+    }
+    return { ...base, error: errorMessage(error), elapsedMs: Date.now() - started };
+  }
+
   if (job.calcOnOrderFills != null && !ENGINE_SUPPORTS_COOF) {
     return {
       ...base,
@@ -82,13 +110,14 @@ export async function executeJob(job: Job): Promise<RunResult> {
   }
 
   try {
-    // Host overrides applied AFTER the strategy() header (piner: override wins).
-    // The extra-key cast drops once the @heyphat/piner peer dep ships
-    // calcOnOrderFills in StrategySettings (> 0.9.0); older engines carry the
-    // setting inertly.
+    // Host overrides are added only when defined; omission preserves the source
+    // declaration. The cast is intentionally structural so pinerun still builds
+    // against old piner declarations that do not yet name useBarMagnifier.
     const strategyOverride: Record<string, unknown> = {};
-    if (job.minQty != null) strategyOverride.minQty = job.minQty; // lot step → TV-parity qty truncation
+    if (job.minQty != null) strategyOverride.minQty = job.minQty;
     if (job.calcOnOrderFills != null) strategyOverride.calcOnOrderFills = job.calcOnOrderFills;
+    if (job.useBarMagnifier != null) strategyOverride.useBarMagnifier = job.useBarMagnifier;
+
     const engine = new Engine(compiled, new ArrayFeed(toPinerBars(job.bars)), {
       backend: job.backend ?? 'js',
       inputs: job.inputs,
@@ -96,20 +125,37 @@ export async function executeJob(job: Job): Promise<RunResult> {
         ? (strategyOverride as EngineOptions['strategy'])
         : undefined,
     });
-    // Inject host-fetched request.security bars (cross-symbol / lower-TF) before the run.
+
     if (job.securityBars) {
-      for (const [key, bars] of Object.entries(job.securityBars))
+      for (const [key, bars] of Object.entries(job.securityBars)) {
         engine.ctx.securityBars.set(key, toPinerBars(bars));
+      }
     }
+
+    // Dedicated channel, already in milliseconds. This wrapper allocates no bar
+    // or close-time array and never reconverts the resolver-owned 200k payload.
+    if (magnifierDataset) {
+      adapter.injectMagnifierData(
+        engine as unknown as { ctx: Record<string, unknown> },
+        toPinerBarMagnifierData(magnifierDataset),
+      );
+    }
+
     await engine.run({ symbol: job.symbol, timeframe: job.timeframe, mintick: job.mintick });
 
     const plots: PlotResult[] = [];
-    for (const p of engine.outputs.plots.values()) {
-      plots.push({ id: p.id, title: p.title, data: fillDense(p.data, job.bars.length) });
+    for (const plot of engine.outputs.plots.values()) {
+      plots.push({
+        id: plot.id,
+        title: plot.title,
+        data: fillDense(plot.data, job.bars.length),
+      });
     }
-    plots.sort((a, b) => a.id - b.id);
-
-    const alerts = engine.outputs.alerts.map((a) => ({ bar: a.bar, message: a.message }));
+    plots.sort((left, right) => left.id - right.id);
+    const alerts = engine.outputs.alerts.map((alert) => ({
+      bar: alert.bar,
+      message: alert.message,
+    }));
 
     let strategy: StrategySummary | undefined;
     let trades: StrategyTrade[] | undefined;
@@ -117,53 +163,49 @@ export async function executeJob(job: Job): Promise<RunResult> {
     let barTimes: number[] | undefined;
     let closes: number[] | undefined;
     if (compiled.metadata.isStrategy) {
-      // Read piner's authoritative stats off the strategy namespace + broker (the
-      // same values a Pine script sees); pinerun performs no calculations of its own.
-      const st = engine.ctx.strategy;
+      const stats = engine.ctx.strategy;
       const broker = engine.ctx.strategyBroker;
       const report = engine.strategy;
-      // Effective fill model, read from the ENGINE's post-configure settings —
-      // never from the requested configuration: an engine that ignores the
-      // field must not be reported as running it (Phase 3 audit, finding 2).
-      // On a capable engine this reflects header + override precedence; on
-      // piner ≤ 0.9.0 the key is absent (overrides were rejected above).
       const effectiveCoof = (broker.settings as { calcOnOrderFills?: boolean }).calcOnOrderFills;
+      const barMagnifier = projectAuthoritativeBarMagnifierReport(
+        report as unknown,
+        magnifierPreflight.requested,
+      );
       strategy = {
         calcOnOrderFills: effectiveCoof === true || undefined,
-        initialCapital: st.initial_capital,
-        netProfit: st.netprofit,
-        netProfitPercent: st.netprofit_percent,
-        grossProfit: st.grossprofit,
-        grossProfitPercent: st.grossprofit_percent,
-        grossLoss: st.grossloss,
-        grossLossPercent: st.grossloss_percent,
+        ...(barMagnifier ? { barMagnifier } : {}),
+        initialCapital: stats.initial_capital,
+        netProfit: stats.netprofit,
+        netProfitPercent: stats.netprofit_percent,
+        grossProfit: stats.grossprofit,
+        grossProfitPercent: stats.grossprofit_percent,
+        grossLoss: stats.grossloss,
+        grossLossPercent: stats.grossloss_percent,
         profitFactor: broker.profitFactor,
-        wins: st.wintrades,
-        losses: st.losstrades,
+        wins: stats.wintrades,
+        losses: stats.losstrades,
         evens: report.evens,
-        closedTrades: st.closedtrades,
+        closedTrades: stats.closedtrades,
         winRate: broker.winRate,
-        avgTrade: st.avg_trade,
-        avgTradePercent: st.avg_trade_percent,
-        avgWinningTrade: st.avg_winning_trade,
-        avgLosingTrade: st.avg_losing_trade,
-        maxDrawdown: st.max_drawdown,
-        maxDrawdownPercent: st.max_drawdown_percent,
-        maxRunup: st.max_runup,
-        maxRunupPercent: st.max_runup_percent,
-        maxContractsHeld: st.max_contracts_held_all,
+        avgTrade: stats.avg_trade,
+        avgTradePercent: stats.avg_trade_percent,
+        avgWinningTrade: stats.avg_winning_trade,
+        avgLosingTrade: stats.avg_losing_trade,
+        maxDrawdown: stats.max_drawdown,
+        maxDrawdownPercent: stats.max_drawdown_percent,
+        maxRunup: stats.max_runup,
+        maxRunupPercent: stats.max_runup_percent,
+        maxContractsHeld: stats.max_contracts_held_all,
         totalCommission: report.totalCommission,
         barsProcessed: report.barsProcessed,
         barsInMarket: report.barsInMarket,
-        // Derived analytics stay piner's: annualized off the run's bar times unless
-        // the job supplies a host convention (periodsPerYear / riskFreeRate).
         metrics: engine.strategyMetrics(job.metrics),
       };
       if (job.includeTrades) {
-        trades = broker.closedTrades.map((t) => ({ ...t }));
+        trades = broker.closedTrades.map((trade) => ({ ...trade }));
         equityCurve = broker.equityCurve.slice();
-        barTimes = job.bars.map((b) => b.time);
-        closes = job.bars.map((b) => b.close);
+        barTimes = job.bars.map((bar) => bar.time);
+        closes = job.bars.map((bar) => bar.close);
       }
     }
 
@@ -177,39 +219,688 @@ export async function executeJob(job: Job): Promise<RunResult> {
       equityCurve,
       barTimes,
       closes,
-      securityRequests: engine.outputs.securityRequests.map((r) => ({ ...r })),
+      securityRequests: engine.outputs.securityRequests.map((request) => ({ ...request })),
       diagnostics: compiled.diagnostics.length ? compiled.diagnostics.map(fmtDiag) : undefined,
       elapsedMs: Date.now() - started,
     };
-  } catch (err) {
-    return {
-      ...base,
-      error: String(err instanceof Error ? err.message : err),
-      elapsedMs: Date.now() - started,
-    };
+  } catch (error) {
+    if (error instanceof BarMagnifierError) return permanentFailure(base, error, started);
+    const message = errorMessage(error);
+    if (magnifierPreflight.requested && /bar magnifier/i.test(message)) {
+      return permanentFailure(
+        base,
+        new BarMagnifierError({
+          kind: 'malformed',
+          code: 'invalid-injected-bar-magnifier-data',
+          message,
+        }),
+        started,
+      );
+    }
+    return { ...base, error: message, elapsedMs: Date.now() - started };
   }
 }
 
-function fmtDiag(d: { severity: string; message: string }): string {
-  return `${d.severity}: ${d.message}`;
+export function assertResolvedMagnifierDatasetForJob(
+  job: Pick<Job, 'symbol' | 'timeframe' | 'bars' | 'magnifier'>,
+  preflight: MagnifierPreflight,
+): ResolvedMagnifierDataset {
+  const dataset = job.magnifier;
+  if (!dataset) {
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: 'unresolved-bar-magnifier-data',
+      message:
+        'Bar Magnifier was requested, but no exact resolved magnifier dataset was attached to the Job',
+    });
+  }
+  const mismatches: string[] = [];
+  const mismatch = (value: string): void => {
+    if (!mismatches.includes(value)) mismatches.push(value);
+  };
+  if (!deeplyFrozen(dataset)) mismatch('dataset-not-deeply-immutable');
+  if (!isResolverIssuedMagnifierDataset(dataset)) mismatch('resolver-authentication');
+  if (!Array.isArray(dataset.barsMs)) mismatch('bars-shape');
+  if (
+    typeof dataset.barsDigest !== 'string' ||
+    !Array.isArray(dataset.barsMs) ||
+    dataset.barsDigest !== marketDataDigest(dataset.barsMs)
+  ) {
+    mismatch('bars-digest');
+  }
+  const alignmentEvidence = magnifierAlignmentEvidence(dataset.alignmentEvidence);
+  if (!alignmentEvidence) mismatch('alignment-evidence');
+  if (dataset.requestedSymbol !== job.symbol) mismatch('requested-symbol');
+  if (preflight.chartPineTf !== job.timeframe) mismatch('chart-timeframe');
+  if (dataset.contractVersion !== preflight.contractVersion) mismatch('contract-version');
+  if (dataset.mappingVersion !== preflight.mappingVersion) mismatch('mapping-version');
+  if (dataset.targetPineTf !== preflight.targetPineTf) mismatch('target-timeframe');
+
+  const targetCanonical =
+    preflight.targetPineTf === undefined
+      ? undefined
+      : pineTimeframeToCanonicalExact(preflight.targetPineTf);
+  if (!targetCanonical || targetCanonical.kind !== 'ok') {
+    mismatch('target-canonical-timeframe');
+  } else if (dataset.targetCanonicalTf !== targetCanonical.value) {
+    mismatch('target-canonical-timeframe');
+  }
+  if (canonicalTimeframeSecondsExact(dataset.sourceCanonicalTf).kind !== 'ok') {
+    mismatch('source-canonical-timeframe');
+  }
+  if (
+    typeof dataset.provenance.cacheIdentity !== 'string' ||
+    dataset.provenance.cacheIdentity.length === 0 ||
+    typeof dataset.provenance.normalizedSymbol !== 'string' ||
+    dataset.provenance.normalizedSymbol.length === 0 ||
+    typeof dataset.provenance.alignment !== 'string' ||
+    dataset.provenance.alignment.length === 0 ||
+    (dataset.provenance.weekAnchorSec !== undefined &&
+      !Number.isSafeInteger(dataset.provenance.weekAnchorSec)) ||
+    !Number.isSafeInteger(dataset.provenance.aggregationVersion) ||
+    dataset.provenance.aggregationVersion < 0
+  ) {
+    mismatch('provenance');
+  }
+  if (dataset.provenance.targetTimeframe !== dataset.targetCanonicalTf) {
+    mismatch('provenance-target-timeframe');
+  }
+  if (dataset.provenance.sourceTimeframe !== dataset.sourceCanonicalTf) {
+    mismatch('provenance-source-timeframe');
+  }
+  if (alignmentEvidence) {
+    if (dataset.provenance.alignment !== magnifierAlignmentIdentity(alignmentEvidence)) {
+      mismatch('provenance-alignment');
+    }
+    if (
+      alignmentEvidence.kind === 'utc-24x7' &&
+      (dataset.provenance.weekAnchorSec ?? null) !== (alignmentEvidence.weekAnchorSec ?? null)
+    ) {
+      mismatch('provenance-week-anchor');
+    }
+    if (!validMagnifierTimeframeLineage(dataset.provenance, alignmentEvidence)) {
+      mismatch('provenance-timeframe-lineage');
+    }
+  }
+  const sourceTimeframe = parseCanonicalTimeframeExact(dataset.sourceCanonicalTf);
+  const targetTimeframe = parseCanonicalTimeframeExact(dataset.targetCanonicalTf);
+  const usesUtcWeek =
+    dataset.provenance.alignment === 'utc-24x7' &&
+    ((sourceTimeframe.kind === 'ok' &&
+      sourceTimeframe.value.domain === 'fixed' &&
+      sourceTimeframe.value.unit === 'w') ||
+      (targetTimeframe.kind === 'ok' &&
+        targetTimeframe.value.domain === 'fixed' &&
+        targetTimeframe.value.unit === 'w'));
+  if (usesUtcWeek && dataset.provenance.weekAnchorSec === undefined) {
+    mismatch('provenance-week-anchor');
+  }
+  if (
+    dataset.provenance.weekAnchorSec !== undefined &&
+    dataset.provenance.alignment !== 'utc-24x7'
+  ) {
+    mismatch('provenance-week-anchor');
+  }
+  if (
+    (dataset.chartIntervalSource === 'utc-fixed' && alignmentEvidence?.kind !== 'utc-24x7') ||
+    (dataset.chartIntervalSource === 'provider-calendar' &&
+      alignmentEvidence?.kind !== 'exchange-calendar')
+  ) {
+    mismatch('provenance-alignment');
+  }
+  if (dataset.coverage.complete !== true || dataset.coverage.gaps.length !== 0) {
+    mismatch('coverage');
+  }
+  if (dataset.chartOpenTimesMs.length !== job.bars.length) mismatch('chart-open-count');
+  if (dataset.chartCloseTimesMs.length !== job.bars.length) mismatch('chart-close-count');
+
+  const expectedChartOpens = job.bars.map((bar) => chartTimeMilliseconds(bar.time));
+  const chartCanonical = pineTimeframeToCanonicalExact(job.timeframe);
+  const chartDuration =
+    chartCanonical.kind === 'ok'
+      ? canonicalTimeframeSecondsExact(chartCanonical.value)
+      : chartCanonical;
+  const utcDurationMs =
+    chartDuration.kind === 'ok' && Number.isSafeInteger(chartDuration.value * 1000)
+      ? chartDuration.value * 1000
+      : undefined;
+  if (
+    alignmentEvidence &&
+    chartCanonical.kind === 'ok' &&
+    !utcFixedChartOpensAligned(expectedChartOpens, chartCanonical.value, alignmentEvidence, 1000)
+  ) {
+    mismatch('chart-open-grid');
+  }
+  if (
+    alignmentEvidence &&
+    chartCanonical.kind === 'ok' &&
+    !exchangeCalendarChartOpensAligned(
+      expectedChartOpens,
+      chartCanonical.value,
+      alignmentEvidence,
+      1000,
+    )
+  ) {
+    mismatch('chart-open-calendar');
+  }
+
+  const count = Math.min(
+    job.bars.length,
+    dataset.chartOpenTimesMs.length,
+    dataset.chartCloseTimesMs.length,
+  );
+  for (let index = 0; index < count; index++) {
+    const expectedOpen = expectedChartOpens[index]!;
+    const open = dataset.chartOpenTimesMs[index]!;
+    const close = dataset.chartCloseTimesMs[index]!;
+    if (!Number.isSafeInteger(open) || open !== expectedOpen) mismatch('chart-open-boundary');
+    if (!Number.isSafeInteger(close) || close <= open) mismatch('chart-close-boundary');
+    if (dataset.chartIntervalSource === 'utc-fixed') {
+      const expectedClose = utcDurationMs === undefined ? NaN : expectedOpen + utcDurationMs;
+      if (!Number.isSafeInteger(expectedClose) || close !== expectedClose) {
+        mismatch('chart-close-boundary');
+      }
+    }
+    const nextOpen = expectedChartOpens[index + 1];
+    if (nextOpen !== undefined && close > nextOpen) mismatch('chart-interval-overlap');
+  }
+
+  const firstOpen = expectedChartOpens[0];
+  const finalClose = dataset.chartCloseTimesMs.at(-1);
+  if (
+    firstOpen === undefined ||
+    finalClose === undefined ||
+    dataset.coverage.requested.from !== firstOpen ||
+    dataset.coverage.requested.to !== finalClose
+  ) {
+    mismatch('coverage-requested-envelope');
+  }
+  if (!millisecondIntervalsCover(dataset.coverage.covered, dataset.coverage.requested)) {
+    mismatch('coverage-covered-envelope');
+  }
+  if (alignmentEvidence && !magnifierCoverageMatchesBars(dataset, alignmentEvidence)) {
+    mismatch('coverage-evidence');
+  }
+
+  try {
+    const expectedAcquisitionKey = magnifierDatasetAcquisitionKey({
+      ...dataset,
+      chartOpenTimesMs:
+        expectedChartOpens as unknown as ResolvedMagnifierDataset['chartOpenTimesMs'],
+    });
+    if (dataset.acquisitionKey !== expectedAcquisitionKey) mismatch('acquisition-identity');
+  } catch {
+    mismatch('acquisition-identity');
+  }
+
+  if (mismatches.length > 0) {
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: 'invalid-injected-bar-magnifier-data',
+      message: `Resolved Bar Magnifier data does not match this Job/preflight: ${mismatches.join(', ')}`,
+      details: {
+        mismatches,
+        expected: {
+          requestedSymbol: job.symbol,
+          chartPineTf: job.timeframe,
+          contractVersion: preflight.contractVersion,
+          mappingVersion: preflight.mappingVersion,
+          targetPineTf: preflight.targetPineTf,
+          targetCanonicalTf: targetCanonical?.kind === 'ok' ? targetCanonical.value : undefined,
+          chartBars: job.bars.length,
+          firstChartOpenMs: expectedChartOpens[0],
+        },
+        actual: {
+          requestedSymbol: dataset.requestedSymbol,
+          contractVersion: dataset.contractVersion,
+          mappingVersion: dataset.mappingVersion,
+          targetPineTf: dataset.targetPineTf,
+          targetCanonicalTf: dataset.targetCanonicalTf,
+          chartOpens: dataset.chartOpenTimesMs.length,
+          chartCloses: dataset.chartCloseTimesMs.length,
+          coverageComplete: dataset.coverage.complete,
+          coverageRequested: dataset.coverage.requested,
+          acquisitionKey: dataset.acquisitionKey,
+        },
+      },
+    });
+  }
+  return dataset;
 }
 
-/** Normalize a possibly-sparse plot array to a dense length-`n` array (holes → NaN). */
-function fillDense(data: number[], n: number): number[] {
-  const out = new Array<number>(n);
-  for (let i = 0; i < n; i++) {
-    const v = data[i];
-    out[i] = v === undefined ? NaN : v;
+type ValidatedMagnifierAlignmentEvidence =
+  | {
+      readonly kind: 'utc-24x7';
+      readonly alignment: 'utc-24x7';
+      readonly weekAnchorSec?: UnixSecond;
+      readonly calendar?: never;
+    }
+  | {
+      readonly kind: 'exchange-calendar';
+      readonly alignment: 'exchange-calendar';
+      readonly weekAnchorSec?: never;
+      readonly calendar: HistorySessionCalendar;
+    };
+
+function magnifierAlignmentEvidence(
+  value: unknown,
+): ValidatedMagnifierAlignmentEvidence | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.kind === 'utc-24x7') {
+    if (value.weekAnchorSec !== undefined && !Number.isSafeInteger(value.weekAnchorSec)) {
+      return undefined;
+    }
+    return {
+      kind: 'utc-24x7',
+      alignment: 'utc-24x7',
+      ...(value.weekAnchorSec !== undefined
+        ? { weekAnchorSec: value.weekAnchorSec as UnixSecond }
+        : {}),
+    };
+  }
+  if (value.kind !== 'exchange-calendar' || !isRecord(value.calendar)) return undefined;
+  try {
+    return {
+      kind: 'exchange-calendar',
+      alignment: 'exchange-calendar',
+      calendar: snapshotHistorySessionCalendar(value.calendar as unknown as HistorySessionCalendar),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function magnifierAlignmentIdentity(evidence: ValidatedMagnifierAlignmentEvidence): string {
+  return evidence.kind === 'utc-24x7'
+    ? evidence.kind
+    : `exchange-calendar:${evidence.calendar.calendarId}@${evidence.calendar.version}`;
+}
+
+function validMagnifierTimeframeLineage(
+  provenance: ResolvedMagnifierDataset['provenance'],
+  evidence: ValidatedMagnifierAlignmentEvidence,
+): boolean {
+  const source = canonicalTimeframeSecondsExact(provenance.sourceTimeframe);
+  const target = canonicalTimeframeSecondsExact(provenance.targetTimeframe);
+  if (source.kind !== 'ok' || target.kind !== 'ok') return false;
+  let nested = target.value % source.value === 0;
+  if (evidence.kind === 'utc-24x7') {
+    try {
+      nested = utcTimeframesNest(
+        provenance.sourceTimeframe,
+        provenance.targetTimeframe,
+        evidence.weekAnchorSec,
+        evidence.weekAnchorSec,
+      );
+    } catch {
+      return false;
+    }
+  }
+  if (provenance.aggregationVersion === 0) return source.value === target.value && nested;
+  return provenance.aggregationVersion > 0 && source.value < target.value && nested;
+}
+
+interface MagnifierIntervalMs {
+  readonly from: number;
+  readonly to: number;
+}
+
+/** Reconstruct target-grid coverage directly from barsMs without copying its rows. */
+function magnifierCoverageMatchesBars(
+  dataset: ResolvedMagnifierDataset,
+  evidence: ValidatedMagnifierAlignmentEvidence,
+): boolean {
+  const requested = dataset.coverage.requested;
+  if (!validMillisecondInterval(requested) || !Array.isArray(dataset.coverage.covered)) {
+    return false;
+  }
+  const parsed = parseCanonicalTimeframeExact(dataset.targetCanonicalTf);
+  const duration = canonicalTimeframeSecondsExact(dataset.targetCanonicalTf);
+  if (parsed.kind !== 'ok' || parsed.value.domain !== 'fixed' || duration.kind !== 'ok') {
+    return false;
+  }
+  const durationMs = duration.value * 1000;
+  if (!Number.isSafeInteger(durationMs) || durationMs <= 0) return false;
+
+  const reconstructed: MagnifierIntervalMs[] = [];
+  const calendarPeriods =
+    evidence.kind === 'exchange-calendar' && isCalendarSessionTimeframe(parsed.value.canonical)
+      ? calendarSessionPeriods(evidence.calendar, parsed.value.canonical)
+      : undefined;
+  const periodsByOpen = calendarPeriods
+    ? new Map(calendarPeriods.map((period) => [period.from as number, period] as const))
+    : undefined;
+
+  let previousOpen: number | undefined;
+  let sessionIndex = 0;
+  for (const bar of dataset.barsMs) {
+    if (!validMagnifierBar(bar) || (previousOpen !== undefined && bar.time <= previousOpen)) {
+      return false;
+    }
+    previousOpen = bar.time;
+    const fixedClose = bar.time + durationMs;
+    if (!Number.isSafeInteger(fixedClose)) return false;
+
+    if (evidence.kind === 'utc-24x7') {
+      let anchorMs: number;
+      try {
+        anchorMs = utcTimeframeAnchor(dataset.targetCanonicalTf, evidence.weekAnchorSec) * 1000;
+      } catch {
+        return false;
+      }
+      if (!Number.isSafeInteger(anchorMs) || floorMod(bar.time - anchorMs, durationMs) !== 0) {
+        return false;
+      }
+      const clipped = intersectMs({ from: bar.time, to: fixedClose }, requested);
+      if (clipped) reconstructed.push(clipped);
+      continue;
+    }
+
+    if (periodsByOpen) {
+      const period = periodsByOpen.get(bar.time / 1000);
+      if (!period || bar.time % 1000 !== 0) return false;
+      const intersectsRequested =
+        period.from * 1000 < requested.to && requested.from < period.to * 1000;
+      if (
+        intersectsRequested &&
+        (evidence.calendar.coverage.from > period.from ||
+          evidence.calendar.coverage.to < period.nominalTo)
+      ) {
+        return false;
+      }
+      for (const session of period.sessions) {
+        const clipped = intersectMs(
+          { from: session.from * 1000, to: session.to * 1000 },
+          requested,
+        );
+        if (clipped) reconstructed.push(clipped);
+      }
+      continue;
+    }
+
+    while (
+      sessionIndex < evidence.calendar.sessions.length &&
+      evidence.calendar.sessions[sessionIndex]!.to * 1000 <= bar.time
+    ) {
+      sessionIndex++;
+    }
+    const session = evidence.calendar.sessions[sessionIndex];
+    if (
+      !session ||
+      bar.time < session.from * 1000 ||
+      fixedClose > session.to * 1000 ||
+      floorMod(bar.time - session.from * 1000, durationMs) !== 0
+    ) {
+      return false;
+    }
+    const clipped = intersectMs({ from: bar.time, to: fixedClose }, requested);
+    if (clipped) reconstructed.push(clipped);
+  }
+
+  if (evidence.kind === 'exchange-calendar') {
+    const calendarFrom = evidence.calendar.coverage.from * 1000;
+    const calendarTo = evidence.calendar.coverage.to * 1000;
+    if (
+      !Number.isSafeInteger(calendarFrom) ||
+      !Number.isSafeInteger(calendarTo) ||
+      calendarFrom > requested.from ||
+      calendarTo < requested.to
+    ) {
+      return false;
+    }
+    const active = mergeMsIntervals(
+      evidence.calendar.sessions
+        .map((session) =>
+          intersectMs({ from: session.from * 1000, to: session.to * 1000 }, requested),
+        )
+        .filter((interval): interval is MagnifierIntervalMs => interval !== null),
+    );
+    reconstructed.push(...complementMsIntervals(requested, active));
+  }
+
+  const proven = mergeMsIntervals(reconstructed);
+  return sameMsIntervals(proven, dataset.coverage.covered);
+}
+
+function validMagnifierBar(bar: Readonly<Bar>): boolean {
+  if (!bar || !Number.isSafeInteger(bar.time)) return false;
+  const values = [bar.open, bar.high, bar.low, bar.close, bar.volume];
+  return (
+    values.every(Number.isFinite) &&
+    bar.high >= Math.max(bar.open, bar.low, bar.close) &&
+    bar.low <= Math.min(bar.open, bar.high, bar.close)
+  );
+}
+
+function validMillisecondInterval(value: unknown): value is MagnifierIntervalMs {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.from) &&
+    Number.isSafeInteger(value.to) &&
+    (value.from as number) < (value.to as number)
+  );
+}
+
+function intersectMs(
+  left: MagnifierIntervalMs,
+  right: MagnifierIntervalMs,
+): MagnifierIntervalMs | null {
+  const from = Math.max(left.from, right.from);
+  const to = Math.min(left.to, right.to);
+  return from < to ? { from, to } : null;
+}
+
+function mergeMsIntervals(intervals: readonly MagnifierIntervalMs[]): MagnifierIntervalMs[] {
+  const sorted = [...intervals].sort((left, right) => left.from - right.from || left.to - right.to);
+  const merged: MagnifierIntervalMs[] = [];
+  for (const interval of sorted) {
+    if (!validMillisecondInterval(interval)) return [];
+    const previous = merged.at(-1);
+    if (!previous || interval.from > previous.to) merged.push({ ...interval });
+    else if (interval.to > previous.to)
+      merged[merged.length - 1] = { from: previous.from, to: interval.to };
+  }
+  return merged;
+}
+
+function complementMsIntervals(
+  requested: MagnifierIntervalMs,
+  covered: readonly MagnifierIntervalMs[],
+): MagnifierIntervalMs[] {
+  const gaps: MagnifierIntervalMs[] = [];
+  let cursor = requested.from;
+  for (const interval of covered) {
+    if (interval.from > cursor) gaps.push({ from: cursor, to: interval.from });
+    cursor = Math.max(cursor, interval.to);
+  }
+  if (cursor < requested.to) gaps.push({ from: cursor, to: requested.to });
+  return gaps;
+}
+
+function sameMsIntervals(
+  left: readonly MagnifierIntervalMs[],
+  right: readonly MagnifierIntervalMs[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (interval, index) =>
+        validMillisecondInterval(right[index]) &&
+        interval.from === right[index]!.from &&
+        interval.to === right[index]!.to,
+    )
+  );
+}
+
+function floorMod(value: number, divisor: number): number {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function deeplyFrozen(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value !== 'object') return true;
+  if (seen.has(value) || !Object.isFrozen(value)) return false;
+  seen.add(value);
+  try {
+    for (const child of Object.values(value)) {
+      if (!deeplyFrozen(child, seen)) return false;
+    }
+    return true;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function chartTimeMilliseconds(time: number): number {
+  const value = time >= 1e12 ? time : time * 1000;
+  return Number.isSafeInteger(value) ? value : NaN;
+}
+
+function millisecondIntervalsCover(
+  intervals: readonly { readonly from: number; readonly to: number }[],
+  requested: { readonly from: number; readonly to: number },
+): boolean {
+  if (
+    !Number.isSafeInteger(requested.from) ||
+    !Number.isSafeInteger(requested.to) ||
+    requested.from >= requested.to
+  ) {
+    return false;
+  }
+  let cursor = requested.from;
+  for (const interval of intervals) {
+    if (
+      !Number.isSafeInteger(interval.from) ||
+      !Number.isSafeInteger(interval.to) ||
+      interval.from >= interval.to
+    ) {
+      return false;
+    }
+    if (interval.to <= cursor) continue;
+    if (interval.from > cursor) return false;
+    cursor = Math.max(cursor, interval.to);
+    if (cursor >= requested.to) return true;
+  }
+  return false;
+}
+
+export interface PinerBarMagnifierDataLike {
+  readonly targetTimeframe: string;
+  readonly bars: ResolvedMagnifierDataset['barsMs'];
+  readonly chartIntervals: {
+    readonly closeTimes: ResolvedMagnifierDataset['chartCloseTimesMs'];
+    readonly source: ResolvedMagnifierDataset['chartIntervalSource'];
+  };
+  readonly coverage: ResolvedMagnifierDataset['coverage'];
+}
+
+/** Build the tiny piner channel wrapper without copying either large array. */
+export function toPinerBarMagnifierData(
+  dataset: ResolvedMagnifierDataset,
+): PinerBarMagnifierDataLike {
+  return {
+    targetTimeframe: dataset.targetPineTf,
+    bars: dataset.barsMs,
+    chartIntervals: {
+      closeTimes: dataset.chartCloseTimesMs,
+      source: dataset.chartIntervalSource,
+    },
+    coverage: dataset.coverage,
+  };
+}
+
+export function projectAuthoritativeBarMagnifierReport(
+  reportValue: unknown,
+  requested: boolean,
+): BarMagnifierSummary | undefined {
+  const report = isRecord(reportValue) ? reportValue : {};
+  const value = report.barMagnifier;
+  if (value === undefined) {
+    if (!requested) return undefined;
+    throw new BarMagnifierError({
+      kind: 'unsupported',
+      code: 'piner-bar-magnifier-report-unavailable',
+      message:
+        'Bar Magnifier was requested, but the loaded piner run did not return its authoritative report block',
+    });
+  }
+  if (!isRecord(value)) throw malformedReport();
+  const coverage = value.coverage;
+  if (
+    value.requested !== true ||
+    typeof value.active !== 'boolean' ||
+    typeof value.targetTimeframe !== 'string' ||
+    !integer(value.magnifiedBars) ||
+    !integer(value.fallbackBars) ||
+    !integer(value.capFallbackBars) ||
+    !integer(value.dataFallbackBars) ||
+    !integer(value.intrabarsUsed) ||
+    (value.firstMagnifiedBar !== undefined && !integer(value.firstMagnifiedBar)) ||
+    (coverage !== 'complete' &&
+      coverage !== 'tv-cap-fallback' &&
+      coverage !== 'mixed-data-fallback' &&
+      coverage !== 'no-data')
+  ) {
+    throw malformedReport();
+  }
+  return {
+    requested: true,
+    active: value.active,
+    targetTimeframe: value.targetTimeframe,
+    magnifiedBars: value.magnifiedBars,
+    fallbackBars: value.fallbackBars,
+    capFallbackBars: value.capFallbackBars,
+    dataFallbackBars: value.dataFallbackBars,
+    intrabarsUsed: value.intrabarsUsed,
+    ...(value.firstMagnifiedBar !== undefined
+      ? { firstMagnifiedBar: value.firstMagnifiedBar }
+      : {}),
+    coverage,
+  };
+}
+
+function malformedReport(): BarMagnifierError {
+  return new BarMagnifierError({
+    kind: 'malformed',
+    code: 'malformed-piner-bar-magnifier-report',
+    message: 'The loaded piner returned a malformed Bar Magnifier report block',
+  });
+}
+
+function permanentFailure(base: RunResult, error: BarMagnifierError, started: number): RunResult {
+  return {
+    ...base,
+    error: error.message,
+    failure: error.toJSON(),
+    elapsedMs: Date.now() - started,
+  };
+}
+
+function fmtDiag(diagnostic: { severity: string; message: string }): string {
+  return `${diagnostic.severity}: ${diagnostic.message}`;
+}
+
+function fillDense(data: number[], length: number): number[] {
+  const out = new Array<number>(length);
+  for (let index = 0; index < length; index++) {
+    const value = data[index];
+    out[index] = value === undefined ? NaN : value;
   }
   return out;
 }
 
-/**
- * pinery/pinerun carry bar times in unix SECONDS (ergonomic; CLI dates, cache keys);
- * piner's engine expects MILLISECONDS (TradingView convention — its daily/weekly/session
- * bucketing uses ms). Convert at this single boundary. Values already in ms (>= ~1e12)
- * pass through, so an ms-native feed still works.
- */
-function toPinerBars(bars: Bar[]): Bar[] {
-  return bars.map((b) => (b.time >= 1e12 ? b : { ...b, time: b.time * 1000 }));
+/** pinery seconds -> piner milliseconds at the existing chart/security boundary. */
+function toPinerBars(bars: readonly Bar[]): Bar[] {
+  return bars.map((bar) => (bar.time >= 1e12 ? bar : { ...bar, time: bar.time * 1000 }));
+}
+
+function integer(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

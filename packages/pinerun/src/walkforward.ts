@@ -25,11 +25,22 @@
 import type { Bar, HistoryProvider, HistoryRange } from '@heyphat/pinery';
 import { toPinerTimeframe } from '@heyphat/pinery';
 import { compile } from '@heyphat/piner';
-import type { Job, JobMetricsOptions } from './job.js';
-import type { RunResult } from './result.js';
+import type { Job, JobMetricsOptions, ResolvedMagnifierDataset } from './job.js';
+import type { RunFailure, RunResult } from './result.js';
 import { LocalRunner, type Runner } from './runner.js';
-import { sweep } from './sweep.js';
-import { resolveSecurity } from './security.js';
+import { sweepPreparedForWalkforward, sweep } from './sweep.js';
+import {
+  deriveResolverIssuedMagnifierPrefix,
+  preflightBarMagnifier,
+  resolveBarMagnifier,
+} from './magnifier.js';
+import { BarMagnifierError } from './failure.js';
+import { assertBooleanOverride, exactRunFailure } from './command-failure.js';
+import {
+  deriveResolverIssuedSecurityPrefix,
+  resolveSecurity,
+  type ResolverIssuedSecurityPrefix,
+} from './security.js';
 import { resolveInstrument } from './instrument.js';
 import { comboId, type Axis } from './params.js';
 
@@ -62,6 +73,9 @@ export interface WalkforwardOptions {
   /** Override the script's calc_on_order_fills (TV's "After order is filled"
    *  checkbox). Unset → the script's own flag. */
   calcOnOrderFills?: boolean;
+  /** Override strategy()'s use_bar_magnifier Properties toggle. Unset keeps
+   *  the source declaration; true/false wins in either direction. */
+  useBarMagnifier?: boolean;
   /** Host conventions for the derived risk-adjusted metrics. */
   metrics?: JobMetricsOptions;
   /** Resolve request.security dependencies per window. Default true. */
@@ -104,6 +118,8 @@ export interface WalkforwardWindow extends WindowPlan {
   efficiency?: number;
   /** The full-window winner run (ledger + equity attached). */
   result?: RunResult;
+  /** Serializable permanent exact-mode reason when this fold was rejected. */
+  failure?: RunFailure;
   /** Set when the window could not produce a verdict (empty sweep / failed run). */
   error?: string;
 }
@@ -134,6 +150,8 @@ export interface WalkforwardReport {
   windows: WalkforwardWindow[];
   aggregate: WalkforwardAggregate;
   warnings: string[];
+  /** Preflight-level exact-mode rejection (before a fold could be planned). */
+  failure?: RunFailure;
   fetchError?: string;
 }
 
@@ -176,11 +194,39 @@ export function planWindows(
 }
 
 export async function walkforward(opts: WalkforwardOptions): Promise<WalkforwardReport> {
+  assertBooleanOverride(opts.useBarMagnifier);
   const rank = opts.rank ?? 'strategy.netProfit';
   const anchored = opts.anchored ?? false;
   const runner = opts.runner ?? new LocalRunner();
   const pinerTf = toPinerTimeframe(opts.timeframe);
   const warnings: string[] = [];
+
+  const empty = (fetchError?: string, failure?: RunFailure): WalkforwardReport => ({
+    symbol: opts.symbol,
+    rank,
+    anchored,
+    totalBars: 0,
+    isBars: 0,
+    oosBars: 0,
+    windows: [],
+    aggregate: aggregate([]),
+    warnings,
+    ...(failure ? { failure } : {}),
+    ...(fetchError ? { fetchError } : {}),
+  });
+
+  let magnifierRequested = false;
+  try {
+    magnifierRequested = preflightBarMagnifier(
+      opts.source,
+      pinerTf,
+      opts.useBarMagnifier,
+    ).requested;
+  } catch (error) {
+    const failure = exactRunFailure(error);
+    if (failure) return empty(undefined, failure);
+    // Ordinary compile failures retain the established execution diagnostics.
+  }
 
   // Walk-forward judges out-of-sample PROFIT, so it needs a strategy. Reject
   // indicators up front (a compile error is left to the runs to surface).
@@ -191,19 +237,6 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
   } catch (err) {
     if (err instanceof Error && err.message.startsWith('walkforward:')) throw err;
   }
-
-  const empty = (fetchError?: string): WalkforwardReport => ({
-    symbol: opts.symbol,
-    rank,
-    anchored,
-    totalBars: 0,
-    isBars: 0,
-    oosBars: 0,
-    windows: [],
-    aggregate: aggregate([]),
-    warnings,
-    fetchError,
-  });
 
   let bars: Bar[];
   try {
@@ -228,10 +261,74 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
     };
     windows.push(w);
 
-    // 1) Sweep the grid on the IS slice; the rank spec picks the winner.
     const isSlice = bars.slice(plan.isFrom, plan.isTo);
-    const isRange: HistoryRange = { from: isSlice[0]!.time, to: isSlice[isSlice.length - 1]!.time };
-    const swept = await sweep({
+    const isRange: HistoryRange = {
+      from: isSlice[0]!.time,
+      to: isSlice[isSlice.length - 1]!.time,
+    };
+    const fullBars = bars.slice(plan.isFrom, plan.oosTo);
+    let resolvedFoldJob: Job | undefined;
+    let isMagnifier: ResolvedMagnifierDataset | undefined;
+    let isSecurity: ResolverIssuedSecurityPrefix | undefined;
+    if (magnifierRequested) {
+      resolvedFoldJob = {
+        id: `w${index}:magnifier-preflight`,
+        source: opts.source,
+        symbol: opts.symbol,
+        timeframe: pinerTf,
+        bars: fullBars,
+        inputs: opts.baseInputs,
+        mintick: inst.mintick,
+        minQty: inst.minQty,
+        calcOnOrderFills: opts.calcOnOrderFills,
+        useBarMagnifier: opts.useBarMagnifier,
+        backend: opts.backend,
+        metrics: opts.metrics,
+      };
+      try {
+        await resolveBarMagnifier(resolvedFoldJob, opts.timeframe, opts.provider, {
+          securityConcurrency: Math.max(1, opts.concurrency ?? 4),
+          onSecurityFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+          onSecurityError: opts.onSecurityError,
+        });
+        assertWalkforwardMagnifierCap(
+          resolvedFoldJob.magnifier!,
+          fullBars,
+          plan.oosFrom - plan.isFrom,
+          index,
+        );
+        isMagnifier = deriveResolverIssuedMagnifierPrefix(
+          resolvedFoldJob.magnifier!,
+          isSlice.length,
+        );
+        const finalIsCloseMs = isMagnifier.chartCloseTimesMs.at(-1)!;
+        if (finalIsCloseMs % 1_000 !== 0) {
+          throw new BarMagnifierError({
+            kind: 'malformed',
+            code: 'walkforward-static-security-prefix-mismatch',
+            message: 'Walk-forward static-security prefixes require a whole-second IS close',
+            details: { finalIsCloseMs },
+          });
+        }
+        isSecurity = deriveResolverIssuedSecurityPrefix(
+          resolvedFoldJob.securityBars,
+          resolvedFoldJob.securityProofs,
+          finalIsCloseMs / 1_000,
+        );
+      } catch (error) {
+        w.error = `bar magnifier fold rejected: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        w.failure = exactRunFailure(error);
+        opts.onWindow?.(index + 1, plans.length);
+        continue;
+      }
+    }
+
+    // 1) Sweep the grid on the IS slice; when magnified, every candidate uses
+    // a view of the one exact full-fold acquisition anchored above. The <=200k
+    // guard makes that IS prefix identical to the later full winner run.
+    const sweepOptions = {
       source: opts.source,
       symbol: opts.symbol,
       timeframe: opts.timeframe,
@@ -247,21 +344,31 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
       mintick: inst.mintick,
       minQty: inst.minQty,
       calcOnOrderFills: opts.calcOnOrderFills,
+      useBarMagnifier: opts.useBarMagnifier,
       metrics: opts.metrics,
       resolveSecurity: opts.resolveSecurity,
       maxCombos: opts.maxCombos,
       onSecurityError: opts.onSecurityError,
       runner,
-    });
+    };
+    const swept = isMagnifier
+      ? await sweepPreparedForWalkforward(sweepOptions, {
+          magnifier: isMagnifier,
+          securityBars: isSecurity?.securityBars,
+          securityProofs: isSecurity?.securityProofs,
+        })
+      : await sweep(sweepOptions);
     for (const warning of swept.warnings) {
       if (!warnings.includes(warning)) warnings.push(warning);
     }
     const best = swept.ranked[0];
     if (!best) {
+      const firstFailure = swept.errors[0]?.failure;
       w.error =
         swept.errors[0]?.error != null
           ? `in-sample sweep produced no ranked combo (first error: ${swept.errors[0].error})`
           : 'in-sample sweep produced no ranked combo';
+      if (firstFailure) w.failure = firstFailure;
       opts.onWindow?.(index + 1, plans.length);
       continue;
     }
@@ -276,16 +383,21 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
       source: opts.source,
       symbol: opts.symbol,
       timeframe: pinerTf,
-      bars: bars.slice(plan.isFrom, plan.oosTo),
+      bars: fullBars,
       inputs: { ...opts.baseInputs, ...best.inputs },
       mintick: inst.mintick,
       minQty: inst.minQty,
       calcOnOrderFills: opts.calcOnOrderFills,
+      useBarMagnifier: opts.useBarMagnifier,
       backend: opts.backend,
       metrics: opts.metrics,
       includeTrades: true,
     };
-    if (opts.resolveSecurity !== false) {
+    if (resolvedFoldJob?.magnifier) {
+      job.magnifier = resolvedFoldJob.magnifier;
+      if (resolvedFoldJob.securityBars) job.securityBars = resolvedFoldJob.securityBars;
+      if (resolvedFoldJob.securityProofs) job.securityProofs = resolvedFoldJob.securityProofs;
+    } else if (opts.resolveSecurity !== false) {
       await resolveSecurity(opts.source, [job], opts.timeframe, pinerTf, opts.provider, {
         range: { from: job.bars[0]!.time, to: job.bars[job.bars.length - 1]!.time },
         inputs: job.inputs,
@@ -299,6 +411,7 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
     w.result = result;
     if (!result.ok || !result.strategy) {
       w.error = `winner run failed: ${result.error ?? 'no strategy summary'}`;
+      if (result.failure) w.failure = result.failure;
       opts.onWindow?.(index + 1, plans.length);
       continue;
     }
@@ -328,6 +441,86 @@ export async function walkforward(opts: WalkforwardOptions): Promise<Walkforward
     aggregate: aggregate(windows),
     warnings,
   };
+}
+
+export const WALKFORWARD_MAGNIFIER_TARGET_BAR_LIMIT = 200_000;
+
+export interface WalkforwardMagnifierCapObservation {
+  readonly eligibleTargetBars: number;
+  readonly limit: number;
+  readonly exceeded: boolean;
+  readonly capBoundaryTime?: number;
+  readonly boundaryInsideIs: boolean;
+}
+
+/** Inspect piner's eligible full-fold envelope before relying on IS-prefix identity. */
+export function inspectWalkforwardMagnifierCap(
+  dataset: ResolvedMagnifierDataset,
+  chartBars: readonly Bar[],
+  oosBoundaryIndex: number,
+): WalkforwardMagnifierCapObservation {
+  if (chartBars.length === 0 || dataset.chartCloseTimesMs.length !== chartBars.length) {
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: 'walkforward-bar-magnifier-envelope-mismatch',
+      message: 'Walk-forward Bar Magnifier data must match the complete IS+OOS chart envelope',
+      details: { chartBars: chartBars.length, closes: dataset.chartCloseTimesMs.length },
+    });
+  }
+  const from = chartTimeMs(chartBars[0]!.time);
+  const to = dataset.chartCloseTimesMs.at(-1)!;
+  const first = lowerBoundTime(dataset.barsMs, from);
+  const after = lowerBoundTime(dataset.barsMs, to);
+  const eligibleTargetBars = after - first;
+  const exceeded = eligibleTargetBars > WALKFORWARD_MAGNIFIER_TARGET_BAR_LIMIT;
+  const retainedStart = exceeded ? after - WALKFORWARD_MAGNIFIER_TARGET_BAR_LIMIT : first;
+  const capBoundaryTime = exceeded ? dataset.barsMs[retainedStart]?.time : undefined;
+  const oosBoundary = chartBars[oosBoundaryIndex];
+  const boundaryInsideIs =
+    capBoundaryTime !== undefined &&
+    oosBoundary !== undefined &&
+    capBoundaryTime < chartTimeMs(oosBoundary.time);
+  return {
+    eligibleTargetBars,
+    limit: WALKFORWARD_MAGNIFIER_TARGET_BAR_LIMIT,
+    exceeded,
+    ...(capBoundaryTime !== undefined ? { capBoundaryTime } : {}),
+    boundaryInsideIs,
+  };
+}
+
+export function assertWalkforwardMagnifierCap(
+  dataset: ResolvedMagnifierDataset,
+  chartBars: readonly Bar[],
+  oosBoundaryIndex: number,
+  fold: number,
+): void {
+  const observation = inspectWalkforwardMagnifierCap(dataset, chartBars, oosBoundaryIndex);
+  if (!observation.exceeded) return;
+  throw new BarMagnifierError({
+    kind: 'unsupported',
+    code: 'walkforward-bar-magnifier-target-cap-exceeded',
+    message:
+      `Walk-forward fold ${fold + 1} contains ${observation.eligibleTargetBars.toLocaleString('en-US')} ` +
+      `eligible Bar Magnifier target bars across its complete IS+OOS envelope; ` +
+      `the limit is ${observation.limit.toLocaleString('en-US')}. Shorten the fold or use a coarser chart timeframe.`,
+    details: { fold, ...observation },
+  });
+}
+
+function lowerBoundTime(bars: ResolvedMagnifierDataset['barsMs'], time: number): number {
+  let lo = 0;
+  let hi = bars.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (bars[mid]!.time < time) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function chartTimeMs(time: number): number {
+  return time >= 1e12 ? time : time * 1000;
 }
 
 /** Last defined equity value at or before `bar` (piner's curve is sparse before

@@ -27,6 +27,7 @@ Plus shared flags — see [common options](./common-options.md):
 
 - **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--no-security`
+- **Broker:** `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier exact mode](./common-options.md#fill-model--bar-magnifier)); one shared override applies to A and B while their source declarations remain independent
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
 - **Metrics:** `--periods-per-year` · `--risk-free-rate`
 - **Output:** `--json`
@@ -45,7 +46,8 @@ monochrome charts instead.
 
 With `--json`, both sides are emitted as full `RunResult` reports (ledger and
 equity curve included) for piping into other tools, instead of the table and
-chart.
+chart. A permanent exact-mode failure remains a typed result on its own side;
+it does not erase the other side's independent source/header diagnostic.
 
 ## Examples
 

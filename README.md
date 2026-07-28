@@ -59,7 +59,10 @@ piner            (engine — separate repo, pure, browser-safe)
 ```
 
 `piner` is declared a **peer dependency** of both packages, so there is only ever
-one engine copy in a consumer's tree.
+one engine copy in a consumer's tree. The `@heyphat/pinery` and
+`@heyphat/pinerun` names describe workspace/API entry points; pinestack's
+release artifact is the self-contained `pinerun` binary above, not separately
+published npm workspace packages.
 
 ## Repository layout
 

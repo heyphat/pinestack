@@ -23,10 +23,21 @@ import type { Bar, HistoryProvider, HistoryRange } from '@heyphat/pinery';
 import { toPinerTimeframe } from '@heyphat/pinery';
 import { compile } from '@heyphat/piner';
 import type { InputDecl } from '@heyphat/piner';
-import type { Job, JobMetricsOptions } from './job.js';
+import type {
+  Job,
+  JobMetricsOptions,
+  ResolvedMagnifierDataset,
+  ResolvedSecurityDatasetProof,
+} from './job.js';
 import type { RunResult } from './result.js';
 import { LocalRunner, type Runner } from './runner.js';
 import { evalRank, parseRankSpec, sortRanked, type RankSpec } from './rank.js';
+import {
+  createMagnifierResolutionScope,
+  preflightBarMagnifier,
+  resolveBarMagnifier,
+} from './magnifier.js';
+import { assertBooleanOverride, exactRunFailure, failedJobResult } from './command-failure.js';
 import { resolveSecurity } from './security.js';
 import { resolveInstrument } from './instrument.js';
 import {
@@ -73,6 +84,9 @@ export interface SweepOptions {
   /** Override the script's calc_on_order_fills (TV's "After order is filled"
    *  checkbox). Unset → the script's own flag. */
   calcOnOrderFills?: boolean;
+  /** Override strategy()'s use_bar_magnifier Properties toggle. Unset keeps
+   *  the source declaration; true/false wins in either direction. */
+  useBarMagnifier?: boolean;
   /** Attach the full trade ledger + equity curve to each result (strategies only). */
   includeTrades?: boolean;
   /** Host conventions for the derived risk-adjusted metrics (strategies only). */
@@ -203,7 +217,29 @@ export function validateAxes(source: string, axes: Axis[], label = 'sweep'): Axi
   });
 }
 
-export async function sweep(opts: SweepOptions): Promise<SweepReport> {
+interface PreparedWalkforwardExactData {
+  readonly magnifier: ResolvedMagnifierDataset;
+  readonly securityBars?: Record<string, Bar[]>;
+  readonly securityProofs?: Record<string, ResolvedSecurityDatasetProof>;
+}
+
+/** Internal fold seam: acquisition is anchored to the complete IS+OOS window. */
+export function sweepPreparedForWalkforward(
+  opts: SweepOptions,
+  prepared: PreparedWalkforwardExactData,
+): Promise<SweepReport> {
+  return runSweep(opts, prepared);
+}
+
+export function sweep(opts: SweepOptions): Promise<SweepReport> {
+  return runSweep(opts);
+}
+
+async function runSweep(
+  opts: SweepOptions,
+  preparedExact?: PreparedWalkforwardExactData,
+): Promise<SweepReport> {
+  assertBooleanOverride(opts.useBarMagnifier);
   // Validate everything user-shaped BEFORE any network / execution work.
   const explicitSpec = opts.rank != null ? parseRankSpec(opts.rank) : null;
   if (opts.top != null && !Number.isFinite(opts.top)) {
@@ -238,6 +274,62 @@ export async function sweep(opts: SweepOptions): Promise<SweepReport> {
   const combos = opts.sample != null ? sampleCombos(axes, opts.sample, opts.seed) : cartesian(axes);
   const warnings: string[] = [];
   const symbolLabel = symbols.join(',');
+
+  if (preparedExact && symbols.length !== 1) {
+    throw new Error('sweep: prepared walk-forward exact data requires one symbol');
+  }
+
+  let magnifierRequested = preparedExact !== undefined;
+  if (!preparedExact) {
+    try {
+      magnifierRequested = preflightBarMagnifier(
+        opts.source,
+        pinerTf,
+        opts.useBarMagnifier,
+      ).requested;
+    } catch (error) {
+      if (exactRunFailure(error)) {
+        const results = symbols.flatMap((symbol) =>
+          combos.map((combo) =>
+            failedJobResult(
+              {
+                id: comboId(combo),
+                symbol,
+                timeframe: pinerTf,
+                bars: [],
+              },
+              error,
+            ),
+          ),
+        );
+        const rank = opts.rank ?? 'last';
+        const spec = explicitSpec ?? parseRankSpec(rank);
+        const points: SweepPoint[] = results.map((result, index) => ({
+          symbol: symbols[Math.floor(index / combos.length)]!,
+          inputs: combos[index % combos.length]!,
+          result,
+          value: evalRank(result, spec),
+        }));
+        results.forEach((result, index) => opts.onResult?.(result, index + 1, results.length));
+        return {
+          symbol: symbolLabel,
+          symbols,
+          rank,
+          spec,
+          axes,
+          total: points.length,
+          combos: combos.length,
+          gridTotal,
+          ranked: [],
+          points,
+          errors: results,
+          warnings,
+          fetchErrors: [],
+        };
+      }
+      // Ordinary compile failures are surfaced by the existing execution path.
+    }
+  }
 
   // Fetch each symbol's bars ONCE — every combo of a symbol shares its series.
   // Slots are filled by symbol index so job/point order stays deterministic.
@@ -298,50 +390,110 @@ export async function sweep(opts: SweepOptions): Promise<SweepReport> {
       mintick: inst?.mintick ?? opts.mintick,
       minQty: inst?.minQty ?? opts.minQty,
       calcOnOrderFills: opts.calcOnOrderFills,
+      useBarMagnifier: opts.useBarMagnifier,
       backend: opts.backend,
       includeTrades: opts.includeTrades,
       metrics: opts.metrics,
     })),
   );
 
-  // Resolve request.security ONCE across all jobs (combos of one symbol share
-  // its bars; cross-symbol deps dedupe inside resolveSecurity) and inject.
-  if (opts.resolveSecurity !== false) {
-    const { discovered } = await resolveSecurity(
-      opts.source,
-      jobs,
-      opts.timeframe,
-      pinerTf,
-      opts.provider,
-      {
-        range: opts.range,
-        inputs: { ...opts.baseInputs },
-        backend: opts.backend,
-        mintick: opts.mintick,
-        concurrency: fetchConcurrency,
-        onFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
-        onError: opts.onSecurityError,
-      },
-    );
-    // A discovery run means some request.security argument is only known at
-    // runtime — it was resolved ONCE with default/base inputs. If that argument
-    // depends on a swept input, every combo received the default's bars.
-    if (discovered && axes.length > 0) {
-      warnings.push(
-        'request.security has dynamic (runtime-computed) arguments, resolved once with ' +
-          'default/base inputs — if a swept input feeds request.security, its combos ran ' +
-          'against the wrong series; pass resolveSecurity: false (--no-security) to be safe',
-      );
+  let results: RunResult[];
+  if (preparedExact) {
+    for (const job of jobs) {
+      job.magnifier = preparedExact.magnifier;
+      if (preparedExact.securityBars) job.securityBars = preparedExact.securityBars;
+      if (preparedExact.securityProofs) job.securityProofs = preparedExact.securityProofs;
     }
-  }
+    results = await runner.runAll(jobs, {
+      concurrency: opts.concurrency,
+      onResult: opts.onResult,
+    });
+  } else if (magnifierRequested) {
+    // Resolve one complete template per symbol, then share its immutable exact
+    // payload/security bars across that symbol's parameter jobs. No candidate
+    // executes until every template has resolved or produced an explicit error.
+    const failures = new Array<RunResult | undefined>(jobs.length);
+    const magnifierScope = createMagnifierResolutionScope();
+    await mapLimit(fetched, fetchConcurrency, async (_entry, symbolIndex) => {
+      const start = symbolIndex * combos.length;
+      const template = jobs[start]!;
+      try {
+        await resolveBarMagnifier(template, opts.timeframe, opts.provider, {
+          securityConcurrency: fetchConcurrency,
+          onSecurityFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+          onSecurityError: opts.onSecurityError,
+          scope: magnifierScope,
+        });
+        for (let offset = 1; offset < combos.length; offset++) {
+          const job = jobs[start + offset]!;
+          job.magnifier = template.magnifier;
+          if (template.securityBars) job.securityBars = template.securityBars;
+          if (template.securityProofs) job.securityProofs = template.securityProofs;
+        }
+      } catch (error) {
+        for (let offset = 0; offset < combos.length; offset++) {
+          failures[start + offset] = failedJobResult(jobs[start + offset]!, error);
+        }
+      }
+    });
 
-  // Fan out through the SAME runner + memo as scan. fanOut preserves job order,
-  // so results[i] corresponds to combos[i]. Concurrency is left to the runner's
-  // default (pool size / 4 in-process) unless explicitly set.
-  const results = await runner.runAll(jobs, {
-    concurrency: opts.concurrency,
-    onResult: opts.onResult,
-  });
+    const runnable: Job[] = [];
+    const runnableIndexes: number[] = [];
+    for (let index = 0; index < jobs.length; index++) {
+      if (!failures[index]) {
+        runnable.push(jobs[index]!);
+        runnableIndexes.push(index);
+      }
+    }
+    const executed = await runner.runAll(runnable, { concurrency: opts.concurrency });
+    results = new Array<RunResult>(jobs.length);
+    for (let index = 0; index < jobs.length; index++) {
+      if (failures[index]) results[index] = failures[index]!;
+    }
+    executed.forEach((result, index) => {
+      results[runnableIndexes[index]!] = result;
+    });
+    results.forEach((result, index) => opts.onResult?.(result, index + 1, results.length));
+  } else {
+    // Resolve request.security ONCE across all jobs (combos of one symbol share
+    // its bars; cross-symbol deps dedupe inside resolveSecurity) and inject.
+    if (opts.resolveSecurity !== false) {
+      const { discovered } = await resolveSecurity(
+        opts.source,
+        jobs,
+        opts.timeframe,
+        pinerTf,
+        opts.provider,
+        {
+          range: opts.range,
+          inputs: { ...opts.baseInputs },
+          backend: opts.backend,
+          mintick: opts.mintick,
+          concurrency: fetchConcurrency,
+          onFetch: opts.onFetch ? (label, n) => opts.onFetch!(label, n) : undefined,
+          onError: opts.onSecurityError,
+        },
+      );
+      // A discovery run means some request.security argument is only known at
+      // runtime — it was resolved ONCE with default/base inputs. If that argument
+      // depends on a swept input, every combo received the default's bars.
+      if (discovered && axes.length > 0) {
+        warnings.push(
+          'request.security has dynamic (runtime-computed) arguments, resolved once with ' +
+            'default/base inputs — if a swept input feeds request.security, its combos ran ' +
+            'against the wrong series; pass resolveSecurity: false (--no-security) to be safe',
+        );
+      }
+    }
+
+    // Fan out through the SAME runner + memo as scan. fanOut preserves job order,
+    // so results[i] corresponds to combos[i]. Concurrency is left to the runner's
+    // default (pool size / 4 in-process) unless explicitly set.
+    results = await runner.runAll(jobs, {
+      concurrency: opts.concurrency,
+      onResult: opts.onResult,
+    });
+  }
 
   // Resolve the effective rank: an omitted rank defaults to net profit once the
   // results reveal a strategy. Then zip, rank via the SAME pipeline as scan.

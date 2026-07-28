@@ -9,6 +9,59 @@ README). The workspace packages run from TypeScript source and version in
 lockstep with the release tag; publishing the library to npm remains a possible
 follow-up.
 
+## [0.5.0] - 2026-07-28
+
+### Added
+
+- **`--bar-magnifier` / `--no-bar-magnifier`** on `backtest`, `compare`,
+  `scan`, `sweep`, and `walkforward` — TradingView's Bar Magnifier Properties
+  toggle. Tri-state: absent → the `strategy()` header decides; `true`/`false`
+  force it either way. When effective, historical no-COOF fills use **real
+  lower-timeframe OHLC** acquired exactly by `pinery` (native target bars or
+  provably aligned aggregation, coverage- and provenance-checked, newest-first
+  toward TradingView's 200,000-target-bar limit) and injected into
+  `@heyphat/piner`, whose report block is presented as authoritative —
+  `fill model: bar magnifier` with per-run coverage, or an explicit
+  requested-but-inactive line. Requires `@heyphat/piner` ≥ 0.11.1; an explicit
+  override on an older engine fails with an actionable error.
+  - **Exact mode fails closed.** Unknown provider alignment, incomplete
+    required coverage, non-divisor timeframes, and off-grid chart opens are
+    typed permanent failures — never a silent fallback, a clamped timeframe,
+    or a dropped portfolio sleeve. Runtime-dynamic `request.security`
+    identities (symbol/timeframe/lookahead not statically resolvable) are
+    rejected with `dynamic-security-unsupported-with-bar-magnifier` across
+    every command, including shared-account portfolios.
+  - **Deterministic and transport-safe:** the resolved LTF dataset joins the
+    strong content digest (memoized results can never alias across symbols,
+    windows, feeds, or sessions), hydrates once per worker with
+    authentication, and local and worker runs produce identical reports.
+    Walk-forward rejects folds whose full IS+OOS envelope exceeds the 200k
+    cap rather than silently ranking on differing suffixes.
+  - Programmatic equivalents: `useBarMagnifier` on `Job`, `BacktestOptions`,
+    `CompareOptions`, `ScanOptions`, `SweepOptions`, `WalkforwardOptions`;
+    per-sleeve resolution for `portfolio` (no portfolio-wide CLI override).
+  - Validated end-to-end against piner's 352-run PineForge differential
+    corpus: the full CsvProvider → pinery aggregation → resolver → worker →
+    piner pipeline reproduces the reference trades exactly, including
+    sub-bar fill timestamps. **Proxy-validated partial support, not
+    TradingView parity** — COOF, realtime, and risk/margin cadence keep the
+    established chart-OHLC behavior.
+
+  - **Known limitations (typed rejections, not silent fallbacks):** the CLI's
+    `--provider csv` cannot declare bar alignment yet, so exact magnifier
+    resolution over CSV data fails with `unknown-alignment` — use a live
+    provider, or the programmatic `CsvProvider({ alignment: 'utc-24x7', … })`.
+    Chart timeframes whose mapped target the provider serves natively work
+    best (e.g. Binance: 30m chart → 5m target); targets needing aggregation
+    may report `incomplete-required-coverage` depending on fetch depth.
+
+### Changed
+
+- `@heyphat/piner` pinned to **0.11.1** (Bar Magnifier engine support and a
+  stop-limit entry fill correction — far-side stop-limits no longer fill at
+  untraded prices, so affected backtests report different, correct fills).
+- CLI `--help` and error text now reference the embedded engine as 0.11.1.
+
 ## [0.4.0] - 2026-07-26
 
 ### Added
@@ -192,6 +245,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.5.0]: https://github.com/heyphat/pinestack/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/heyphat/pinestack/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/heyphat/pinestack/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/heyphat/pinestack/compare/v0.1.2...v0.2.0

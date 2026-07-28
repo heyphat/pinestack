@@ -115,7 +115,18 @@ function capableRuntimeWithPinerMetadata(additiveMetadata = true) {
                 lookahead: dependency.lowerTf ? null : false,
                 expressionPriorBars: /close\[3\]/.test(source) ? 3 : 0,
               }))
-            : compiled.metadata.securityDependencies,
+            : compiled.metadata.securityDependencies.map((dependency) => {
+                // Strip the additive fields explicitly. This used to pass the
+                // compiler output through unchanged, which only simulated an old
+                // compiler while piner did not yet emit lookahead /
+                // expressionPriorBars — it now does, so pass-through would be
+                // COMPLETE metadata and no rejection would fire.
+                const { lookahead: _l, expressionPriorBars: _e, ...rest } = dependency as Record<
+                  string,
+                  unknown
+                >;
+                return rest;
+              }),
         },
       };
     },
@@ -1038,7 +1049,9 @@ test('executeJob follows the loaded runtime: typed old-runtime rejection or auth
     await resolveBarMagnifier(job, '1h', provider);
     const result = await executeJob(job);
     expect(result.ok).toBe(true);
-    expect(result.strategy?.barMagnifier).toMatchObject({ requested: true, active: false });
+    // Capable runtime + resolved data traverses; this asserted inactive back when
+    // piner's traversal was gated shut.
+    expect(result.strategy?.barMagnifier).toMatchObject({ requested: true, active: true });
   } else {
     const result = await executeJob(job);
     expect(result.ok).toBe(false);

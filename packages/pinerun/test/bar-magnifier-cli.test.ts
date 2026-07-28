@@ -1,9 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { pinerCapabilities } from '../src/index.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
+
+// These tests are about PERMANENT failures serializing through every command,
+// not about one particular code. Which code appears depends on how far exact
+// mode gets: an incapable engine stops at capability preflight, while a capable
+// one proceeds and the CSV fixture provider (no proven alignment) fails
+// acquisition instead. Keeping both alive preserves the coverage on both engines.
+const EXACT_FAILURE_CODE = pinerCapabilities().capable
+  ? 'unknown-alignment'
+  : 'piner-bar-magnifier-capability-unavailable';
 const T0 = 1_700_000_000;
 let dir: string;
 let sourceOn: string;
@@ -59,6 +69,11 @@ plot(close + bias, "value")
     );
   }
   writeFileSync(join(dir, 'X_1h.csv'), rows.join('\n'));
+  // Y needs data too: an incapable engine rejects BOTH symbols at capability
+  // preflight (before any I/O), but a capable engine resolves per symbol — a
+  // missing Y file would fail as a fetch error instead of the typed exact
+  // failure this suite asserts, and the scan error count would drop to 1.
+  writeFileSync(join(dir, 'Y_1h.csv'), rows.join('\n'));
 });
 
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -72,6 +87,8 @@ describe('Bar Magnifier CLI help and strict tri-state parsing', () => {
       expect(result.stdout).toContain('--no-bar-magnifier');
       expect(result.stdout).toContain('automatic');
       expect(result.stdout).toContain('@heyphat/piner 0.10.0');
+      // Help text documents the code as a literal; it does not vary with the
+      // engine that happens to be loaded.
       expect(result.stdout).toContain('piner-bar-magnifier-capability-unavailable');
       expect(result.stdout).toContain('requested/inactive');
       expect(result.stdout).not.toContain('Current piner traversal');
@@ -157,7 +174,7 @@ describe('Bar Magnifier CLI command outcomes and summaries', () => {
     expect(independent.code).not.toBe(0);
     const independentJson = JSON.parse(independent.stdout);
     expect(independentJson.a.result.failure).toMatchObject({
-      code: 'piner-bar-magnifier-capability-unavailable',
+      code: EXACT_FAILURE_CODE,
       permanent: true,
     });
     expect(independentJson.b.result.ok).toBe(true);
@@ -189,16 +206,14 @@ describe('Bar Magnifier CLI command outcomes and summaries', () => {
     );
     expect(forcedOn.code).not.toBe(0);
     const forcedOnJson = JSON.parse(forcedOn.stdout);
-    expect(forcedOnJson.a.result.failure?.code).toBe('piner-bar-magnifier-capability-unavailable');
-    expect(forcedOnJson.b.result.failure?.code).toBe('piner-bar-magnifier-capability-unavailable');
+    expect(forcedOnJson.a.result.failure?.code).toBe(EXACT_FAILURE_CODE);
+    expect(forcedOnJson.b.result.failure?.code).toBe(EXACT_FAILURE_CODE);
   });
 
   test('backtest, scan, sweep, walk-forward, and portfolio serialize permanent failures', () => {
     const backtested = run('backtest', sourceOn, ...dataArgs(), '--json');
     expect(backtested.code).not.toBe(0);
-    expect(JSON.parse(backtested.stdout).failure.code).toBe(
-      'piner-bar-magnifier-capability-unavailable',
-    );
+    expect(JSON.parse(backtested.stdout).failure.code).toBe(EXACT_FAILURE_CODE);
 
     const scanned = run(
       'scan',
@@ -222,7 +237,7 @@ describe('Bar Magnifier CLI command outcomes and summaries', () => {
     expect(
       scanJson.errors.every(
         (entry: { failure?: { code?: string } }) =>
-          entry.failure?.code === 'piner-bar-magnifier-capability-unavailable',
+          entry.failure?.code === EXACT_FAILURE_CODE,
       ),
     ).toBe(true);
 
@@ -240,7 +255,7 @@ describe('Bar Magnifier CLI command outcomes and summaries', () => {
     const sweepJson = JSON.parse(swept.stdout);
     expect(sweepJson.total).toBe(2);
     expect(sweepJson.errors).toHaveLength(2);
-    expect(sweepJson.errors[0].failure.code).toBe('piner-bar-magnifier-capability-unavailable');
+    expect(sweepJson.errors[0].failure.code).toBe(EXACT_FAILURE_CODE);
 
     const walked = run(
       'walkforward',
@@ -256,10 +271,18 @@ describe('Bar Magnifier CLI command outcomes and summaries', () => {
       '--json',
     );
     expect(walked.code).toBe(0);
-    expect(JSON.parse(walked.stdout).failure).toMatchObject({
-      code: 'piner-bar-magnifier-capability-unavailable',
-      permanent: true,
-    });
+    // WHERE the failure surfaces depends on how far exact mode gets: capability
+    // preflight fails once for the whole report, while a capable engine reaches
+    // acquisition inside each window and reports the typed failure per window.
+    const walkedJson = JSON.parse(walked.stdout);
+    if (pinerCapabilities().capable) {
+      expect(walkedJson.windows.length).toBeGreaterThan(0);
+      for (const window of walkedJson.windows) {
+        expect(window.failure).toMatchObject({ code: EXACT_FAILURE_CODE, permanent: true });
+      }
+    } else {
+      expect(walkedJson.failure).toMatchObject({ code: EXACT_FAILURE_CODE, permanent: true });
+    }
 
     const portfolio = run(
       'portfolio',
@@ -277,7 +300,7 @@ describe('Bar Magnifier CLI command outcomes and summaries', () => {
     );
     expect(portfolio.code).not.toBe(0);
     expect(JSON.parse(portfolio.stdout).failure).toMatchObject({
-      code: 'piner-bar-magnifier-capability-unavailable',
+      code: EXACT_FAILURE_CODE,
       permanent: true,
     });
   });

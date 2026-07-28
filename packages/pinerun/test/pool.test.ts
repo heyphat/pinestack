@@ -239,7 +239,9 @@ runtimeCapableTest(
     try {
       const worker = await runner.run(job);
       expect(local.ok).toBe(true);
-      expect(local.strategy?.barMagnifier).toMatchObject({ requested: true, active: false });
+      // Resolved data + capable engine traverses. The worker-equality assertion
+      // below is the real subject of this test and now compares ACTIVE reports.
+      expect(local.strategy?.barMagnifier).toMatchObject({ requested: true, active: true });
       expect({ ...worker, elapsedMs: undefined }).toEqual({ ...local, elapsedMs: undefined });
     } finally {
       await runner.close();

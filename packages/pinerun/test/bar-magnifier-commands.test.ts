@@ -28,7 +28,10 @@ import {
 } from '../src/index.js';
 import { WorkerPoolRunner } from '../src/node.js';
 
-const T0 = 1_700_000_000;
+// Hour-aligned. The exact resolver authenticates chart opens against the UTC
+// fixed-duration grid, so a T0 that is 800s past the hour (1_700_000_000) is
+// correctly rejected with chart-fixed-grid-mismatch.
+const T0 = 1_699_999_200;
 const MAGNIFIER_CAPABLE = pinerCapabilities().capable;
 const exactTest = MAGNIFIER_CAPABLE ? test : test.skip;
 
@@ -132,7 +135,25 @@ class TrackingProvider implements HistoryProvider {
         details: { symbol },
       });
     }
-    return this.inner.resolveHistorySource(symbol);
+    // Exact acquisition fetches through the RESOLVED source, not the legacy
+    // history() API — without wrapping it here `historyCalls` never sees the
+    // exact-security fetch at all and range assertions silently inspect nothing.
+    const source = await this.inner.resolveHistorySource(symbol);
+    const calls = this.historyCalls;
+    return {
+      ...source,
+      history: (request) => {
+        // HistoryRequest carries half-open {from,to} bounds in `requested`; the
+        // legacy history() API carries a HistoryRange. Record the exact path's
+        // bounds so a `limit` forwarded into exact acquisition would be visible.
+        calls.push({
+          symbol,
+          timeframe: request.timeframe,
+          range: request.requested as unknown as HistoryRange,
+        });
+        return source.history(request);
+      },
+    };
   }
 
   instrument(symbol: string) {
@@ -333,8 +354,14 @@ describe('Bar Magnifier command APIs', () => {
         axes: [],
         windows: 2,
       });
-      expect(walked.windows).toHaveLength(2);
-      expect(walked.windows.every((window) => window.failure?.code === expected.code)).toBe(true);
+      // A dynamic-security rejection is a PREFLIGHT verdict on the source and
+      // config, not a per-window outcome: every window would carry the identical
+      // failure. walkforward therefore reports it once at the report level and
+      // plans no windows — explicit diagnostics, not a silently smaller universe
+      // (plan §7.8). scan/sweep differ because their units genuinely are per
+      // symbol / per combo.
+      expect(walked.windows).toHaveLength(0);
+      expect(walked.failure).toMatchObject(expected);
 
       await expect(
         portfolio({
@@ -482,7 +509,13 @@ plot(request.security("AAPL", "5", close))`;
               target.seconds,
               20,
             ),
-            'A|1d': [...bars(1, dayStart - day, day, 80), ...bars(1, dayStart, day, 90)],
+            // The exact resolver derives a range covering the containing row AND
+            // its predecessors, so seed one more day than the chart window needs.
+            'A|1d': [
+              ...bars(1, dayStart - 2 * day, day, 70),
+              ...bars(1, dayStart - day, day, 80),
+              ...bars(1, dayStart, day, 90),
+            ],
           },
           {
             alignment: 'utc-24x7',
@@ -515,7 +548,7 @@ plot(d)
   );
 
   exactTest(
-    'resolved exact data reports requested-but-inactive and local/worker results agree',
+    'resolved exact data reports an ACTIVE magnifier and local/worker results agree',
     async () => {
       const provider = exactStaticProvider(['A'], 24, {}, 'worker-equality');
       const report = await backtest({
@@ -525,16 +558,26 @@ plot(d)
         provider,
       });
       expect(report.result?.ok).toBe(true);
+      // A capable engine with fully resolved exact data TRAVERSES. This asserted
+      // active:false back when piner could not magnify; the gate is open now, so
+      // the authoritative report is an active one and the fill-model line changes
+      // with it.
       expect(report.result?.strategy?.barMagnifier).toMatchObject({
         requested: true,
-        active: false,
+        active: true,
         targetTimeframe: targetInfo().pine,
-        coverage: 'no-data',
+        magnifiedBars: 24,
+        fallbackBars: 0,
+        intrabarsUsed: 144,
+        coverage: 'complete',
       });
       expect(formatFillModel(report.result!.strategy!).line).toContain(
-        'fill model: standard chart OHLC',
+        'fill model: bar magnifier',
       );
-      expect(formatFillModel(report.result!.strategy!).line).toContain('requested');
+      // The "requested … inactive" wording belongs to the inactive presentation.
+      // An active magnifier reports its coverage on the detail line instead.
+      expect(formatFillModel(report.result!.strategy!).detail).toContain('coverage=complete');
+      expect(formatFillModel(report.result!.strategy!).detail).toContain('144 intrabars');
 
       const local = await scan({
         source: STRATEGY_ON,
@@ -564,7 +607,10 @@ plot(d)
   exactTest(
     'portfolio resolves sleeves atomically without adding target times to its master clock',
     async () => {
-      const starts = { A: T0, B: T0 + 1_800 };
+      // Stagger by a WHOLE chart bar. T0 + 1_800 is half past the hour, which the
+      // resolver correctly rejects on a 1h chart (chart-fixed-grid-mismatch); the
+      // point of the fixture is offset sleeves, not off-grid ones.
+      const starts = { A: T0, B: T0 + 3_600 };
       const provider = exactStaticProvider(['A', 'B'], 12, starts, 'portfolio-exact');
       const report = await portfolio({
         source: STRATEGY_ON,
@@ -584,13 +630,15 @@ plot(d)
       expect(report.times).toEqual(expectedTimes);
       expect(report.times).not.toContain((T0 + targetInfo().seconds) * 1_000);
 
-      expect(report.barMagnifier).toMatchObject({ active: false, coverage: 'no-data' });
+      // Both sleeves resolve exact data against a capable engine, so the aggregate
+      // block is active; it was asserted inactive when piner could not magnify.
+      expect(report.barMagnifier).toMatchObject({ active: true, coverage: 'complete' });
       expect(report.barMagnifier?.processedBars).toBe(
         report.sleeves.reduce((sum, sleeve) => sum + sleeve.barsProcessed, 0),
       );
       expect(report.barMagnifier?.coveragePercent).toBeGreaterThanOrEqual(0);
       expect(report.barMagnifier?.coveragePercent).toBeLessThanOrEqual(100);
-      expect(report.sleeves.every((sleeve) => sleeve.barMagnifier?.active === false)).toBe(true);
+      expect(report.sleeves.every((sleeve) => sleeve.barMagnifier?.active === true)).toBe(true);
 
       const atomic = new TrackingProvider(
         exactStaticProvider(['A', 'B'], 12, {}, 'portfolio-atomic'),

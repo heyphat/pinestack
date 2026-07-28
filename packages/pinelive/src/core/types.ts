@@ -1,12 +1,5 @@
-export interface Bar {
-  /** Bar open time, as unix seconds at the LiveFeed boundary. */
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
+import type { Bar } from '@heyphat/pinery';
+export type { Bar } from '@heyphat/pinery';
 
 export type Side = 'buy' | 'sell';
 export type OrderType = 'market' | 'limit' | 'stop';
@@ -71,4 +64,6 @@ export interface Instrument {
   brokerQtyPerNative?: number;
   /** Broker-unit order increment. If absent, native qtyStep is converted. */
   brokerQtyStep?: number;
+  exchange?: string;
+  expiry?: string;
 }

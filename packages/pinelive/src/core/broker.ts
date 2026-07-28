@@ -36,15 +36,15 @@ export class BrokerError extends Error {
 
 export interface Broker {
   readonly id: string;
-  connect?(): Promise<void>;
+  connect?(signal?: AbortSignal): Promise<void>;
   disconnect?(): Promise<void>;
   capabilities(): Capabilities;
-  instrument(symbol: string): Promise<Instrument>;
-  getPosition(symbol: string): Promise<Position>;
-  getAccount(): Promise<Account>;
+  instrument(symbol: string, signal?: AbortSignal): Promise<Instrument>;
+  getPosition(symbol: string, signal?: AbortSignal): Promise<Position>;
+  getAccount(signal?: AbortSignal): Promise<Account>;
   /** Resolve to a terminal fill and deduplicate for the lifetime of the adapter by clientId. */
-  submit(order: OrderRequest): Promise<Fill>;
-  flatten(symbol: string): Promise<void>;
+  submit(order: OrderRequest, signal?: AbortSignal): Promise<Fill>;
+  flatten(symbol: string, signal?: AbortSignal): Promise<void>;
 }
 
 export function isBrokerError(value: unknown): value is BrokerError {

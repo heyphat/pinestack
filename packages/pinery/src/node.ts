@@ -13,8 +13,10 @@ import type {
   HistoryRange,
   HistoryRequest,
   InstrumentInfo,
+  MarketDataProvider,
   ResolvedHistorySource,
 } from './provider.js';
+import { isMarketDataProvider } from './provider.js';
 import { resolveHistorySource } from './acquisition.js';
 import {
   snapshotHistoryCapabilities,
@@ -22,6 +24,11 @@ import {
   historyCapabilityRecordSpan,
   validateHistoryAcquisition,
 } from './coverage.js';
+import type { ProviderConfig } from './factory.js';
+import { assertProviderConfig, createMarketDataProvider } from './factory.js';
+import { CsvProvider } from './adapters/csv.js';
+import { ReplayProvider } from './adapters/replay.js';
+import type { TigerMarketDataTransport } from './adapters/tiger.js';
 
 export * from './index.js';
 export { CsvProvider, type CsvProviderOptions } from './adapters/csv.js';
@@ -180,6 +187,16 @@ export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): 
       return info;
     };
   }
+  if (isMarketDataProvider(provider)) {
+    const live = provider;
+    const liveWrapped = wrapped as MarketDataProvider;
+    liveWrapped.resolve = (symbol, options) => live.resolve(symbol, options);
+    liveWrapped.historyResolved = (instrument, timeframe, range, signal) =>
+      live.historyResolved(instrument, timeframe, range, signal);
+    liveWrapped.closedBars = (instrument, timeframe, options) =>
+      live.closedBars(instrument, timeframe, options);
+    if (live.disconnect) liveWrapped.disconnect = () => live.disconnect!();
+  }
   return wrapped;
 }
 
@@ -308,4 +325,75 @@ function stableStringify(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(String(value));
+}
+
+export interface TigerMarketDataCredentials {
+  tigerId?: string;
+  privateKey?: string;
+  account?: string;
+}
+
+export interface NodeMarketDataFactoryOptions {
+  tigerCredentials?: Readonly<TigerMarketDataCredentials>;
+}
+
+export type TigerTransportFactory = (
+  config: Extract<ProviderConfig, { provider: 'tiger' }>,
+  credentials: Readonly<TigerMarketDataCredentials>,
+) => TigerMarketDataTransport;
+
+let tigerTransportFactory: TigerTransportFactory | undefined;
+
+/** Optional production integrations register here; pinery does not pretend an unverified SDK is bundled. */
+export function registerTigerMarketDataTransport(factory: TigerTransportFactory): void {
+  tigerTransportFactory = factory;
+}
+
+export function createNodeMarketDataProvider(
+  input: ProviderConfig,
+  options: NodeMarketDataFactoryOptions = {},
+): MarketDataProvider {
+  const config = assertProviderConfig(input);
+  if (config.provider === 'csv') {
+    const source = new CsvProvider({ dir: config.dataDir });
+    return new ReplayProvider(source, {
+      cutoverTime: config.cutoverTime,
+      paceMs: config.paceMs,
+      instrument: {
+        mintick: config.mintick,
+        qtyStep: config.qtyStep,
+        minOrderQty: config.minOrderQty,
+        pointValue: config.pointValue,
+        exchange: config.exchange,
+        expiry: config.expiry,
+      },
+    });
+  }
+  if (config.provider === 'tiger' && !config.transport) {
+    if (!tigerTransportFactory) {
+      throw new Error(
+        'pinery: no production Tiger market-data transport is registered; install/register a verified transport with credentials or inject one for tests',
+      );
+    }
+    const credentials = options.tigerCredentials ?? {
+      tigerId: process.env.TIGER_ID,
+      privateKey: process.env.TIGER_PRIVATE_KEY,
+      account: process.env.TIGER_ACCOUNT,
+    };
+    return createMarketDataProvider({
+      ...config,
+      transport: tigerTransportFactory(config, {
+        tigerId: optionalTigerCredential(credentials.tigerId, 'tigerId'),
+        privateKey: optionalTigerCredential(credentials.privateKey, 'privateKey'),
+        account: optionalTigerCredential(credentials.account, 'account'),
+      }),
+    });
+  }
+  return createMarketDataProvider(config);
+}
+
+function optionalTigerCredential(value: unknown, name: string): string | undefined {
+  if (value != null && typeof value !== 'string')
+    throw new Error(`pinery: Tiger credential ${name} must be a string`);
+  return value as string | undefined;
 }

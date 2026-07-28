@@ -1,21 +1,23 @@
+import type { MarketDataProvider } from '@heyphat/pinery';
 import type { Broker } from './broker.js';
-import type { LiveFeed } from './feed.js';
 import type { LedgerSink } from './ledger.js';
 import type { PositionMirrorOptions } from './mirror.js';
 import { ForwardRunner } from './runner.js';
+import type { RunInstrumentBinding } from './binding.js';
 
 export interface ForwardServerOptions {
   source: string;
   symbol: string;
   timeframe: string;
+  data: MarketDataProvider;
   broker: Broker;
-  feed: LiveFeed;
   ledger: LedgerSink;
   warmupBars?: number;
   inputs?: Readonly<Record<string, unknown>>;
   runId?: string;
   strategyId?: string;
   executionId?: string;
+  reconcileOnStart?: boolean;
   mirror?: PositionMirrorOptions;
   signal?: AbortSignal;
   onLog?: (message: string) => void;
@@ -24,14 +26,15 @@ export interface ForwardServerOptions {
 export interface ForwardServerResult {
   finalPosition: number;
   finalEquity: number;
+  binding: RunInstrumentBinding;
 }
 
-/** Run until the feed ends or the signal aborts. Shutdown never flattens. */
+/** Run until pinery ends or the signal aborts. Shutdown never flattens. */
 export async function runForwardServer(
   options: ForwardServerOptions,
 ): Promise<ForwardServerResult> {
   if (options.signal?.aborted) throw new Error('forward server start aborted');
-  const runner = new ForwardRunner(options.broker, options.feed, {
+  const runner = new ForwardRunner(options.data, options.broker, {
     source: options.source,
     symbol: options.symbol,
     timeframe: options.timeframe,
@@ -40,7 +43,13 @@ export async function runForwardServer(
     runId: options.runId,
     strategyId: options.strategyId,
     executionId: options.executionId,
+    reconcileOnStart: options.reconcileOnStart,
     mirror: { transientRetries: 2, retryDelayMs: 250, ...options.mirror },
+    onBinding: (record) => options.ledger.append(record),
+    onStartupRecord: async (record) => {
+      await options.ledger.append(record);
+      options.onLog?.(`startup target=${record.target} action=${record.action}`);
+    },
     onRecord: async (record) => {
       await options.ledger.append(record);
       const fill = record.fill ? ` fill=${record.fill.filledQty}@${record.fill.price}` : '';
@@ -50,8 +59,6 @@ export async function runForwardServer(
       );
     },
   });
-  // Cancellation must be synchronous: do not wait for an effectful feed.stop()
-  // before preventing an in-progress initialization from reconciling warmup.
   const abort = () => runner.cancel();
   options.signal?.addEventListener('abort', abort, { once: true });
 
@@ -59,11 +66,13 @@ export async function runForwardServer(
   let primaryError: unknown;
   try {
     await runner.start();
+    const binding = runner.binding;
+    if (!binding) throw new Error('forward server stopped before instrument binding');
     const [position, account] = await Promise.all([
-      options.broker.getPosition(options.symbol),
+      options.broker.getPosition(binding.executionSymbol),
       options.broker.getAccount(),
     ]);
-    result = { finalPosition: position.qty, finalEquity: account.equity };
+    result = { finalPosition: position.qty, finalEquity: account.equity, binding };
   } catch (error) {
     primaryError = error;
   }
@@ -77,24 +86,21 @@ export async function runForwardServer(
       cleanupErrors.push(error);
     }
   };
-  // Every resource gets its cleanup attempt even if an earlier one fails.
   await cleanup(() => runner.stop());
   await cleanup(async () => options.ledger.flush?.());
   await cleanup(() => runner.disconnect());
   await cleanup(async () => options.ledger.close?.());
 
   if (primaryError !== undefined) {
-    if (cleanupErrors.length > 0) {
+    if (cleanupErrors.length > 0)
       throw new AggregateError(
         [primaryError, ...cleanupErrors],
         'forward server and cleanup failed',
       );
-    }
     throw primaryError;
   }
-  if (cleanupErrors.length > 0) {
+  if (cleanupErrors.length > 0)
     throw new AggregateError(cleanupErrors, 'forward server cleanup failed');
-  }
   if (!result) throw new Error('forward server stopped before final state was available');
   return result;
 }

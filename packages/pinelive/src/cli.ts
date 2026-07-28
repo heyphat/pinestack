@@ -1,19 +1,39 @@
 #!/usr/bin/env bun
 import { readFile } from 'node:fs/promises';
-import { BrokerRegistry } from './core/registry.js';
+import {
+  assertLiveSymbolMatchesConfig,
+  assertProviderConfig,
+  type ProviderConfig,
+} from '@heyphat/pinery';
+import { createNodeMarketDataProvider } from '@heyphat/pinery/node';
 import { runForwardServer } from './core/server.js';
-import type { Instrument } from './core/types.js';
 import { PaperBroker } from './brokers/paper.js';
-import { CsvReplayFeed } from './feeds/csv-replay.js';
-import { JsonlLedger, readJsonl } from './node.js';
+import { JsonlLedger, createNodeTigerBroker, readConfig, readJsonl } from './node.js';
 import { compareLedgerParity } from './parity.js';
-import type { ForwardRecord } from './core/ledger.js';
+import type { ForwardRecord, LedgerRecord } from './core/ledger.js';
 import type { ExpectedPositionRecord } from './parity.js';
 
 interface Args {
   positional: string[];
   values: Map<string, string>;
   flags: Set<string>;
+}
+
+export interface RunConfig {
+  configVersion?: 1;
+  strategy: string;
+  symbol: string;
+  timeframe: string;
+  warmupBars?: number;
+  inputs?: Readonly<Record<string, unknown>>;
+  executionId?: string;
+  reconcileOnStart?: boolean;
+  data: ProviderConfig;
+  broker:
+    | { id: 'paper'; initialBalance?: number; slippageBps?: number; commissionPerUnit?: number }
+    | { id: 'tiger'; profile?: string; account?: string };
+  armed?: boolean;
+  ledger?: string;
 }
 
 function parseArgs(args: string[]): Args {
@@ -34,19 +54,96 @@ function parseArgs(args: string[]): Args {
   return parsed;
 }
 
-function numberArg(args: Args, name: string, fallback: number): number {
-  const raw = args.values.get(name);
-  const value = raw == null ? fallback : Number(raw);
-  if (!Number.isFinite(value)) throw new Error(`--${name} must be numeric`);
-  return value;
+export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunConfig {
+  assertConfigKeys(
+    value,
+    [
+      'configVersion',
+      'strategy',
+      'symbol',
+      'timeframe',
+      'warmupBars',
+      'inputs',
+      'executionId',
+      'reconcileOnStart',
+      'data',
+      'broker',
+      'armed',
+      'ledger',
+    ],
+    'config',
+  );
+  for (const field of ['strategy', 'symbol', 'timeframe'] as const)
+    if (typeof value[field] !== 'string' || !value[field])
+      throw new Error(`config.${field} must be a non-empty string`);
+  if (value.configVersion != null && value.configVersion !== 1)
+    throw new Error('unsupported configVersion');
+  if (
+    value.warmupBars != null &&
+    (!Number.isInteger(value.warmupBars) || (value.warmupBars as number) < 0)
+  )
+    throw new Error('config.warmupBars must be a non-negative integer');
+  const data = assertProviderConfig(value.data);
+  const brokerValue = value.broker === undefined ? { id: 'paper' } : value.broker;
+  if (!brokerValue || typeof brokerValue !== 'object' || Array.isArray(brokerValue))
+    throw new Error('config.broker must be an object');
+  const broker = brokerValue as Record<string, unknown>;
+  if (broker.id !== 'paper' && broker.id !== 'tiger')
+    throw new Error('config.broker.id must be "paper" or "tiger"');
+  if (broker.id === 'paper') {
+    assertConfigKeys(
+      broker,
+      ['id', 'initialBalance', 'slippageBps', 'commissionPerUnit'],
+      'config.broker',
+    );
+    for (const field of ['initialBalance', 'slippageBps', 'commissionPerUnit'] as const) {
+      if (
+        broker[field] != null &&
+        (typeof broker[field] !== 'number' || !Number.isFinite(broker[field]))
+      )
+        throw new Error(`config.broker.${field} must be numeric`);
+    }
+  } else {
+    assertConfigKeys(broker, ['id', 'profile', 'account'], 'config.broker');
+    if (broker.profile != null && typeof broker.profile !== 'string')
+      throw new Error('config.broker.profile must be a string');
+    if (broker.account != null && typeof broker.account !== 'string')
+      throw new Error('config.broker.account must be a string');
+  }
+  if (value.armed != null && typeof value.armed !== 'boolean')
+    throw new Error('config.armed must be boolean');
+  if (value.reconcileOnStart != null && typeof value.reconcileOnStart !== 'boolean')
+    throw new Error('config.reconcileOnStart must be boolean');
+  if (value.executionId != null && typeof value.executionId !== 'string')
+    throw new Error('config.executionId must be a string');
+  if (value.ledger != null && typeof value.ledger !== 'string')
+    throw new Error('config.ledger must be a string');
+  if (
+    value.inputs != null &&
+    (typeof value.inputs !== 'object' || value.inputs == null || Array.isArray(value.inputs))
+  )
+    throw new Error('config.inputs must be an object');
+  return {
+    ...(value as unknown as RunConfig),
+    configVersion: 1,
+    data,
+    broker: broker as unknown as RunConfig['broker'],
+  };
+}
+
+function assertConfigKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  path: string,
+): void {
+  const unknown = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unknown) throw new Error(`${path}.${unknown} is not allowed`);
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const [command, ...rest] = argv;
   if (!command || command === '--help' || command === '-h' || command === 'help') {
-    console.log(
-      'pinelive run <strategy.pine> --data <bars.csv> --symbol <SYM> --tf <tf> [--warmup N] [--ledger path] [--arm]',
-    );
+    console.log('pinelive run --config <pinelive.json>');
     console.log('pinelive parity <live.jsonl> <expected.jsonl>');
     return;
   }
@@ -55,10 +152,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const [livePath, expectedPath] = args.positional;
     if (!livePath || !expectedPath)
       throw new Error('parity requires <live.jsonl> <expected.jsonl>');
-    const [live, expected] = await Promise.all([
-      readJsonl<ForwardRecord>(livePath),
+    const [ledger, expected] = await Promise.all([
+      readJsonl<LedgerRecord>(livePath),
       readJsonl<ExpectedPositionRecord>(expectedPath),
     ]);
+    const live = ledger.filter(
+      (row): row is ForwardRecord => row.recordType !== 'binding' && row.recordType !== 'startup',
+    );
     const differences = compareLedgerParity(live, expected);
     console.log(JSON.stringify({ matches: differences.length === 0, differences }, null, 2));
     if (differences.length > 0) process.exitCode = 2;
@@ -67,45 +167,54 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (command !== 'run') throw new Error(`unknown command "${command}"`);
 
   const args = parseArgs(rest);
-  const strategyPath = args.positional[0];
-  const dataPath = args.values.get('data');
-  const symbol = args.values.get('symbol');
-  const timeframe = args.values.get('tf');
-  const brokerId = args.values.get('broker') ?? 'paper';
-  if (!strategyPath || !dataPath || !symbol || !timeframe) {
-    throw new Error('run requires <strategy.pine>, --data, --symbol, and --tf');
-  }
-  if ((args.values.get('feed') ?? 'csv') !== 'csv')
-    throw new Error('only the offline csv feed is available in this release');
-
-  const instrument: Instrument = {
-    symbol,
-    minQty: numberArg(args, 'min-qty', 1),
-    mintick: numberArg(args, 'mintick', 0.01),
-    pointValue: numberArg(args, 'point-value', 1),
-  };
-  const registry = new BrokerRegistry().register('paper', {
-    real: false,
-    factory: () =>
-      new PaperBroker({
-        instruments: { [symbol]: instrument },
-        initialBalance: numberArg(args, 'balance', 100_000),
-        slippageBps: numberArg(args, 'slippage-bps', 0),
-        commissionPerUnit: numberArg(args, 'commission', 0),
-      }),
+  const configPath = args.values.get('config');
+  if (!configPath)
+    throw new Error('run requires --config <path>; direct --data CSV mode moved to pinery config');
+  const config = parseRunConfig(await readConfig(configPath));
+  const runSymbol = assertLiveSymbolMatchesConfig(config.symbol, config.data);
+  const data = createNodeMarketDataProvider(config.data, {
+    tigerCredentials: {
+      tigerId: process.env.TIGER_ID,
+      privateKey: process.env.TIGER_PRIVATE_KEY,
+      account: process.env.TIGER_ACCOUNT,
+    },
   });
-  if (!registry.has(brokerId)) {
-    throw new Error(
-      `broker adapter "${brokerId}" is not installed; this SDK-free build provides paper only`,
-    );
+  const armed = config.armed ?? false;
+
+  let broker;
+  if (config.broker.id === 'tiger') {
+    broker = createNodeTigerBroker(config.broker, armed, {
+      tigerId: process.env.TIGER_ID,
+      privateKey: process.env.TIGER_PRIVATE_KEY,
+      account: process.env.TIGER_ACCOUNT,
+    });
+  } else {
+    broker = new PaperBroker({
+      instrumentResolver: async (symbol) => {
+        const resolved = await data.resolve(runSymbol, { strict: true });
+        if (resolved.venueSymbol !== symbol)
+          throw new Error('paper broker requested a contract different from pinery resolution');
+        return {
+          symbol: resolved.venueSymbol,
+          dataSymbol: resolved.venueSymbol,
+          brokerSymbol: resolved.venueSymbol,
+          minQty: resolved.qtyStep,
+          qtyStep: resolved.qtyStep,
+          minOrderQty: resolved.minOrderQty,
+          mintick: resolved.mintick,
+          pointValue: resolved.pointValue,
+          exchange: resolved.exchange,
+          expiry: resolved.expiry,
+        };
+      },
+      initialBalance: config.broker.initialBalance,
+      slippageBps: config.broker.slippageBps,
+      commissionPerUnit: config.broker.commissionPerUnit,
+    });
   }
-  const armed = args.flags.has('arm');
-  const broker = await registry.create(brokerId, { armed, env: process.env });
-  const source = await readFile(strategyPath, 'utf8');
-  const csv = await readFile(dataPath, 'utf8');
-  const warmupBars = numberArg(args, 'warmup', 100);
-  const feed = new CsvReplayFeed(csv, { warmupBars, paceMs: numberArg(args, 'pace', 0) });
-  const ledgerPath = args.values.get('ledger') ?? '.pinelive/ledger.jsonl';
+
+  const source = await readFile(config.strategy, 'utf8');
+  const ledgerPath = config.ledger ?? '.pinelive/ledger.jsonl';
   const ledger = new JsonlLedger(ledgerPath);
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -114,18 +223,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   try {
     const result = await runForwardServer({
       source,
-      symbol,
-      timeframe,
+      symbol: runSymbol,
+      timeframe: config.timeframe,
+      data,
       broker,
-      feed,
       ledger,
-      warmupBars,
+      warmupBars: config.warmupBars,
+      inputs: config.inputs,
+      executionId: config.executionId,
+      reconcileOnStart: config.reconcileOnStart,
       signal: controller.signal,
-      executionId: args.values.get('execution-id'),
       onLog: (line) => console.log(line),
     });
     console.log(
-      `stopped: position=${result.finalPosition} equity=${result.finalEquity} ledger=${ledgerPath}`,
+      `stopped: contract=${result.binding.executionSymbol} position=${result.finalPosition} equity=${result.finalEquity} ledger=${ledgerPath}`,
     );
   } finally {
     process.off('SIGINT', stop);

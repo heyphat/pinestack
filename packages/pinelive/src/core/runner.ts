@@ -1,10 +1,14 @@
 import { ArrayFeed, compile, CompileError, Engine } from '@heyphat/piner';
 import type { CompiledScript } from '@heyphat/piner';
-import { toPinerTimeframe } from '@heyphat/pinery';
+import {
+  toPinerTimeframe,
+  type MarketDataProvider,
+  type ResolvedDataInstrument,
+} from '@heyphat/pinery';
 import { isMarkableBroker } from '../brokers/paper.js';
 import type { Broker } from './broker.js';
-import type { LiveFeed } from './feed.js';
-import type { ForwardRecord } from './ledger.js';
+import { createRunInstrumentBinding, type RunInstrumentBinding } from './binding.js';
+import type { BindingRecord, ForwardRecord, StartupRecord } from './ledger.js';
 import { PositionMirror } from './mirror.js';
 import type { PositionMirrorOptions, ReconcileOutcome } from './mirror.js';
 import { toPinerBar } from './time.js';
@@ -23,10 +27,12 @@ export interface ForwardRunnerOptions {
   backend?: 'js' | 'interp';
   runId?: string;
   strategyId?: string;
-  /** Stable deployment namespace used in restart-safe client ids. */
   executionId?: string;
-  reconcileWarmup?: boolean;
+  /** Explicit startup drift correction. Disabled by default and ledgered separately. */
+  reconcileOnStart?: boolean;
   mirror?: PositionMirrorOptions;
+  onBinding?: (record: BindingRecord) => void | Promise<void>;
+  onStartupRecord?: (record: StartupRecord) => void | Promise<void>;
   onRecord?: (record: ForwardRecord) => void | Promise<void>;
 }
 
@@ -51,6 +57,8 @@ export class ForwardRunner {
   private engine?: Engine;
   private mirror?: PositionMirror;
   private instrument?: Instrument;
+  private resolved?: ResolvedDataInstrument;
+  private runBinding?: RunInstrumentBinding;
   private abort = new AbortController();
   private initialized = false;
   private sequence = 0;
@@ -59,12 +67,16 @@ export class ForwardRunner {
   private readonly strategyId: string;
 
   constructor(
+    private readonly data: MarketDataProvider,
     private readonly broker: Broker,
-    private readonly feed: LiveFeed,
     private readonly options: ForwardRunnerOptions,
   ) {
     this.strategyId = options.strategyId ?? sourceId(options.source);
     this.runId = options.runId ?? `${this.strategyId}-${Date.now()}`;
+  }
+
+  get binding(): RunInstrumentBinding | undefined {
+    return this.runBinding;
   }
 
   async init(): Promise<void> {
@@ -81,43 +93,59 @@ export class ForwardRunner {
     const errors = this.compiled.diagnostics.filter(
       (diagnostic) => diagnostic.severity === 'error',
     );
-    if (errors.length > 0) {
+    if (errors.length > 0)
       throw new ForwardRunnerError(
         `Pine compilation failed: ${errors.map((error) => error.message).join('; ')}`,
       );
-    }
     if (!this.compiled.metadata.isStrategy)
       throw new ForwardRunnerError('Pine source must declare a strategy(), not an indicator()');
-    if (this.compiled.metadata.securityDependencies.length > 0) {
+    if (this.compiled.metadata.securityDependencies.length > 0)
       throw new ForwardRunnerError(
-        'request.security strategies are not supported by the single-feed forward runner',
+        'request.security strategies are not supported by the single-provider forward runner',
       );
-    }
 
+    this.resolved = await this.data.resolve(this.options.symbol, {
+      strict: true,
+      signal: this.abort.signal,
+    });
     this.ensureActive();
-    await this.broker.connect?.();
+    await this.broker.connect?.(this.abort.signal);
     this.ensureActive();
-    this.instrument = await this.broker.instrument(this.options.symbol);
+    this.instrument = await this.broker.instrument(this.resolved.venueSymbol, this.abort.signal);
     this.ensureActive();
-    const history = await this.feed.history(
-      this.options.symbol,
+    this.runBinding = createRunInstrumentBinding(
+      this.data,
+      this.resolved,
+      this.broker,
+      this.instrument,
+    );
+    await this.options.onBinding?.({
+      schemaVersion: 2,
+      recordType: 'binding',
+      configVersion: 1,
+      runId: this.runId,
+      binding: this.runBinding,
+      recordedAt: new Date().toISOString(),
+    });
+    this.ensureActive();
+
+    const history = await this.data.historyResolved(
+      this.resolved,
       this.options.timeframe,
-      this.options.warmupBars ?? 200,
+      { limit: this.options.warmupBars ?? 200 },
+      this.abort.signal,
     );
     this.ensureActive();
-    const strategyOptions = {
-      minQty: this.instrument.minQty,
-    } as StrategyOptionsWithMinQty;
+    const strategyOptions = { minQty: this.runBinding.qtyStep } as StrategyOptionsWithMinQty;
     this.engine = new Engine(this.compiled, new ArrayFeed(history.map(toPinerBar)), {
       backend: this.options.backend ?? 'js',
       inputs: this.options.inputs,
-      // piner 0.9 implements minQty at runtime while its published declaration omits it.
       strategy: strategyOptions,
     });
     await this.engine.run({
-      symbol: this.options.symbol,
+      symbol: this.runBinding.strategySymbol,
       timeframe: toPinerTimeframe(this.options.timeframe),
-      mintick: this.instrument.mintick,
+      mintick: this.runBinding.mintick,
     });
     this.ensureActive();
     this.mirror = new PositionMirror(this.broker, this.instrument, this.options.mirror);
@@ -126,54 +154,64 @@ export class ForwardRunner {
     const last = history.at(-1);
     if (last) {
       this.lastBarTime = last.time;
-      if (this.options.reconcileWarmup !== false) {
+      if (this.options.reconcileOnStart) {
+        const { record } = await this.reconcile(last, 'startup');
+        await this.options.onStartupRecord?.({
+          ...record,
+          schemaVersion: 2,
+          recordType: 'startup',
+        });
         this.ensureActive();
-        await this.reconcile(last);
       }
     }
   }
 
   async start(): Promise<void> {
     await this.init();
-    for await (const bar of this.feed.closedBars(
-      this.options.symbol,
-      this.options.timeframe,
-      this.abort.signal,
-    )) {
+    for await (const bar of this.data.closedBars(this.resolved!, this.options.timeframe, {
+      after: Number.isFinite(this.lastBarTime) ? this.lastBarTime : undefined,
+      signal: this.abort.signal,
+    })) {
       if (this.abort.signal.aborted) break;
-      if (bar.time <= this.lastBarTime) continue;
       if (!Number.isFinite(bar.time))
-        throw new ForwardRunnerError('feed emitted a bar with invalid time');
+        throw new ForwardRunnerError('provider emitted a bar with invalid time');
+      if (bar.time <= this.lastBarTime) continue;
       this.engine!.tick(toPinerBar(bar), true);
       this.lastBarTime = bar.time;
-      await this.reconcile(bar);
+      const { record } = await this.reconcile(bar, 'cycle');
+      await this.options.onRecord?.(record);
+      this.ensureActive();
     }
   }
 
-  /** Synchronously prevent any later reconciliation; effectful feed shutdown is handled by stop(). */
   cancel(): void {
     this.abort.abort();
   }
 
   async stop(): Promise<void> {
     this.cancel();
-    await this.feed.stop();
+    await this.data.disconnect?.();
   }
 
   async disconnect(): Promise<void> {
     await this.broker.disconnect?.();
   }
 
-  private async reconcile(bar: Bar): Promise<void> {
+  private async reconcile(
+    bar: Bar,
+    event: 'cycle' | 'startup',
+  ): Promise<{ record: ForwardRecord; outcome: ReconcileOutcome }> {
     this.ensureActive();
-    // Paper fills use this exact closed bar. Marking before getPosition/submit also keeps account equity current.
+    const binding = this.runBinding!;
     if (isMarkableBroker(this.broker))
-      await this.broker.mark(this.options.symbol, bar.close, bar.time);
+      await this.broker.mark(binding.executionSymbol, bar.close, bar.time);
     this.ensureActive();
     const target = this.engine!.ctx.strategy.position_size;
     const sequence = this.sequence++;
     const outcome = await this.mirror!.reconcile(target, {
-      symbol: this.options.symbol,
+      strategySymbol: binding.strategySymbol,
+      executionSymbol: binding.executionSymbol,
+      bindingId: binding.id,
       barTime: bar.time,
       strategyId: this.strategyId,
       executionId: this.options.executionId,
@@ -181,17 +219,27 @@ export class ForwardRunner {
       sequence,
       signal: this.abort.signal,
     });
-    await this.options.onRecord?.(this.record(sequence, bar, outcome));
+    return { outcome, record: this.record(sequence, bar, outcome, event) };
   }
 
-  private record(sequence: number, bar: Bar, outcome: ReconcileOutcome): ForwardRecord {
+  private record(
+    sequence: number,
+    bar: Bar,
+    outcome: ReconcileOutcome,
+    event: 'cycle' | 'startup',
+  ): ForwardRecord {
+    const binding = this.runBinding!;
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      recordType: 'cycle',
       runId: this.runId,
       strategyId: this.strategyId,
-      cycleId: `${this.options.executionId ?? 'default'}:${this.strategyId}:${this.options.symbol}:${this.options.timeframe}:${bar.time}`,
+      cycleId: `${event}:${binding.id}:${this.options.timeframe}:${bar.time}`,
       sequence,
-      symbol: this.options.symbol,
+      symbol: binding.strategySymbol,
+      strategySymbol: binding.strategySymbol,
+      executionSymbol: binding.executionSymbol,
+      bindingId: binding.id,
       timeframe: this.options.timeframe,
       bar: { ...bar },
       target: outcome.target,

@@ -7,8 +7,10 @@ import type {
   HistoryProvider,
   HistoryRange,
   InstrumentInfo,
+  MarketDataProvider,
   ResolvedHistorySource,
 } from './provider.js';
+import { isMarketDataProvider } from './provider.js';
 import { resolveHistorySource as resolveProviderHistorySource } from './acquisition.js';
 import {
   coerceAssetClass,
@@ -23,6 +25,7 @@ import { OkxProvider } from './adapters/okx.js';
 import { KrakenProvider } from './adapters/kraken.js';
 import { AlpacaProvider } from './adapters/alpaca.js';
 import { MassiveProvider } from './adapters/massive.js';
+import { TigerProvider, type TigerMarketDataTransport } from './adapters/tiger.js';
 
 /** Superset of per-adapter options; each adapter picks what it understands. */
 export interface CreateProviderOptions {
@@ -88,6 +91,10 @@ export function createProvider(
       });
     case 'massive':
       return new MassiveProvider({ apiKey, adjusted, maxBars, baseUrl, fetchImpl });
+    case 'tiger':
+      throw new Error(
+        'pinery: Tiger live data requires a transport; use createMarketDataProvider with an injected transport or the Node transport registry',
+      );
     case 'csv':
       // The CSV adapter reads the filesystem, so it lives behind the Node-only
       // entry and can't be constructed from this browser-safe module. Build it
@@ -134,6 +141,12 @@ export class InstrumentRouter implements HistoryProvider {
     this.providerOpts = providerOpts;
     this.wrap = wrap ?? ((provider) => provider);
     this.overrides = providers ?? {};
+    for (const provider of Object.values(this.overrides)) {
+      if (provider && isMarketDataProvider(provider))
+        throw new Error(
+          'pinery: InstrumentRouter does not support live provider overrides; pass the MarketDataProvider directly',
+        );
+    }
   }
 
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
@@ -202,4 +215,210 @@ export function resolveInstrument(
     ticker: parsed.ticker,
     assetClass,
   };
+}
+
+/** Serializable provider configuration. Runtime-only transport injection is optional. */
+export type ProviderConfig =
+  | {
+      provider: 'tiger';
+      assetClass: 'futures';
+      profile?: string;
+      baseUrl?: string;
+      transport?: TigerMarketDataTransport;
+      pollIntervalMs?: number;
+      retryDelayMs?: number;
+      maxRetries?: number;
+    }
+  | {
+      provider: 'csv';
+      assetClass?: AssetClass;
+      dataDir: string;
+      cutoverTime: number;
+      paceMs?: number;
+      mintick?: number;
+      qtyStep?: number;
+      minOrderQty?: number;
+      pointValue?: number;
+      exchange?: string;
+      expiry?: string;
+    }
+  | {
+      provider: 'binance' | 'okx';
+      assetClass?: 'crypto' | 'futures';
+      baseUrl?: string;
+      maxBars?: number;
+    }
+  | { provider: 'kraken'; assetClass?: 'crypto'; baseUrl?: string }
+  | {
+      provider: 'alpaca';
+      assetClass?: 'equities';
+      apiKey?: string;
+      apiSecret?: string;
+      feed?: 'iex' | 'sip';
+      baseUrl?: string;
+    }
+  | { provider: 'massive'; assetClass?: 'equities'; apiKey?: string; baseUrl?: string };
+
+export function assertProviderConfig(value: unknown): ProviderConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('pinery: provider config must be an object');
+  const config = value as Record<string, unknown>;
+  if (
+    typeof config.provider !== 'string' ||
+    !['binance', 'okx', 'kraken', 'alpaca', 'massive', 'csv', 'tiger'].includes(config.provider)
+  )
+    throw new Error('pinery: provider config has an unknown provider');
+  const provider = config.provider as DataProvider;
+  if (
+    config.assetClass != null &&
+    (typeof config.assetClass !== 'string' ||
+      !supportsPair(provider, config.assetClass as AssetClass))
+  )
+    throw new Error(
+      `pinery: provider "${provider}" does not serve asset class "${String(config.assetClass)}"`,
+    );
+
+  if (provider === 'tiger') {
+    assertAllowedKeys(config, [
+      'provider',
+      'assetClass',
+      'profile',
+      'baseUrl',
+      'transport',
+      'pollIntervalMs',
+      'retryDelayMs',
+      'maxRetries',
+    ]);
+    if (config.assetClass !== 'futures')
+      throw new Error('pinery: Tiger live config requires assetClass "futures"');
+    optionalString(config, 'profile');
+    optionalString(config, 'baseUrl');
+    optionalNumber(config, 'pollIntervalMs', { minimum: 0 });
+    optionalNumber(config, 'retryDelayMs', { minimum: 0 });
+    optionalNumber(config, 'maxRetries', { minimum: 0, integer: true });
+    if (config.transport != null) assertTigerTransport(config.transport);
+  } else if (provider === 'csv') {
+    assertAllowedKeys(config, [
+      'provider',
+      'assetClass',
+      'dataDir',
+      'cutoverTime',
+      'paceMs',
+      'mintick',
+      'qtyStep',
+      'minOrderQty',
+      'pointValue',
+      'exchange',
+      'expiry',
+    ]);
+    if (typeof config.dataDir !== 'string' || !config.dataDir)
+      throw new Error('pinery: CSV live config requires dataDir');
+    optionalNumber(config, 'cutoverTime', { minimum: 0, required: true });
+    optionalNumber(config, 'paceMs', { minimum: 0 });
+    for (const key of ['mintick', 'qtyStep', 'minOrderQty', 'pointValue'])
+      optionalNumber(config, key, { minimum: Number.MIN_VALUE });
+    optionalString(config, 'exchange');
+    optionalString(config, 'expiry');
+  } else if (provider === 'binance' || provider === 'okx') {
+    assertAllowedKeys(config, ['provider', 'assetClass', 'baseUrl', 'maxBars']);
+    optionalString(config, 'baseUrl');
+    optionalNumber(config, 'maxBars', { minimum: 1, integer: true });
+  } else if (provider === 'kraken') {
+    assertAllowedKeys(config, ['provider', 'assetClass', 'baseUrl']);
+    optionalString(config, 'baseUrl');
+  } else if (provider === 'alpaca') {
+    assertAllowedKeys(config, ['provider', 'assetClass', 'apiKey', 'apiSecret', 'feed', 'baseUrl']);
+    optionalString(config, 'apiKey');
+    optionalString(config, 'apiSecret');
+    optionalString(config, 'baseUrl');
+    if (config.feed != null && config.feed !== 'iex' && config.feed !== 'sip')
+      throw new Error('pinery: feed must be "iex" or "sip"');
+  } else {
+    assertAllowedKeys(config, ['provider', 'assetClass', 'apiKey', 'baseUrl']);
+    optionalString(config, 'apiKey');
+    optionalString(config, 'baseUrl');
+  }
+  return value as ProviderConfig;
+}
+
+function assertAllowedKeys(config: Record<string, unknown>, allowed: readonly string[]): void {
+  const unknown = Object.keys(config).find((key) => !allowed.includes(key));
+  if (unknown)
+    throw new Error(`pinery: ${String(config.provider)} config does not allow "${unknown}"`);
+}
+
+function assertTigerTransport(value: unknown): void {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function'))
+    throw new Error('pinery: Tiger transport must be an object');
+  const transport = value as Record<string, unknown>;
+  if (typeof transport.resolveFuture !== 'function' || typeof transport.bars !== 'function')
+    throw new Error('pinery: Tiger transport must implement resolveFuture() and bars()');
+  for (const lifecycle of ['connect', 'disconnect'] as const) {
+    if (transport[lifecycle] != null && typeof transport[lifecycle] !== 'function')
+      throw new Error(`pinery: Tiger transport ${lifecycle} must be a function`);
+  }
+}
+
+function optionalString(config: Record<string, unknown>, key: string): void {
+  if (config[key] != null && typeof config[key] !== 'string')
+    throw new Error(`pinery: ${key} must be a string`);
+}
+
+function optionalNumber(
+  config: Record<string, unknown>,
+  key: string,
+  options: { minimum: number; integer?: boolean; required?: boolean },
+): void {
+  const value = config[key];
+  if (value == null) {
+    if (options.required) throw new Error(`pinery: ${key} is required`);
+    return;
+  }
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < options.minimum ||
+    (options.integer && !Number.isInteger(value))
+  )
+    throw new Error(`pinery: ${key} has an invalid value`);
+}
+
+/** Browser-safe live factory. Historical-only adapters fail rather than being polled by consumers. */
+export function createMarketDataProvider(configInput: ProviderConfig): MarketDataProvider {
+  const config = assertProviderConfig(configInput);
+  if (config.provider === 'tiger') {
+    if (!config.transport)
+      throw new Error(
+        'pinery: Tiger production transport is not bundled; inject a TigerMarketDataTransport',
+      );
+    return new TigerProvider({
+      transport: config.transport,
+      pollIntervalMs: config.pollIntervalMs,
+      retryDelayMs: config.retryDelayMs,
+      maxRetries: config.maxRetries,
+    });
+  }
+  if (config.provider === 'csv')
+    throw new Error(
+      'pinery: CSV live provider is Node-only; use createNodeMarketDataProvider from @heyphat/pinery/node',
+    );
+  throw new Error(
+    `pinery: provider "${config.provider}" is historical-only and cannot be selected for a live run`,
+  );
+}
+
+/** Reject explicit provider/class addresses that disagree with live configuration. */
+export function assertLiveSymbolMatchesConfig(symbol: string, configInput: ProviderConfig): string {
+  const config = assertProviderConfig(configInput);
+  const parsed = parseInstrumentAddress(symbol);
+  if (parsed.explicitProvider && parsed.provider !== config.provider)
+    throw new Error(
+      `pinery: symbol provider "${parsed.provider}" does not match configured provider "${config.provider}"`,
+    );
+  const configuredClass = config.assetClass ?? defaultAssetClassForProvider(config.provider);
+  if (parsed.assetClass && parsed.assetClass !== configuredClass)
+    throw new Error(
+      `pinery: symbol asset class "${parsed.assetClass}" does not match configured asset class "${configuredClass}"`,
+    );
+  return parsed.ticker;
 }

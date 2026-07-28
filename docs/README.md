@@ -26,9 +26,10 @@ pinerun --help
 
 ## Forward testing
 
-[`pinelive`](./pinelive.md) runs a strategy through closed CSV-replayed bars and
-mirrors piner's target position into an idempotent PaperBroker, with an append-only
-ledger. Broker implementers should also read the [adapter contract](./pinelive-adapter-contract.md).
+[`pinelive`](./pinelive.md) consumes pinery `MarketDataProvider` closed bars, advances
+piner, and reconciles the resolved exact contract through PaperBroker or an injected
+execution adapter. Broker implementers should also read the
+[adapter contract](./pinelive-adapter-contract.md).
 
 ## Shared flags
 

@@ -4,7 +4,15 @@ import { BrokerError, PaperBroker, PositionMirror } from '../src/index.js';
 const instrument = { symbol: 'X', minQty: 1, mintick: 0.01 };
 
 function context(time = 1) {
-  return { symbol: 'X', barTime: time, strategyId: 's', timeframe: '1h', sequence: time };
+  return {
+    strategySymbol: 'ROOT',
+    executionSymbol: 'X',
+    bindingId: 'binding-test',
+    barTime: time,
+    strategyId: 's',
+    timeframe: '1h',
+    sequence: time,
+  };
 }
 
 test('mirror opens, caps and uses restart-stable ids', async () => {
@@ -15,7 +23,7 @@ test('mirror opens, caps and uses restart-stable ids', async () => {
   expect(outcome.action).toBe('order');
   if (outcome.action === 'order') {
     expect(outcome.order.qty).toBe(2);
-    expect(outcome.order.clientId).toBe('default:s:X:1h:1:0:5:2:reconcile');
+    expect(outcome.order.clientId).toBe('default:s:ROOT:X:binding-test:1h:1:0:5:2:reconcile');
   }
   expect((await broker.getPosition('X')).qty).toBe(2);
 });
@@ -55,8 +63,8 @@ test('mirror retries transient submissions with the same client id', async () =>
   }).reconcile(1, context());
   expect(outcome.action).toBe('order');
   expect(clientIds).toEqual([
-    'default:s:X:1h:1:0:1:1:reconcile',
-    'default:s:X:1h:1:0:1:1:reconcile',
+    'default:s:ROOT:X:binding-test:1h:1:0:1:1:reconcile',
+    'default:s:ROOT:X:binding-test:1h:1:0:1:1:reconcile',
   ]);
 });
 

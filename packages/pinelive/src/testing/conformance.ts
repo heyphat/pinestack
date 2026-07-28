@@ -47,7 +47,9 @@ export async function runBrokerConformance(
     }
     const mirror = new PositionMirror(harness.broker, harness.instrument);
     const outcome = await mirror.reconcile(scenario.target, {
-      symbol: harness.instrument.symbol,
+      strategySymbol: harness.instrument.symbol,
+      executionSymbol: harness.instrument.symbol,
+      bindingId: 'conformance',
       barTime: 1_700_000_000 + index,
       strategyId: 'conformance',
       timeframe: '1m',
@@ -83,7 +85,9 @@ export async function runBrokerConformance(
   await rejection.setPosition(0);
   rejection.rejectNext('conformance rejection');
   const rejected = await new PositionMirror(rejection.broker, rejection.instrument).reconcile(1, {
-    symbol: rejection.instrument.symbol,
+    strategySymbol: rejection.instrument.symbol,
+    executionSymbol: rejection.instrument.symbol,
+    bindingId: 'conformance-reject',
     barTime: 1_700_001_000,
     strategyId: 'conformance-reject',
     timeframe: '1m',
@@ -142,7 +146,9 @@ export async function runBrokerConformance(
     const outcome = await new PositionMirror(restart.broker, restart.instrument, {
       maxOrderQty: step * 2,
     }).reconcile(step * 5, {
-      symbol: restart.instrument.symbol,
+      strategySymbol: restart.instrument.symbol,
+      executionSymbol: restart.instrument.symbol,
+      bindingId: 'conformance-restart',
       barTime: 1_700_003_000,
       strategyId: 'conformance-restart-cap',
       timeframe: '1m',

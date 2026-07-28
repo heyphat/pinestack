@@ -38,13 +38,14 @@ export function compareLedgerParity(
   const differences: ParityDifference[] = [];
   const scopes = new Set(
     live.map(
-      (row) => `${row.runId}\u0000${row.strategyId}\u0000${row.symbol}\u0000${row.timeframe}`,
+      (row) =>
+        `${row.runId}\u0000${row.strategyId}\u0000${row.bindingId ?? `${row.strategySymbol ?? row.symbol}:${row.executionSymbol ?? row.symbol}`}\u0000${row.timeframe}`,
     ),
   );
   if (scopes.size > 1) {
     differences.push({
       kind: 'mixed-live-scope',
-      error: `live ledger contains ${scopes.size} run/strategy/symbol/timeframe scopes`,
+      error: `live ledger contains ${scopes.size} run/strategy/binding/timeframe scopes`,
     });
     return differences;
   }

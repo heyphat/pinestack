@@ -31,6 +31,11 @@ export type {
   ResolvedHistorySource,
   ExactHistoryFailureKind,
   ExactHistoryFailure,
+  ResolvedDataInstrument,
+  ResolveDataInstrumentOptions,
+  ClosedBarsOptions,
+  MarketDataProvider,
+  MarketDataErrorCode,
 } from './provider.js';
 export {
   ExactHistoryError,
@@ -50,6 +55,11 @@ export {
   applyRange,
   applyExactQueryRange,
   dropUnclosedBars,
+  barCloseTime,
+  normalizeBars,
+  assertResolvedDataInstrument,
+  MarketDataError,
+  isMarketDataProvider,
 } from './provider.js';
 export type {
   Timeframe,
@@ -138,6 +148,10 @@ export {
   type CreateProviderOptions,
   type InstrumentRouterOptions,
   type ResolvedInstrument,
+  type ProviderConfig,
+  assertProviderConfig,
+  createMarketDataProvider,
+  assertLiveSymbolMatchesConfig,
 } from './factory.js';
 export {
   normalizeOkxSpot,
@@ -162,3 +176,13 @@ export {
   type StaticProviderSeed,
   type StaticProviderOptions,
 } from './adapters/static.js';
+
+export { ReplayProvider, type ReplayProviderOptions } from './adapters/replay.js';
+export {
+  TigerProvider,
+  type TigerProviderOptions,
+  type TigerMarketDataTransport,
+  type TigerFutureContract,
+  type TigerBarsRequest,
+  type TigerBarsResult,
+} from './adapters/tiger.js';

@@ -1,5 +1,5 @@
-import { parseTimeframe, timeframeSeconds as pineryTimeframeSeconds } from '@heyphat/pinery';
-import type { Bar } from './types.js';
+import { timeframeSeconds as pineryTimeframeSeconds } from '@heyphat/pinery';
+import type { Bar } from '@heyphat/pinery';
 
 export const timeframeSeconds = pineryTimeframeSeconds;
 
@@ -13,30 +13,7 @@ export function millisecondsToSeconds(milliseconds: number): number {
   return milliseconds >= 1e12 ? Math.floor(milliseconds / 1000) : Math.floor(milliseconds);
 }
 
+/** The sole unix-seconds to piner-milliseconds boundary. */
 export function toPinerBar(bar: Bar): Bar {
   return { ...bar, time: secondsToMilliseconds(bar.time) };
-}
-
-export function barCloseTime(openTimeSec: number, timeframe: string): number {
-  const { n, unit } = parseTimeframe(timeframe);
-  if (unit !== 'M') return openTimeSec + timeframeSeconds(timeframe);
-  const date = new Date(openTimeSec * 1000);
-  return (
-    Date.UTC(
-      date.getUTCFullYear(),
-      date.getUTCMonth() + n,
-      date.getUTCDate(),
-      date.getUTCHours(),
-      date.getUTCMinutes(),
-      date.getUTCSeconds(),
-    ) / 1000
-  );
-}
-
-export function isBarClosed(
-  bar: Pick<Bar, 'time'>,
-  timeframe: string,
-  nowSec = Date.now() / 1000,
-): boolean {
-  return barCloseTime(bar.time, timeframe) <= nowSec;
 }

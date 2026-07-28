@@ -1,8 +1,7 @@
 /**
- * The pinery data contract. A `HistoryProvider` yields OHLCV bars for a
- * (symbol, timeframe) over an optional time range. It is deliberately narrower
- * than piner's `DataFeed` (which is what the *engine* consumes) so providers stay
- * simple; `toDataFeed` bridges a provider + a fixed range into a piner `DataFeed`.
+ * Pinery data contracts. Historical callers keep the narrow HistoryProvider API;
+ * forward consumers use MarketDataProvider so one resolved venue identity drives
+ * both warmup and closed-bar delivery.
  */
 import type { Bar, DataFeed } from '@heyphat/piner';
 import type { AssetClass } from './asset-class.js';
@@ -12,11 +11,11 @@ export type { Bar };
 
 /** Existing provider selector. `from` and `to` are inclusive UNIX seconds. */
 export interface HistoryRange {
-  /** Inclusive lower bound (unix seconds). */
+  /** Inclusive lower bound, unix seconds. */
   from?: number;
-  /** Inclusive upper bound (unix seconds). */
+  /** Inclusive upper bound, unix seconds. */
   to?: number;
-  /** Hard cap on the number of bars returned (most-recent when only `limit` is set). */
+  /** Most-recent bars in the selected range. */
   limit?: number;
 }
 
@@ -227,14 +226,12 @@ export interface InstrumentInfo {
   /** Minimum order-quantity step (lot step / minimum contract size). Drives the
    * broker's TV-parity quantity truncation. */
   minQty?: number;
-  /** Minimum price increment (tick size) — piner's `syminfo.mintick`. */
   mintick?: number;
 }
 
 export interface HistoryProvider {
   /** Stable id used in legacy cache keys and diagnostics (e.g. "binance", "static"). */
   readonly id: string;
-  /** Asset class this instance serves; unset for class-agnostic providers (static). */
   readonly assetClass?: AssetClass;
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]>;
   /**
@@ -364,6 +361,151 @@ export function applyExactQueryRange(bars: Bar[], range?: HistoryRange): Bar[] {
   return out;
 }
 
+/** Frozen provider-owned data identity. Quantities are strategy-native units. */
+export interface ResolvedDataInstrument {
+  /** User-facing symbol/root passed to piner. */
+  readonly strategySymbol: string;
+  /** Opaque stable provider identity; consumers must not parse it. */
+  readonly providerHandle: string;
+  /** Exact venue instrument/contract used for every resolved request. */
+  readonly venueSymbol: string;
+  /** Minimum price increment in quote currency. */
+  readonly mintick: number;
+  /** Native position/order quantity increment. */
+  readonly qtyStep: number;
+  /** Smallest accepted native order quantity. */
+  readonly minOrderQty: number;
+  /** Currency value of a one-point move for one native unit. */
+  readonly pointValue?: number;
+  readonly exchange?: string;
+  /** Provider-normalized expiry (prefer ISO date). */
+  readonly expiry?: string;
+}
+
+export interface ResolveDataInstrumentOptions {
+  strict?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface ClosedBarsOptions {
+  /** Emit only bars whose open time is strictly greater than this unix-second value. */
+  after?: number;
+  signal?: AbortSignal;
+}
+
+export interface MarketDataProvider extends HistoryProvider {
+  resolve(symbol: string, options?: ResolveDataInstrumentOptions): Promise<ResolvedDataInstrument>;
+  historyResolved(
+    instrument: ResolvedDataInstrument,
+    timeframe: string,
+    range?: HistoryRange,
+    signal?: AbortSignal,
+  ): Promise<Bar[]>;
+  closedBars(
+    instrument: ResolvedDataInstrument,
+    timeframe: string,
+    options?: ClosedBarsOptions,
+  ): AsyncIterable<Bar>;
+  disconnect?(): Promise<void>;
+}
+
+export type MarketDataErrorCode =
+  'connectivity' | 'auth' | 'rate-limit' | 'invalid-symbol' | 'entitlement' | 'malformed-data';
+
+/** Classified operational provider error. Details must contain no credentials. */
+export class MarketDataError extends Error {
+  readonly code: MarketDataErrorCode;
+  readonly retryable: boolean;
+  readonly details?: Readonly<Record<string, unknown>>;
+
+  constructor(
+    code: MarketDataErrorCode,
+    message: string,
+    options: {
+      retryable?: boolean;
+      cause?: unknown;
+      details?: Readonly<Record<string, unknown>>;
+    } = {},
+  ) {
+    super(message, { cause: options.cause });
+    this.name = 'MarketDataError';
+    this.code = code;
+    this.retryable = options.retryable ?? ['connectivity', 'rate-limit'].includes(code);
+    this.details = options.details;
+  }
+}
+
+export function isMarketDataProvider(value: unknown): value is MarketDataProvider {
+  const provider = value as Partial<MarketDataProvider> | null;
+  return Boolean(
+    provider &&
+    typeof provider.id === 'string' &&
+    typeof provider.history === 'function' &&
+    typeof provider.resolve === 'function' &&
+    typeof provider.historyResolved === 'function' &&
+    typeof provider.closedBars === 'function',
+  );
+}
+
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted)
+    throw new MarketDataError('connectivity', 'market-data request aborted', { retryable: false });
+}
+
+export function assertResolvedDataInstrument(
+  value: ResolvedDataInstrument,
+): ResolvedDataInstrument {
+  for (const [name, field] of [
+    ['mintick', value.mintick],
+    ['qtyStep', value.qtyStep],
+    ['minOrderQty', value.minOrderQty],
+  ] as const) {
+    if (!Number.isFinite(field) || field <= 0) {
+      throw new MarketDataError('malformed-data', `resolved instrument has invalid ${name}`, {
+        retryable: false,
+      });
+    }
+  }
+  if (!value.strategySymbol || !value.providerHandle || !value.venueSymbol) {
+    throw new MarketDataError('malformed-data', 'resolved instrument identity is incomplete', {
+      retryable: false,
+    });
+  }
+  if (value.pointValue != null && (!Number.isFinite(value.pointValue) || value.pointValue <= 0)) {
+    throw new MarketDataError('malformed-data', 'resolved instrument has invalid pointValue', {
+      retryable: false,
+    });
+  }
+  return value;
+}
+
+export function normalizeBars(bars: readonly Bar[]): Bar[] {
+  const byTime = new Map<number, Bar>();
+  for (const input of bars) {
+    const time = Math.floor(input.time >= 1e12 ? input.time / 1000 : input.time);
+    if (!Number.isFinite(time) || time < 0)
+      throw new MarketDataError('malformed-data', 'bar has invalid unix time', {
+        retryable: false,
+      });
+    const bar = { ...input, time };
+    for (const field of ['open', 'high', 'low', 'close', 'volume'] as const) {
+      if (!Number.isFinite(bar[field]))
+        throw new MarketDataError('malformed-data', `bar ${time} has invalid ${field}`, {
+          retryable: false,
+        });
+    }
+    if (
+      bar.high < Math.max(bar.open, bar.close, bar.low) ||
+      bar.low > Math.min(bar.open, bar.close, bar.high)
+    )
+      throw new MarketDataError('malformed-data', `bar ${time} has inconsistent OHLC values`, {
+        retryable: false,
+      });
+    byTime.set(time, bar);
+  }
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
+
 /**
  * Bridge a provider + fixed range into the `DataFeed` piner's `Engine` expects.
  * pinery carries bar times in unix SECONDS; piner expects MILLISECONDS.
@@ -372,7 +514,7 @@ export function toDataFeed(provider: HistoryProvider, range?: HistoryRange): Dat
   return {
     history: async (symbol: string, timeframe: string) => {
       const bars = await provider.history(symbol, timeframe, range);
-      return bars.map((b) => (b.time >= 1e12 ? b : { ...b, time: b.time * 1000 }));
+      return bars.map((bar) => (bar.time >= 1e12 ? bar : { ...bar, time: bar.time * 1000 }));
     },
   };
 }
@@ -388,32 +530,34 @@ export function dropUnclosedBars(
   return end === bars.length ? bars : bars.slice(0, end);
 }
 
-/** Close time (unix seconds) of a bar opened at `openSec`. Months use calendar arithmetic. */
-function barCloseTime(openSec: number, timeframe: string): number {
+export function barCloseTime(openSec: number, timeframe: string): number {
   const { n, unit } = parseTimeframe(timeframe);
   if (unit === 'M') {
-    const d = new Date(openSec * 1000);
+    const date = new Date(openSec * 1000);
     return (
       Date.UTC(
-        d.getUTCFullYear(),
-        d.getUTCMonth() + n,
-        d.getUTCDate(),
-        d.getUTCHours(),
-        d.getUTCMinutes(),
-        d.getUTCSeconds(),
+        date.getUTCFullYear(),
+        date.getUTCMonth() + n,
+        date.getUTCDate(),
+        date.getUTCHours(),
+        date.getUTCMinutes(),
+        date.getUTCSeconds(),
       ) / 1000
     );
   }
   return openSec + timeframeSeconds(timeframe);
 }
 
-/** Apply a `HistoryRange` to an already-materialized, time-ascending bar array. */
 export function applyRange(bars: Bar[], range?: HistoryRange): Bar[] {
   if (!range) return bars;
   let out = bars;
-  if (range.from != null) out = out.filter((b) => b.time >= range.from!);
-  if (range.to != null) out = out.filter((b) => b.time <= range.to!);
-  if (range.limit != null && out.length > range.limit) out = out.slice(out.length - range.limit);
+  if (range.from != null) out = out.filter((bar) => bar.time >= range.from!);
+  if (range.to != null) out = out.filter((bar) => bar.time <= range.to!);
+  if (range.limit != null) {
+    if (!Number.isInteger(range.limit) || range.limit < 0)
+      throw new RangeError('history limit must be a non-negative integer');
+    if (out.length > range.limit) out = out.slice(out.length - range.limit);
+  }
   return out;
 }
 

@@ -5,14 +5,16 @@ Pinery supplies OHLCV bars to piner (and to [`@heyphat/pinerun`](../pinerun)) vi
 a small provider contract, canonical timeframe helpers, network and in-memory
 adapters, and a Node-only on-disk cache.
 
-It is deliberately narrower than piner's own `DataFeed`: a `HistoryProvider` just
-returns bars for a `(symbol, timeframe, range)`, and `toDataFeed` bridges a
-provider into the `DataFeed` piner's `Engine` consumes.
+It is deliberately narrower than piner's own `DataFeed`: historical callers use
+`HistoryProvider`, while forward consumers use `MarketDataProvider` to resolve one
+exact data instrument and consume both warmup history and closed bars. `toDataFeed`
+bridges historical providers into the `DataFeed` piner's `Engine` consumes.
 
-- **Browser-safe core** (`@heyphat/pinery`): the provider interface, timeframe
-  helpers, and the `BinanceProvider` / `StaticProvider` adapters. No Node built-ins.
-- **Node entry** (`@heyphat/pinery/node`): a filesystem cache. Never bundled into
-  a browser.
+- **Browser-safe core** (`@heyphat/pinery`): contracts/config, timeframe helpers,
+  browser-capable historical adapters, `ReplayProvider`, and transport-injected
+  `TigerProvider`. No Node built-ins.
+- **Node entry** (`@heyphat/pinery/node`): filesystem cache/CSV live construction
+  and optional production transport registration. Never bundled into a browser.
 
 `piner` (`@heyphat/piner`) is a **peer dependency** — pinery implements its
 `Bar`/`DataFeed` types and expects the host to provide the engine.
@@ -455,3 +457,23 @@ export class MyProvider implements HistoryProvider {
 ## License
 
 [GNU AGPL-3.0](../../../piner/LICENSE) © Phat Huynh.
+
+## Live market data
+
+`MarketDataProvider` extends `HistoryProvider` with strict instrument resolution, resolved history, an exclusive-after stream of closed bars, cancellation, and optional cleanup. Its `ResolvedDataInstrument` fixes the strategy symbol, opaque provider handle, exact venue symbol, tick size, native quantity step, minimum order, and available point-value/exchange/expiry metadata for a run. `MarketDataError` classifies connectivity, authentication, rate-limit, invalid-symbol, entitlement, and malformed-data failures without exposing credentials.
+
+`ReplayProvider` wraps any historical provider with an explicit `cutoverTime`: `historyResolved({ limit })` returns the most recent bars before cutover, and `closedBars({ after })` emits later closed bars in ascending unique order. With a virtual clock it waits and rechecks each not-yet-closed bar instead of dropping it; cancellation interrupts that wait. The Node factory turns a CSV directory config into `CsvProvider` plus `ReplayProvider`; CSV parsing never belongs in pinelive.
+
+```ts
+import { ReplayProvider, StaticProvider } from '@heyphat/pinery';
+
+const history = new StaticProvider({ MGC: bars }).setInstrument('MGC', { minQty: 1, mintick: 0.1 });
+const data = new ReplayProvider(history, {
+  cutoverTime: 1_704_067_200,
+  instrument: { minOrderQty: 1, pointValue: 10 },
+});
+```
+
+`ProviderConfig` is a strict discriminated union. `createMarketDataProvider` is browser-safe; `createNodeMarketDataProvider` handles CSV/filesystem and optional runtime transport registration. Existing `createProvider` remains the permissive historical factory. Explicit live symbol/provider or asset-class mismatches fail instead of coercing.
+
+Tiger is registered as `TG:` / futures-only. `TigerProvider` uses an injected `TigerMarketDataTransport` to resolve and freeze an exact contract, fetch authoritative closed history, and poll with overlap, deduplication, paged gap recovery, retry and cancellation. `nextCursor` denotes an older page and its absence declares the requested range complete; history continues paging when finality filtering would otherwise underfill a requested limit, while live polling drains every page before yielding the complete gap. The repository intentionally does **not** invent or claim an unverified production Tiger SDK transport. A real connection requires a separately registered transport, credentials, entitlements, and credentialed validation.

@@ -4,7 +4,9 @@ import type { Account, Fill, Instrument, OrderRequest, Position } from '../core/
 import { nativeQtyStep, snap } from '../core/units.js';
 
 export interface PaperBrokerOptions {
-  instruments: Readonly<Record<string, Instrument>>;
+  instruments?: Readonly<Record<string, Instrument>>;
+  /** Lazy exact-contract metadata, useful when pinery resolves the contract at runner startup. */
+  instrumentResolver?: (symbol: string) => Instrument | Promise<Instrument>;
   accountId?: string;
   currency?: string;
   initialBalance?: number;
@@ -41,6 +43,7 @@ function orderFingerprint(order: OrderRequest): string {
 export class PaperBroker implements Broker, MarkableBroker {
   readonly id = 'paper';
   private readonly states = new Map<string, PaperState>();
+  private readonly instruments = new Map<string, Instrument>();
   private readonly fills = new Map<string, CachedFill>();
   private readonly initialBalance: number;
   private commissions = 0;
@@ -65,22 +68,9 @@ export class PaperBroker implements Broker, MarkableBroker {
     ) {
       throw new RangeError('commissionPerUnit must be a non-negative finite number');
     }
-    for (const [symbol, instrument] of Object.entries(options.instruments)) {
-      nativeQtyStep(instrument);
-      if (!Number.isFinite(instrument.mintick) || instrument.mintick <= 0)
-        throw new RangeError(`${symbol}: mintick must be a positive finite number`);
-      if (
-        instrument.pointValue != null &&
-        (!Number.isFinite(instrument.pointValue) || instrument.pointValue <= 0)
-      ) {
-        throw new RangeError(`${symbol}: pointValue must be a positive finite number`);
-      }
-      if (
-        instrument.minOrderQty != null &&
-        (!Number.isFinite(instrument.minOrderQty) || instrument.minOrderQty <= 0)
-      ) {
-        throw new RangeError(`${symbol}: minOrderQty must be a positive finite number`);
-      }
+    for (const [symbol, instrument] of Object.entries(options.instruments ?? {})) {
+      this.validateInstrument(symbol, instrument);
+      this.instruments.set(symbol, instrument);
     }
   }
 
@@ -95,7 +85,12 @@ export class PaperBroker implements Broker, MarkableBroker {
   }
 
   async instrument(symbol: string): Promise<Instrument> {
-    const instrument = this.options.instruments[symbol];
+    let instrument = this.instruments.get(symbol);
+    if (!instrument && this.options.instrumentResolver) {
+      instrument = await this.options.instrumentResolver(symbol);
+      this.validateInstrument(symbol, instrument);
+      this.instruments.set(symbol, instrument);
+    }
     if (!instrument) throw new BrokerError('unknown-symbol', `paper: unknown symbol ${symbol}`);
     return instrument;
   }
@@ -129,7 +124,7 @@ export class PaperBroker implements Broker, MarkableBroker {
     let unrealizedPnl = 0;
     for (const [symbol, state] of this.states) {
       realizedPnl += state.realizedPnl;
-      const instrument = this.options.instruments[symbol];
+      const instrument = this.instruments.get(symbol);
       if (instrument) unrealizedPnl += this.unrealized(state, instrument);
     }
     const balance = this.initialBalance + realizedPnl - this.commissions;
@@ -219,6 +214,22 @@ export class PaperBroker implements Broker, MarkableBroker {
     const state = this.state(symbol);
     state.qty = qty;
     state.avgPrice = qty === 0 ? undefined : (avgPrice ?? state.mark?.price ?? 0);
+  }
+
+  private validateInstrument(symbol: string, instrument: Instrument): void {
+    nativeQtyStep(instrument);
+    if (!Number.isFinite(instrument.mintick) || instrument.mintick <= 0)
+      throw new RangeError(`${symbol}: mintick must be a positive finite number`);
+    if (
+      instrument.pointValue != null &&
+      (!Number.isFinite(instrument.pointValue) || instrument.pointValue <= 0)
+    )
+      throw new RangeError(`${symbol}: pointValue must be a positive finite number`);
+    if (
+      instrument.minOrderQty != null &&
+      (!Number.isFinite(instrument.minOrderQty) || instrument.minOrderQty <= 0)
+    )
+      throw new RangeError(`${symbol}: minOrderQty must be a positive finite number`);
   }
 
   private state(symbol: string): PaperState {

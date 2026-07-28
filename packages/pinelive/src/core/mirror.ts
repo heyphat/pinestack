@@ -4,7 +4,9 @@ import type { Fill, Instrument, OrderRequest, Position } from './types.js';
 import { nativeQtyStep, snap } from './units.js';
 
 export interface ReconcileContext {
-  symbol: string;
+  strategySymbol: string;
+  executionSymbol: string;
+  bindingId: string;
   barTime: number;
   timeframe: string;
   /** Stable operator-defined deployment/stream namespace. */
@@ -72,7 +74,9 @@ function stableClientId(
   return [
     ctx.executionId ?? 'default',
     ctx.strategyId,
-    ctx.symbol,
+    ctx.strategySymbol,
+    ctx.executionSymbol,
+    ctx.bindingId,
     ctx.timeframe,
     Math.floor(ctx.barTime),
     stableNumber(actual),
@@ -126,7 +130,7 @@ export class PositionMirror {
     const target = snap(targetInput, this.step);
     let actual: Position;
     try {
-      actual = await this.broker.getPosition(ctx.symbol);
+      actual = await this.broker.getPosition(ctx.executionSymbol, ctx.signal);
     } catch (error) {
       if (!(error instanceof BrokerError)) throw error;
       return this.rejection(target, null, null, error, 'position', undefined, null);
@@ -163,7 +167,7 @@ export class PositionMirror {
     }
 
     const order: OrderRequest = {
-      symbol: ctx.symbol,
+      symbol: ctx.executionSymbol,
       side: rawDelta > 0 ? 'buy' : 'sell',
       qty: quantity,
       type: 'market',
@@ -175,14 +179,14 @@ export class PositionMirror {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       this.ensureActive(ctx.signal);
       try {
-        fill = await this.broker.submit(order);
+        fill = await this.broker.submit(order, ctx.signal);
         break;
       } catch (error) {
         if (!(error instanceof BrokerError)) throw error;
         if (!error.retryable || attempt === attempts) {
           let actualAfter: number | null = actual.qty;
           try {
-            actualAfter = (await this.broker.getPosition(ctx.symbol)).qty;
+            actualAfter = (await this.broker.getPosition(ctx.executionSymbol, ctx.signal)).qty;
           } catch (positionError) {
             if (!(positionError instanceof BrokerError)) throw positionError;
             actualAfter = null;
@@ -195,7 +199,7 @@ export class PositionMirror {
     if (!fill) throw new Error('unreachable reconcile state');
 
     try {
-      const after = await this.broker.getPosition(ctx.symbol);
+      const after = await this.broker.getPosition(ctx.executionSymbol, ctx.signal);
       if (!Number.isFinite(after.qty))
         throw new Error(`${this.broker.id}: getPosition returned a non-finite quantity`);
       return {

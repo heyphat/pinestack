@@ -1,23 +1,25 @@
 import { expect, test } from 'bun:test';
+import { ReplayProvider, StaticProvider, type Bar, type MarketDataProvider } from '@heyphat/pinery';
 import {
-  CsvReplayFeed,
   MemoryLedger,
   PaperBroker,
   runForwardServer,
-  type Bar,
-  type ForwardRecord,
+  type LedgerRecord,
   type LedgerSink,
-  type LiveFeed,
 } from '../src/index.js';
 
 const source = `//@version=6
 strategy("server", default_qty_type=strategy.fixed, default_qty_value=1)
 strategy.entry("L", strategy.long)`;
+const instrument = { symbol: 'X', minQty: 1, qtyStep: 1, minOrderQty: 1, mintick: 0.01 };
+
+function replay(bars: Bar[] = []): MarketDataProvider {
+  const history = new StaticProvider({ X: bars }).setInstrument('X', { minQty: 1, mintick: 0.01 });
+  return new ReplayProvider(history, { cutoverTime: 200, instrument: { minOrderQty: 1 } });
+}
 
 test('pre-aborted server refuses startup without reconciling', async () => {
-  const instrument = { symbol: 'X', minQty: 1, mintick: 0.01 };
   const broker = new PaperBroker({ instruments: { X: instrument } });
-  const feed = new CsvReplayFeed([], { nowSec: 1_000 });
   const ledger = new MemoryLedger();
   const controller = new AbortController();
   controller.abort();
@@ -27,7 +29,7 @@ test('pre-aborted server refuses startup without reconciling', async () => {
       symbol: 'X',
       timeframe: '1m',
       broker,
-      feed,
+      data: replay(),
       ledger,
       signal: controller.signal,
     }),
@@ -35,51 +37,57 @@ test('pre-aborted server refuses startup without reconciling', async () => {
   expect(ledger.records).toHaveLength(0);
 });
 
-test('server records cycles and exits without flattening', async () => {
-  const instrument = { symbol: 'X', minQty: 1, mintick: 0.01 };
+test('server records only yielded cycles and exits without flattening', async () => {
   const broker = new PaperBroker({ instruments: { X: instrument } });
-  const bars = [1, 2, 3].map((time) => ({
-    time: time * 100,
+  const bars = [1, 2, 3].map((value) => ({
+    time: value * 100,
     open: 1,
     high: 2,
     low: 1,
     close: 2,
     volume: 1,
   }));
-  const feed = new CsvReplayFeed(bars, { warmupBars: 1, nowSec: 1_000 });
   const ledger = new MemoryLedger();
   const result = await runForwardServer({
     source,
     symbol: 'X',
     timeframe: '1m',
     broker,
-    feed,
+    data: replay(bars),
     ledger,
     warmupBars: 1,
   });
-  expect(ledger.records).toHaveLength(3);
+  expect(ledger.records).toHaveLength(2);
+  expect(ledger.bindings).toHaveLength(1);
   expect(result.finalPosition).toBe(1);
   expect((await broker.getPosition('X')).qty).toBe(1);
 });
 
 test('abort during delayed warmup prevents any order', async () => {
-  const instrument = { symbol: 'X', minQty: 1, mintick: 0.01 };
   const broker = new PaperBroker({ instruments: { X: instrument } });
   let releaseHistory!: (bars: Bar[]) => void;
   let historyStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     historyStarted = resolve;
   });
-  const feed: LiveFeed = {
+  const data: MarketDataProvider = {
     id: 'delayed',
-    history: async () => {
+    history: async () => [],
+    resolve: async () => ({
+      strategySymbol: 'X',
+      providerHandle: 'delayed:X',
+      venueSymbol: 'X',
+      mintick: 0.01,
+      qtyStep: 1,
+      minOrderQty: 1,
+    }),
+    historyResolved: async () => {
       historyStarted();
       return new Promise<Bar[]>((resolve) => {
         releaseHistory = resolve;
       });
     },
     closedBars: async function* () {},
-    stop: async () => {},
   };
   const ledger = new MemoryLedger();
   const controller = new AbortController();
@@ -88,7 +96,7 @@ test('abort during delayed warmup prevents any order', async () => {
     symbol: 'X',
     timeframe: '1m',
     broker,
-    feed,
+    data,
     ledger,
     signal: controller.signal,
   });
@@ -101,24 +109,32 @@ test('abort during delayed warmup prevents any order', async () => {
 });
 
 test('server attempts every cleanup operation after cleanup failures', async () => {
-  const instrument = { symbol: 'X', minQty: 1, mintick: 0.01 };
   const broker = new PaperBroker({ instruments: { X: instrument } });
   let disconnected = false;
   broker.disconnect = async () => {
     disconnected = true;
   };
-  const feed: LiveFeed = {
+  const data: MarketDataProvider = {
     id: 'cleanup',
     history: async () => [],
+    resolve: async () => ({
+      strategySymbol: 'X',
+      providerHandle: 'cleanup:X',
+      venueSymbol: 'X',
+      mintick: 0.01,
+      qtyStep: 1,
+      minOrderQty: 1,
+    }),
+    historyResolved: async () => [],
     closedBars: async function* () {},
-    stop: async () => {
+    disconnect: async () => {
       throw new Error('stop failed');
     },
   };
   let flushed = false;
   let closed = false;
   const ledger: LedgerSink = {
-    append: async (_record: ForwardRecord) => {},
+    append: async (_record: LedgerRecord) => {},
     flush: async () => {
       flushed = true;
       throw new Error('flush failed');
@@ -128,7 +144,7 @@ test('server attempts every cleanup operation after cleanup failures', async () 
     },
   };
   await expect(
-    runForwardServer({ source, symbol: 'X', timeframe: '1m', broker, feed, ledger }),
+    runForwardServer({ source, symbol: 'X', timeframe: '1m', broker, data, ledger }),
   ).rejects.toBeInstanceOf(AggregateError);
   expect(flushed).toBe(true);
   expect(disconnected).toBe(true);

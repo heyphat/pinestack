@@ -15,7 +15,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned: the compiled pinerun binaries are the product, and bun's
+          # compiler/bundler output changes between versions. Keep in sync with
+          # piner's workflows and RELEASING.md; bump deliberately.
+          bun-version: 1.2.5
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

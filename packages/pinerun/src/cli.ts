@@ -2244,7 +2244,7 @@ const BAR_MAGNIFIER_EXACT_HELP = `BAR MAGNIFIER
   forward). Matching TradingView also requires matching feed, session,
   adjustments, and OHLC.
 
-  The shipped self-contained binary embeds the root-pinned @heyphat/piner 0.10.0.
+  The shipped self-contained binary embeds the root-pinned @heyphat/piner 0.11.1.
   Any effective request therefore fails capability preflight with
   piner-bar-magnifier-capability-unavailable before exact provider, static-
   security, or execution I/O; no exact dataset is prepared. A future piner that
@@ -2348,7 +2348,7 @@ INIT EXAMPLE
                           enforces the newest-200,000 eligible-target-bar rule.
                           Provider data can match TV fills only when feed/session/
                           adjustments/OHLC match. The shipped self-contained
-                          binary embeds @heyphat/piner 0.10.0, so an effective
+                          binary embeds @heyphat/piner 0.11.1, so an effective
                           request fails capability preflight with
                           piner-bar-magnifier-capability-unavailable before exact
                           data I/O. A future contract-capable runtime with

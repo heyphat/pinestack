@@ -4,7 +4,7 @@
     "": {
       "name": "pinestack",
       "devDependencies": {
-        "@heyphat/piner": "0.10.0",
+        "@heyphat/piner": "0.11.1",
         "@types/bun": "^1.2.5",
         "prettier": "^3.9.4",
         "typescript": "^5.7.2",
@@ -12,7 +12,7 @@
     },
     "packages/pinerun": {
       "name": "@heyphat/pinerun",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "bin": {
         "pinerun": "./src/cli.ts",
       },
@@ -25,14 +25,14 @@
     },
     "packages/pinery": {
       "name": "@heyphat/pinery",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "peerDependencies": {
         "@heyphat/piner": "*",
       },
     },
   },
   "packages": {
-    "@heyphat/piner": ["@heyphat/piner@0.10.0", "", {}, "sha512-PGydApJ+xxFjyc4V5a0ah9YxxYrkHXlaqCWQ0bnJBRDA6Zne5tjKHxkA+vGaCkK91NHUwS4O5HNXKS9nf9PLHQ=="],
+    "@heyphat/piner": ["@heyphat/piner@0.11.1", "", {}, "sha512-swzr35GOLsb142huCXvtrn5J9IW7PEz5QSv7HfC6teVRHJ/pQ0fF5wPYMMJgykrGUuKXfFZUw9o+hzZ9Pyo+zw=="],
 
     "@heyphat/pinerun": ["@heyphat/pinerun@workspace:packages/pinerun"],
 

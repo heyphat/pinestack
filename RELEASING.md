@@ -37,7 +37,11 @@ get the new version.
 
 ## Prerequisites (one-time)
 
-- **Bun ≥ 1.2** locally (install, test, and `build:bin` all run on Bun).
+- **Bun** locally, at the exact version pinned in `.github/workflows/release.yml`
+  (`bun-version:`) — the compiled `pinerun` binaries are the product, and bun's
+  compiler output changes between versions, so the pin is what makes a release
+  reproducible. Check with `bun --version`; bump the pin (both workflows, piner's
+  workflows, and this line) deliberately.
 - **Push rights to `heyphat/pinestack`** — the tag push is the release. The
   workflow needs no secrets: it authenticates with the built-in `GITHUB_TOKEN`
   (`permissions: contents: write` is already declared in `release.yml`).
@@ -212,7 +216,7 @@ single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 | Step      | Command / action                                                   |
 | --------- | ------------------------------------------------------------------ |
 | Checkout  | `actions/checkout@v4`                                              |
-| Bun       | `oven-sh/setup-bun@v2` (latest)                                    |
+| Bun       | `oven-sh/setup-bun@v2` (pinned `bun-version`)                      |
 | Install   | `bun install --frozen-lockfile`                                    |
 | Typecheck | `bun run typecheck`                                                |
 | Test      | `bun test`                                                         |

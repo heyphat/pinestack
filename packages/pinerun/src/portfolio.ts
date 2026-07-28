@@ -252,7 +252,13 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     securityBars: j.securityBars
       ? Object.fromEntries(Object.entries(j.securityBars).map(([k, v]) => [k, toPinerBars(v)]))
       : undefined,
-    magnifierData: j.magnifier ? toPinerBarMagnifierData(j.magnifier) : undefined,
+    // Cast at the engine boundary: piner brands bar times with its own
+    // `UnixMillisecond` unique symbol, which a structurally identical foreign
+    // type can never satisfy. The wrapper's shape and ms units are validated by
+    // the resolver and re-validated fail-closed inside piner's prepare seam.
+    magnifierData: j.magnifier
+      ? (toPinerBarMagnifierData(j.magnifier) as unknown as PortfolioSleeveSpec['magnifierData'])
+      : undefined,
   }));
   const engine = new PortfolioEngine(compiled, {
     mode,

@@ -86,7 +86,7 @@ describe('Bar Magnifier CLI help and strict tri-state parsing', () => {
       expect(result.stdout).toContain('--bar-magnifier');
       expect(result.stdout).toContain('--no-bar-magnifier');
       expect(result.stdout).toContain('automatic');
-      expect(result.stdout).toContain('@heyphat/piner 0.10.0');
+      expect(result.stdout).toContain('@heyphat/piner 0.11.1');
       // Help text documents the code as a literal; it does not vary with the
       // engine that happens to be loaded.
       expect(result.stdout).toContain('piner-bar-magnifier-capability-unavailable');
@@ -97,7 +97,7 @@ describe('Bar Magnifier CLI help and strict tri-state parsing', () => {
     expect(portfolio.code).toBe(0);
     expect(portfolio.stdout).not.toContain('--bar-magnifier');
     expect(portfolio.stdout).toContain('no portfolio-wide CLI override');
-    expect(portfolio.stdout).toContain('@heyphat/piner 0.10.0');
+    expect(portfolio.stdout).toContain('@heyphat/piner 0.11.1');
     expect(portfolio.stdout).toContain('before exact provider');
   });
 
@@ -236,8 +236,7 @@ describe('Bar Magnifier CLI command outcomes and summaries', () => {
     expect(scanJson.errors).toHaveLength(2);
     expect(
       scanJson.errors.every(
-        (entry: { failure?: { code?: string } }) =>
-          entry.failure?.code === EXACT_FAILURE_CODE,
+        (entry: { failure?: { code?: string } }) => entry.failure?.code === EXACT_FAILURE_CODE,
       ),
     ).toBe(true);
 

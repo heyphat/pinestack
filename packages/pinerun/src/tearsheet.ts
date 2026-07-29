@@ -148,12 +148,11 @@ interface MonthTradeTally {
 /**
  * Year × month closed-trade tally grid in the MONTHLY RETURNS layout. Each
  * trade counts toward its exit month (UTC) — the month its P/L is realized,
- * matching the equity-based returns grid. Cells list only nonzero tallies in
- * wins/losses/evens order (`5/3`, `5/2/1E`, `5/3E`); wins and losses are bare
- * counts told apart by color (green/red), evens keep their `E` suffix because
- * they have no color. Months without closed trades print `·`, and the YEAR
- * column totals the row. Returns '' when no trade has a finite profit and
- * exit time.
+ * matching the equity-based returns grid. Cells list only nonzero tallies as
+ * bare counts in wins/losses/evens order (`5/3`, `5/2/1`), told apart by
+ * color: wins green, losses red, evens uncolored. Months without closed
+ * trades print `·`, and the YEAR column totals the row. Returns '' when no
+ * trade has a finite profit and exit time.
  */
 export function monthlyTradesAscii(
   trades: readonly { profit: number; exitTime: number }[],
@@ -177,18 +176,18 @@ export function monthlyTradesAscii(
 
   const color = opts.color === true;
   const cellParts = (t: MonthTradeTally): { plain: string; painted: string } | undefined => {
-    const segments: [count: number, unit: string, ansi?: number][] = [
-      [t.wins, '', GREEN],
-      [t.losses, '', RED],
-      [t.evens, 'E'],
+    const segments: [count: number, ansi?: number][] = [
+      [t.wins, GREEN],
+      [t.losses, RED],
+      [t.evens],
     ];
     const present = segments.filter(([count]) => count > 0);
     if (present.length === 0) return undefined;
     return {
-      plain: present.map(([count, unit]) => `${count}${unit}`).join('/'),
+      plain: present.map(([count]) => String(count)).join('/'),
       painted: present
-        .map(([count, unit, ansi]) =>
-          ansi === undefined ? `${count}${unit}` : paint(`${count}${unit}`, ansi, color),
+        .map(([count, ansi]) =>
+          ansi === undefined ? String(count) : paint(String(count), ansi, color),
         )
         .join('/'),
     };

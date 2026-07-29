@@ -951,8 +951,8 @@ The ledger, equity curve, and bar times are **always** computed, so `--trades`
 full `RunResult`) need no extra flags. The stats blocks are followed by the
 analysis tables: **MONTHLY RETURNS %** (year × month grid, green/red on a TTY),
 **MONTHLY TRADES** (the same grid tallying closed trades by exit month in
-win/loss/even order — `5/3`, `5/2/1E`; zero tallies omitted, wins green and
-losses red on a TTY, evens suffixed `E`), **TOP DRAWDOWNS** (the five deepest
+win/loss/even order — `5/3`, `5/2/1`; zero tallies omitted, wins green and
+losses red on a TTY, evens uncolored), **TOP DRAWDOWNS** (the five deepest
 episodes with peak/trough/recovery dates and durations; `—` + `>N` marks one
 still underwater), and **TRADE P/L DISTRIBUTION** (a bucketed histogram of
 closed-trade profits — zero is always a bucket edge, so every bar is purely

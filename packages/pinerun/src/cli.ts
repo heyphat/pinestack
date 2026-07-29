@@ -705,7 +705,7 @@ function printAnalysisTables(
   if (trades && trades.length > 0) {
     const tally = monthlyTradesAscii(trades, { color: useColor() });
     if (tally) {
-      console.log('\n  MONTHLY TRADES  (win/loss/E even)');
+      console.log('\n  MONTHLY TRADES  (win/loss/even)');
       console.log(indent(tally));
     }
   }
@@ -2578,7 +2578,7 @@ EXAMPLE
   Prints a full tearsheet: returns (net/gross, buy & hold, CAGR), risk (drawdown,
   volatility, Sharpe/Sortino/Calmar, exposure), and trade quality (win rate,
   profit factor, expectancy, streaks), then MONTHLY RETURNS (year × month %
-  grid), MONTHLY TRADES (the same grid tallying closed trades as win/loss/E
+  grid), MONTHLY TRADES (the same grid tallying closed trades as win/loss/even
   counts, green/red on a TTY),
   TOP DRAWDOWNS (the 5 deepest episodes with recovery dates), and a
   TRADE P/L DISTRIBUTION histogram. The ledger + equity curve are always

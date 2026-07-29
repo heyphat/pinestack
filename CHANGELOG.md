@@ -9,6 +9,15 @@ README). The workspace packages run from TypeScript source and version in
 lockstep with the release tag; publishing the library to npm remains a possible
 follow-up.
 
+## [0.6.1] - 2026-07-29
+
+### Changed
+
+- MONTHLY TRADES break-even tallies are now bare counts like wins and losses
+  (`5/2/1` instead of `5/2/1E`): color alone tells the segments apart — wins
+  green, losses red, evens uncolored — and the header legend reads
+  `(win/loss/even)`.
+
 ## [0.6.0] - 2026-07-29
 
 ### Added
@@ -285,6 +294,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.6.1]: https://github.com/heyphat/pinestack/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/heyphat/pinestack/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/heyphat/pinestack/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/heyphat/pinestack/compare/v0.3.0...v0.4.0

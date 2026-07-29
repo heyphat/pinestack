@@ -86,10 +86,9 @@ test('monthlyTradesAscii: tallies exit months, omits zero segments, totals the Y
   expect(rows[0]).toContain('JAN');
   expect(rows[0]).toContain('YEAR');
   const y2025 = rows.find((l) => l.includes('2025'))!;
-  expect(y2025).toContain('2/1'); // Jan — wins/losses, no even segment
-  expect(y2025).toContain('1/1/1E'); // Feb — all three
-  expect(y2025).toContain('2E'); // Mar — evens only
-  expect(y2025).toContain('3/2/3E'); // YEAR totals
+  // Jan 2/1 (wins/losses), Feb 1/1/1 (all three), Mar 2 (evens only), then dots.
+  expect(y2025).toMatch(/2025\s+2\/1\s+1\/1\/1\s+2\s+·/);
+  expect(y2025).toMatch(/3\/2\/3$/); // YEAR totals
   expect(y2025).toContain('·'); // Apr onward has no trades
   const y2026 = rows.find((l) => l.includes('2026'))!;
   expect(y2026.replace(/[·\s]/g, '')).toBe('2026'); // gap year is all dots
@@ -102,7 +101,8 @@ test('monthlyTradesAscii: color paints wins green and losses red without touchin
   const plain = monthlyTradesAscii(trades);
   const colored = monthlyTradesAscii(trades, { color: true });
   expect(colored).toContain('\x1b[32m1\x1b[39m/\x1b[31m1\x1b[39m'); // Jan: 1 win / 1 loss
-  expect(colored).toMatch(/ 1E/); // Feb's even tally stays unpainted
+  // Feb's lone even tally stays a bare unpainted count.
+  expect(colored).toMatch(/\x1b\[39m\s+1\s+·/);
   expect(colored.replace(/\x1b\[\d+m/g, '')).toBe(plain);
 });
 

@@ -54,10 +54,9 @@ Then the analysis tables (always printed, even with `--no-chart`):
 
 - **MONTHLY RETURNS** — a year × month % grid, green/red on a TTY.
 - **MONTHLY TRADES** — the same year × month grid tallying closed trades by
-  exit month in win/loss/even order: `5/3`, or `5/2/1E` when a month has
-  break-even trades (zero tallies are omitted, so all-even is `3E`). Wins are
-  green and losses red on a TTY; evens keep their `E` suffix because they have
-  no color. The YEAR column totals the row.
+  exit month in win/loss/even order: `5/3`, or `5/2/1` when a month has
+  break-even trades (zero tallies are omitted). Wins are green, losses red,
+  and evens uncolored on a TTY. The YEAR column totals the row.
 - **TOP DRAWDOWNS** — the five deepest episodes with peak / trough / recovery dates and durations; `—` + `>N` marks one still underwater.
 
 And a **TRADE P/L DISTRIBUTION** — a bucketed histogram of closed-trade profits (zero is always a bucket edge, so every bar is purely wins or purely losses). It is a drawing, so `--no-chart` skips it like the charts below.
@@ -130,7 +129,7 @@ DISTRIBUTION histogram, and the PRICE / EQUITY / DRAWDOWN charts:
             JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
     2026      ·      ·      ·      ·      ·   -4.9    1.2      ·      ·      ·      ·      ·     -3.8
 
-  MONTHLY TRADES  (win/loss/E even)
+  MONTHLY TRADES  (win/loss/even)
             JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
     2026      ·      ·      ·      ·      ·    1/5    2/3      ·      ·      ·      ·      ·      3/8
 

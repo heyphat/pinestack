@@ -73,7 +73,7 @@ Plus shared flags — see [common options](./common-options.md):
 
 The terminal report opens with a combined tearsheet — RETURNS, RISK, and TRADES blocks computed on the portfolio equity curve and merged ledger — followed by a per-sleeve contribution table (`SYMBOL`, `FUNDING`, `NET P/L`, `TRADES`, `CONTRIB%`, `RET-CORR`). `RET-CORR` is each sleeve's per-bar return correlation with the portfolio in `isolated` mode (a diversification read); it reads `na` in `shared` mode, where every sleeve samples the one pot.
 
-The tearsheet also prints **MONTHLY RETURNS**, **MONTHLY TRADES** (the merged ledger tallied by exit month as `5/3`-style win/loss/even counts — green/red on a TTY, evens suffixed `E`), and **TOP DRAWDOWNS**, plus — for an isolated-mode basket of two or more sleeves — the **SLEEVE RETURN CORRELATION** matrix of every pairwise per-bar return correlation (skipped in `shared` mode, where every pair reads 1.00). Unless `--no-chart` is set, it ends with in-terminal charts: the combined equity curve (braille line with a dashed initial-capital guide), the underwater drawdown, one cumulative-P/L sparkline per sleeve, and the trade P/L histogram — plain unicode, safe to pipe.
+The tearsheet also prints **MONTHLY RETURNS**, **MONTHLY TRADES** (the merged ledger tallied by exit month as `5/3`-style win/loss/even counts — green/red on a TTY, evens uncolored), and **TOP DRAWDOWNS**, plus — for an isolated-mode basket of two or more sleeves — the **SLEEVE RETURN CORRELATION** matrix of every pairwise per-bar return correlation (skipped in `shared` mode, where every pair reads 1.00). Unless `--no-chart` is set, it ends with in-terminal charts: the combined equity curve (braille line with a dashed initial-capital guide), the underwater drawdown, one cumulative-P/L sparkline per sleeve, and the trade P/L histogram — plain unicode, safe to pipe.
 
 **Portfolio drawdown/run-up are close-to-close** on the combined curve in both modes: the sleeves' worst intrabar moments don't coincide and cross-symbol intrabar paths are unknowable, so this is the honest number. Per-sleeve reports keep their own intrabar extremes. There is no buy-&-hold benchmark — it's meaningless for a basket.
 
@@ -150,7 +150,7 @@ sleeve-correlation matrix, and the equity / drawdown / per-sleeve charts:
             JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
     2026      ·      ·      ·      ·      ·   -6.3    3.2      ·      ·      ·      ·      ·     -3.2
 
-  MONTHLY TRADES  (win/loss/E even)
+  MONTHLY TRADES  (win/loss/even)
             JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
     2026      ·      ·      ·      ·      ·   4/10    6/8      ·      ·      ·      ·      ·    10/18
 

@@ -1,4 +1,7 @@
 import { test, expect } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { compile as compilePinerFixture, type SecurityDependency } from '@heyphat/piner';
 import {
   StaticProvider,
@@ -11,6 +14,7 @@ import {
   type HistorySessionCalendar,
   type ResolvedHistorySource,
 } from '@heyphat/pinery';
+import { CsvProvider } from '@heyphat/pinery/node';
 import {
   scan,
   LocalRunner,
@@ -1048,7 +1052,7 @@ plot(array.size(self))`;
     complete: true,
     gaps: [],
     alignmentEvidence: { kind: 'utc-24x7' },
-    acquisitionKey: expect.stringContaining('security-dataset-acquisition-v2:'),
+    acquisitionKey: expect.stringContaining('security-dataset-acquisition-v3:'),
   });
   expect(job.securityProofs?.['MSFT@10']).toMatchObject({
     requestedSymbol: 'MSFT',
@@ -1644,7 +1648,7 @@ plot(self + cross)`;
         sourceTimeframe: '1d',
         targetTimeframe: '1w',
         weekAnchorSec: PINE_RUNTIME_WEEK_PHASE,
-        aggregationVersion: 3,
+        aggregationVersion: 4,
       },
       alignmentEvidence: {
         kind: 'utc-24x7',
@@ -2777,4 +2781,131 @@ plot(x, "x")`;
   expect(() => assertResolvedSecurityForBarMagnifier(source, dependencies, job)).not.toThrow();
   const local = await new LocalRunner().run({ ...job, magnifier: undefined });
   expect(local.plots.find((plot) => plot.title === 'x')?.data).toEqual([sourceBar.close]);
+});
+
+test('complete-record static-security proofs survive prefixing and reject span tampering', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pinerun-complete-record-security-'));
+  const chart = spacedBars(2, 3_600, 100, 0);
+  const lower = spacedBars(12, 600, 200, 0).filter((_, index) => index !== 3);
+  const csv = [
+    'time,open,high,low,close,volume',
+    ...lower.map(
+      (row) => `${row.time},${row.open},${row.high},${row.low},${row.close},${row.volume}`,
+    ),
+  ].join('\n');
+  writeFileSync(join(dir, 'BTC_10m.csv'), csv);
+  const source = `//@version=6
+strategy("complete-record lower")
+values = request.security_lower_tf(syminfo.tickerid, "10", close)
+plot(array.size(values), "count")`;
+  const dependencies = compilerDependencies(source);
+  const makeJob = (): Job => ({
+    source,
+    symbol: 'BTC',
+    timeframe: '60',
+    bars: chart,
+    magnifier: { chartCloseTimesMs: [7_200_000] } as ResolvedMagnifierDataset,
+  });
+  try {
+    await expect(
+      resolveSecurity(
+        source,
+        [makeJob()],
+        '1h',
+        '60',
+        new CsvProvider({ dir, timeframes: 'arbitrary', alignment: 'utc-24x7' }),
+        {
+          concurrency: 1,
+          range: { from: 0, to: 7_199 },
+          barMagnifierRequested: true,
+          staticDependencies: dependencies,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'incomplete-required-coverage' });
+
+    const job = makeJob();
+    await resolveSecurity(
+      source,
+      [job],
+      '1h',
+      '60',
+      new CsvProvider({
+        dir,
+        timeframes: 'arbitrary',
+        alignment: 'utc-24x7',
+        coverageSemantics: 'complete-record',
+      }),
+      {
+        concurrency: 1,
+        range: { from: 0, to: 7_199 },
+        barMagnifierRequested: true,
+        staticDependencies: dependencies,
+      },
+    );
+
+    const proof = job.securityProofs!['BTC@10']!;
+    expect(proof).toMatchObject({
+      complete: true,
+      gaps: [],
+      provenance: {
+        coverageSemantics: 'complete-record',
+        recordSpan: { from: 0, to: 7_200 },
+      },
+    });
+    expect(proof.acquisitionKey).toStartWith('security-dataset-acquisition-v3:');
+    expect(() => assertResolvedSecurityForBarMagnifier(source, dependencies, job)).not.toThrow();
+
+    const prefix = deriveResolverIssuedSecurityPrefix(job.securityBars, job.securityProofs, 3_600);
+    expect(prefix.securityProofs?.['BTC@10']?.provenance.recordSpan).toEqual({
+      from: 0,
+      to: 7_200,
+    });
+    const prefixJob: Job = {
+      ...job,
+      bars: chart.slice(0, 1),
+      magnifier: { chartCloseTimesMs: [3_600_000] } as ResolvedMagnifierDataset,
+      securityBars: prefix.securityBars,
+      securityProofs: prefix.securityProofs,
+    };
+    expect(() =>
+      assertResolvedSecurityForBarMagnifier(source, dependencies, prefixJob),
+    ).not.toThrow();
+
+    const bars = job.securityBars!['BTC@10']!;
+    const barsOnlyIdentity = reboundSecurityProof(proof, bars, {
+      provenance: deepFreezeFixture({
+        ...proof.provenance,
+        coverageSemantics: 'bars-only',
+        recordSpan: undefined,
+      }),
+    });
+    expect(barsOnlyIdentity.acquisitionKey).not.toBe(proof.acquisitionKey);
+
+    const tampered = reboundSecurityProof(proof, bars, {
+      provenance: deepFreezeFixture({
+        ...proof.provenance,
+        recordSpan: { from: 0, to: 3_600 },
+      }),
+    });
+    try {
+      assertResolvedSecurityForBarMagnifier(source, dependencies, {
+        ...job,
+        securityProofs: { 'BTC@10': tampered },
+      });
+      throw new Error('expected complete-record proof rejection');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'unresolved-static-security-with-bar-magnifier',
+        details: {
+          invalid: [
+            expect.objectContaining({
+              reasons: expect.arrayContaining(['resolver-authentication', 'coverage-evidence']),
+            }),
+          ],
+        },
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

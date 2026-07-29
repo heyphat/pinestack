@@ -422,7 +422,13 @@ changes surface within a day. `refresh: true` bypasses instrument reads as well.
   `<SYMBOL>_<TF>.csv` files (header `time,open,high,low,close,volume`; optional
   `instruments.csv` sidecar for lot step / tick size). Node-only because it
   reads the filesystem; route it through `InstrumentRouter` via
-  `InstrumentRouterOptions.providers`.
+  `InstrumentRouterOptions.providers`. Exact acquisition stays fail-closed by
+  default (unknown alignment, no advertised exact timeframes, bars-only
+  coverage); opt in explicitly with `timeframes`, `alignment: 'utc-24x7'` +
+  optional `weekAnchorSec`, or a `calendar`, plus
+  `coverageSemantics: 'complete-record'` to treat missing bars inside an exact
+  file's authenticated record span as no-trade intervals. `cacheIdentity`
+  versions the dataset; all claims join the fingerprinted source identity.
 
 ## Writing a new provider
 

@@ -19,6 +19,7 @@ import { resolveHistorySource } from './acquisition.js';
 import {
   snapshotHistoryCapabilities,
   snapshotResolvedHistorySource,
+  historyCapabilityRecordSpan,
   validateHistoryAcquisition,
 } from './coverage.js';
 
@@ -46,7 +47,7 @@ interface LegacyHistoryPayload {
 
 interface ExactHistoryPayload {
   readonly schema: 'pinery.history-acquisition';
-  readonly version: 2;
+  readonly version: 3;
   readonly key: {
     readonly cacheIdentity: string;
     readonly normalizedSymbol: string;
@@ -54,6 +55,8 @@ interface ExactHistoryPayload {
     readonly requested: HistoryRequest['requested'];
     readonly query: HistoryRequest['query'] | null;
     readonly weekAnchorSec: ResolvedHistorySource['capabilities']['weekAnchorSec'] | null;
+    readonly coverageSemantics: ResolvedHistorySource['capabilities']['coverageSemantics'];
+    readonly recordSpan: ResolvedHistorySource['capabilities']['recordSpan'] | null;
   };
   readonly acquisition: HistoryAcquisition;
 }
@@ -117,6 +120,8 @@ export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): 
                   alignment: capabilities.alignment,
                   weekAnchorSec: capabilities.weekAnchorSec,
                   calendar: capabilities.calendar,
+                  coverageSemantics: capabilities.coverageSemantics,
+                  recordSpan: historyCapabilityRecordSpan(capabilities, request.timeframe),
                 });
                 return payload.acquisition;
               } catch {
@@ -136,10 +141,12 @@ export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): 
             alignment: capabilities.alignment,
             weekAnchorSec: capabilities.weekAnchorSec,
             calendar: capabilities.calendar,
+            coverageSemantics: capabilities.coverageSemantics,
+            recordSpan: historyCapabilityRecordSpan(capabilities, request.timeframe),
           });
           const payload: ExactHistoryPayload = {
             schema: 'pinery.history-acquisition',
-            version: 2,
+            version: 3,
             key: identity,
             acquisition,
           };
@@ -202,6 +209,8 @@ function exactIdentity(
     requested: request.requested,
     query: request.query ?? null,
     weekAnchorSec: source.capabilities.weekAnchorSec ?? null,
+    coverageSemantics: source.capabilities.coverageSemantics,
+    recordSpan: historyCapabilityRecordSpan(source.capabilities, request.timeframe) ?? null,
   };
 }
 
@@ -253,7 +262,7 @@ function isExactPayload(
   return (
     isRecord(value) &&
     value.schema === 'pinery.history-acquisition' &&
-    value.version === 2 &&
+    value.version === 3 &&
     isRecord(value.key) &&
     stableStringify(value.key) === stableStringify(identity) &&
     isRecord(value.acquisition)

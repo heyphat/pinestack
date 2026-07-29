@@ -12,18 +12,18 @@ pinerun portfolio <script.pine> --symbols <a,b,c> [options]
 
 ## Parameters
 
-| Flag                 | Default             | Description                                                                                                                                                                          |
-| -------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--symbols a,b,c`    | —                   | Basket in PRIORITY order — at equal timestamps earlier symbols fill first (spec S4). Supports full [instrument addresses](./common-options.md#symbol-addressing).                    |
-| `--universe <file>`  | —                   | Read the basket from a file, one symbol per line (blank lines and `#` comments ignored). Alternative to `--symbols`.                                                                 |
-| `--mode <m>`         | `isolated`          | Capital model — `isolated` or `shared`. See [Capital models](#capital-models---mode).                                                                                                |
-| `--capital <P>`      | N × initial_capital | Total pot. Defaults to N times the script's `initial_capital`.                                                                                                                       |
-| `--weights s=f,...`  | equal               | Per-symbol funding fractions, **isolated mode only** (e.g. `BTCUSDT=0.5,ETHUSDT=0.3,SOLUSDT=0.2`). Normalized; default equal-weight.                                                 |
-| `--input name=value` | —                   | Fixed input override applied to every sleeve. One value each; **repeatable** (pass the flag once per input).                                                                         |
-| `--trades`           | off                 | Also print the merged, symbol-tagged ledger. Over 20 trades elide to the first/last 5 rows.                                                                                          |
-| `--no-chart`         | off                 | Skip the in-terminal equity/drawdown/sleeve charts and the trade P/L histogram. MONTHLY RETURNS, TOP DRAWDOWNS, and the isolated-mode SLEEVE RETURN CORRELATION matrix always print. |
-| `--csv <dir>`        | —                   | Write `portfolio-trades.csv` + `portfolio-equity.csv` plus per-sleeve CSVs into `<dir>`.                                                                                             |
-| `--plot <dir>`       | —                   | Write `portfolio.html` plus per-sleeve equity/drawdown charts into `<dir>`.                                                                                                          |
+| Flag                 | Default             | Description                                                                                                                                                                                          |
+| -------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--symbols a,b,c`    | —                   | Basket in PRIORITY order — at equal timestamps earlier symbols fill first (spec S4). Supports full [instrument addresses](./common-options.md#symbol-addressing).                                    |
+| `--universe <file>`  | —                   | Read the basket from a file, one symbol per line (blank lines and `#` comments ignored). Alternative to `--symbols`.                                                                                 |
+| `--mode <m>`         | `isolated`          | Capital model — `isolated` or `shared`. See [Capital models](#capital-models---mode).                                                                                                                |
+| `--capital <P>`      | N × initial_capital | Total pot. Defaults to N times the script's `initial_capital`.                                                                                                                                       |
+| `--weights s=f,...`  | equal               | Per-symbol funding fractions, **isolated mode only** (e.g. `BTCUSDT=0.5,ETHUSDT=0.3,SOLUSDT=0.2`). Normalized; default equal-weight.                                                                 |
+| `--input name=value` | —                   | Fixed input override applied to every sleeve. One value each; **repeatable** (pass the flag once per input).                                                                                         |
+| `--trades`           | off                 | Also print the merged, symbol-tagged ledger. Over 20 trades elide to the first/last 5 rows.                                                                                                          |
+| `--no-chart`         | off                 | Skip the in-terminal equity/drawdown/sleeve charts and the trade P/L histogram. MONTHLY RETURNS, MONTHLY TRADES, TOP DRAWDOWNS, and the isolated-mode SLEEVE RETURN CORRELATION matrix always print. |
+| `--csv <dir>`        | —                   | Write `portfolio-trades.csv` + `portfolio-equity.csv` plus per-sleeve CSVs into `<dir>`.                                                                                                             |
+| `--plot <dir>`       | —                   | Write `portfolio.html` plus per-sleeve equity/drawdown charts into `<dir>`.                                                                                                                          |
 
 ### Capital models (`--mode`)
 
@@ -49,11 +49,8 @@ Target/LTF timestamps are injected only into that sleeve and never join the
 portfolio master clock, which remains the union of chart-bar opens in original
 basket order. Piner is the sole fill, timestamp, and report authority; pinerun
 does not invent intrabar ledger times. The shipped self-contained binary pins
-`@heyphat/piner` 0.10.0, so any source-effective request aborts the portfolio at
-capability preflight before exact sleeve/security/provider acquisition. A future
-contract-capable piner whose traversal remains disabled may prepare all sleeves
-atomically, but must authoritatively report requested/inactive and continue with
-chart-OHLC fills.
+the contract-capable `@heyphat/piner` 0.11.1 engine; exact sleeve preparation
+still fails closed, and only piner can report active traversal.
 
 The optional aggregate block is omitted when no sleeve requested magnification.
 Otherwise per-sleeve authoritative blocks are retained and aggregate counters
@@ -66,7 +63,7 @@ the reported percentage is validated within 0–100%.
 
 Plus shared flags — see [common options](./common-options.md):
 
-- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
+- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` · `--data-dir` · `--csv-alignment` · `--csv-week-anchor` · `--csv-calendar` · `--csv-complete-record` ([exact CSV](./csv-data.md#exact-acquisition-and-bar-magnifier)) (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--concurrency` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
 - **Metrics:** `--periods-per-year` · `--risk-free-rate`
@@ -76,7 +73,7 @@ Plus shared flags — see [common options](./common-options.md):
 
 The terminal report opens with a combined tearsheet — RETURNS, RISK, and TRADES blocks computed on the portfolio equity curve and merged ledger — followed by a per-sleeve contribution table (`SYMBOL`, `FUNDING`, `NET P/L`, `TRADES`, `CONTRIB%`, `RET-CORR`). `RET-CORR` is each sleeve's per-bar return correlation with the portfolio in `isolated` mode (a diversification read); it reads `na` in `shared` mode, where every sleeve samples the one pot.
 
-The tearsheet also prints **MONTHLY RETURNS** and **TOP DRAWDOWNS**, plus — for an isolated-mode basket of two or more sleeves — the **SLEEVE RETURN CORRELATION** matrix of every pairwise per-bar return correlation (skipped in `shared` mode, where every pair reads 1.00). Unless `--no-chart` is set, it ends with in-terminal charts: the combined equity curve (braille line with a dashed initial-capital guide), the underwater drawdown, one cumulative-P/L sparkline per sleeve, and the trade P/L histogram — plain unicode, safe to pipe.
+The tearsheet also prints **MONTHLY RETURNS**, **MONTHLY TRADES** (the merged ledger tallied by exit month as `5/3`-style win/loss/even counts — green/red on a TTY, evens suffixed `E`), and **TOP DRAWDOWNS**, plus — for an isolated-mode basket of two or more sleeves — the **SLEEVE RETURN CORRELATION** matrix of every pairwise per-bar return correlation (skipped in `shared` mode, where every pair reads 1.00). Unless `--no-chart` is set, it ends with in-terminal charts: the combined equity curve (braille line with a dashed initial-capital guide), the underwater drawdown, one cumulative-P/L sparkline per sleeve, and the trade P/L histogram — plain unicode, safe to pipe.
 
 **Portfolio drawdown/run-up are close-to-close** on the combined curve in both modes: the sleeves' worst intrabar moments don't coincide and cross-symbol intrabar paths are unknowable, so this is the honest number. Per-sleeve reports keep their own intrabar extremes. There is no buy-&-hold benchmark — it's meaningless for a basket.
 
@@ -96,6 +93,14 @@ Isolated baseline (default) — N equal-weight sub-accounts; equals running each
 ```bash
 pinerun portfolio examples/sma-cross-param.pine \
   --symbols BTCUSDT,ETHUSDT,SOLUSDT --tf 1h --limit 500
+```
+
+For CSV sleeves, put `use_bar_magnifier=true` in the strategy header (portfolio
+has no basket-wide override) and provide one explicit CSV evidence claim:
+
+```bash
+pinerun portfolio strategy.pine --symbols CSV:BTCUSDT,CSV:ETHUSDT --tf 1h \
+  --data-dir ./data --csv-alignment utc-24x7
 ```
 
 Which prints the combined tearsheet, the per-sleeve contribution table, the
@@ -144,6 +149,10 @@ sleeve-correlation matrix, and the equity / drawdown / per-sleeve charts:
   MONTHLY RETURNS %
             JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
     2026      ·      ·      ·      ·      ·   -6.3    3.2      ·      ·      ·      ·      ·     -3.2
+
+  MONTHLY TRADES  (win/loss/E even)
+            JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
+    2026      ·      ·      ·      ·      ·   4/10    6/8      ·      ·      ·      ·      ·    10/18
 
   TOP DRAWDOWNS
      #   DEPTH%  PEAK        TROUGH      RECOVERY     BARS

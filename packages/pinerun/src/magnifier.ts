@@ -7,6 +7,7 @@ import {
   calendarSessionPeriods,
   canonicalTimeframeSecondsExact,
   halfOpenIntervalSec,
+  historyCapabilityRecordSpan,
   isCalendarSessionTimeframe,
   isUtcWeekTimeframe,
   parseCanonicalTimeframeExact,
@@ -322,7 +323,7 @@ export interface MagnifierAcquisitionKeyInput {
 /** Full acquisition identity; deliberately separate from metadata-preflight reuse. */
 export function magnifierAcquisitionKey(input: MagnifierAcquisitionKeyInput): string {
   const calendar = input.source.capabilities.calendar;
-  return `magnifier-acquisition-v3:${canonicalDigest({
+  return `magnifier-acquisition-v4:${canonicalDigest({
     cacheIdentity: input.source.cacheIdentity,
     normalizedSymbol: input.source.normalizedSymbol,
     requestedSymbol: input.symbol,
@@ -337,6 +338,9 @@ export function magnifierAcquisitionKey(input: MagnifierAcquisitionKeyInput): st
     chartIntervalSource: input.chartIntervalSource,
     alignment: input.source.capabilities.alignment,
     weekAnchorSec: input.source.capabilities.weekAnchorSec ?? null,
+    coverageSemantics: input.source.capabilities.coverageSemantics ?? 'bars-only',
+    recordSpan:
+      historyCapabilityRecordSpan(input.source.capabilities, input.sourceCanonicalTf) ?? null,
     calendar: calendar
       ? {
           calendarId: calendar.calendarId,
@@ -377,7 +381,7 @@ export type MagnifierDatasetAcquisitionKeyInput = Pick<
  * strong target-bar digest, so the stored string alone is never accepted.
  */
 export function magnifierDatasetAcquisitionKey(input: MagnifierDatasetAcquisitionKeyInput): string {
-  return `magnifier-dataset-acquisition-v3:${canonicalDigest({
+  return `magnifier-dataset-acquisition-v4:${canonicalDigest({
     cacheIdentity: input.provenance.cacheIdentity,
     normalizedSymbol: input.provenance.normalizedSymbol,
     requestedSymbol: input.requestedSymbol,
@@ -394,7 +398,10 @@ export function magnifierDatasetAcquisitionKey(input: MagnifierDatasetAcquisitio
     weekAnchorSec: input.provenance.weekAnchorSec ?? null,
     alignmentEvidence: input.alignmentEvidence,
     barsDigest: input.barsDigest,
-    completenessPolicy: 'bar-derived-exact-complete-v2',
+    completenessPolicy:
+      (input.provenance.coverageSemantics ?? 'bars-only') === 'complete-record'
+        ? 'authenticated-complete-record-v1'
+        : 'bar-derived-exact-complete-v2',
     aggregationVersion: input.provenance.aggregationVersion,
     contractVersion: input.contractVersion,
     mappingVersion: input.mappingVersion,
@@ -1227,7 +1234,17 @@ function convertAcquisition(
     ),
     complete: acquisition.complete,
   });
-  const provenance = Object.freeze({ ...acquisition.provenance }) as AcquisitionProvenance;
+  const provenance = Object.freeze({
+    ...acquisition.provenance,
+    ...(acquisition.provenance.recordSpan
+      ? {
+          recordSpan: Object.freeze({
+            from: acquisition.provenance.recordSpan.from,
+            to: acquisition.provenance.recordSpan.to,
+          }),
+        }
+      : {}),
+  }) as AcquisitionProvenance;
   const resolved = {
     contractVersion: preflight.contractVersion!,
     mappingVersion: preflight.mappingVersion!,

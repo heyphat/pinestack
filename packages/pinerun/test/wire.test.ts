@@ -72,6 +72,8 @@ function magnifier(barsMs: readonly Bar[]): ResolvedMagnifierDataset {
       sourceTimeframe: '10m',
       targetTimeframe: '10m',
       alignment: 'utc-24x7',
+      coverageSemantics: 'complete-record',
+      recordSpan: { from: 1_700_000_000, to: 1_700_003_600 },
       aggregationVersion: 0,
     },
     alignmentEvidence: { kind: 'utc-24x7' },
@@ -189,11 +191,13 @@ function securityProof(bars: readonly Bar[]): ResolvedSecurityDatasetProof {
       sourceTimeframe: '1h',
       targetTimeframe: '1h',
       alignment: 'utc-24x7',
+      coverageSemantics: 'complete-record',
+      recordSpan: { from: 1_700_000_000, to: 1_700_003_600 },
       aggregationVersion: 0,
     },
     alignmentEvidence: { kind: 'utc-24x7' },
     barsDigest: `fixture-${bars.length}`,
-    acquisitionKey: 'security-dataset-acquisition-v2:wire-bound-proof',
+    acquisitionKey: 'security-dataset-acquisition-v3:wire-bound-proof',
   } as ResolvedSecurityDatasetProof;
 }
 
@@ -308,8 +312,12 @@ test('wire aliases one chart/security/magnifier array and preserves proofs withi
   expect(encoded.wire.magnifier?.barsMs.bars).toBeUndefined();
   expect(encoded.wire.securityProofs?.TEST).toMatchObject({
     requestedCanonicalTfs: ['1d'],
+    provenance: {
+      coverageSemantics: 'complete-record',
+      recordSpan: { from: 1_700_000_000, to: 1_700_003_600 },
+    },
     alignmentEvidence: { kind: 'utc-24x7' },
-    acquisitionKey: 'security-dataset-acquisition-v2:wire-bound-proof',
+    acquisitionKey: 'security-dataset-acquisition-v3:wire-bound-proof',
   });
 
   const hydrated = hydrateWireJob(encoded.wire, new Map());
@@ -317,7 +325,7 @@ test('wire aliases one chart/security/magnifier array and preserves proofs withi
   expect(hydrated.job.securityBars?.TEST).toBe(shared);
   expect(hydrated.job.securityProofs?.TEST).toBe(proof);
   expect(hydrated.job.securityProofs?.TEST?.acquisitionKey).toBe(
-    'security-dataset-acquisition-v2:wire-bound-proof',
+    'security-dataset-acquisition-v3:wire-bound-proof',
   );
   expect(Object.isFrozen(hydrated.job.securityProofs?.TEST)).toBe(true);
   expect(Object.isFrozen(hydrated.job.securityProofs?.TEST?.requestedCanonicalTfs)).toBe(true);
@@ -327,6 +335,11 @@ test('wire aliases one chart/security/magnifier array and preserves proofs withi
   expect(Object.isFrozen(hydrated.job.magnifier)).toBe(true);
   expect(Object.isFrozen(hydrated.job.magnifier?.coverage)).toBe(true);
   expect(Object.isFrozen(hydrated.job.magnifier?.provenance)).toBe(true);
+  expect(hydrated.job.magnifier?.provenance).toMatchObject({
+    coverageSemantics: 'complete-record',
+    recordSpan: { from: 1_700_000_000, to: 1_700_003_600 },
+  });
+  expect(Object.isFrozen(hydrated.job.magnifier?.provenance.recordSpan)).toBe(true);
   expect(Object.isFrozen(hydrated.job.magnifier?.alignmentEvidence)).toBe(true);
 });
 

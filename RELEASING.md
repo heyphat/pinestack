@@ -39,9 +39,15 @@ get the new version.
 
 - **Bun** locally, at the exact version pinned in `.github/workflows/release.yml`
   (`bun-version:`) — the compiled `pinerun` binaries are the product, and bun's
-  compiler output changes between versions, so the pin is what makes a release
-  reproducible. Check with `bun --version`; bump the pin (both workflows, piner's
-  workflows, and this line) deliberately.
+  compiler output changes between versions. Check with `bun --version`; bump the
+  pin (both workflows, piner's workflows, and this line) deliberately.
+  **Reproducibility caveat (measured on v0.5.0):** even at the same pinned Bun,
+  a local rebuild is _near_-identical but not bit-perfect against CI —
+  cross-compiled (CI Linux) vs native builds differ in ~34 bytes of Bun's
+  standalone-executable trailer (one metadata field + the 32-byte content hash
+  derived from it), with the other 59.5 MB byte-identical and `--version`/output
+  behavior identical. So verify a release against **`checksums.txt` from the
+  release assets**, not a local rebuild hash.
 - **Push rights to `heyphat/pinestack`** — the tag push is the release. The
   workflow needs no secrets: it authenticates with the built-in `GITHUB_TOKEN`
   (`permissions: contents: write` is already declared in `release.yml`).

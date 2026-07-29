@@ -29,7 +29,7 @@ pinerun scan <script.pine> [options]
 Plus the shared data-source, credential, execution, cache, metrics, and output
 flags — see [common options](./common-options.md):
 
-- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
+- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` · `--data-dir` · `--csv-alignment` · `--csv-week-anchor` · `--csv-calendar` · `--csv-complete-record` ([exact CSV](./csv-data.md#exact-acquisition-and-bar-magnifier)) (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--concurrency` · `--workers` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
 - **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills)) · `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier exact mode](./common-options.md#fill-model--bar-magnifier))
@@ -91,6 +91,14 @@ Deterministic in-process run (no worker threads):
 
 ```bash
 pinerun scan rsi.pine --symbols BTCUSDT --workers local
+```
+
+Mix an exact CSV instrument with the fallback live provider; the CSV claims
+configure the routed leaf without changing `--provider`:
+
+```bash
+pinerun scan strategy.pine --symbols CSV:AAPL,BI:BTCUSDT --tf 1h \
+  --provider binance --data-dir ./data --csv-calendar ./data/xnys-calendar.json
 ```
 
 Backtest a strategy across a universe, ranked by net profit, top 3:

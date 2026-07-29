@@ -22,6 +22,8 @@ export type {
   HistoryTruncation,
   HistorySessionCalendar,
   HistoryAlignment,
+  HistoryCoverageSemantics,
+  RecordCoverageEvidence,
   HistoryCapabilities,
   HistoryRequest,
   AcquisitionProvenance,
@@ -81,7 +83,11 @@ export {
 } from './acquisition.js';
 export type { AggregateAlignment, AggregateSpec } from './aggregate.js';
 export { HISTORY_AGGREGATION_VERSION, aggregateBars } from './aggregate.js';
-export type { CalendarSessionPeriod, HistoryAcquisitionFromBarsOptions } from './coverage.js';
+export type {
+  CalendarSessionPeriod,
+  HistoryAcquisitionFromBarsOptions,
+  RecordSpanFromBarsOptions,
+} from './coverage.js';
 export {
   assertCalendarPeriodCoverage,
   calendarPeriodIntersects,
@@ -94,6 +100,8 @@ export {
   snapshotHistoryTimeframes,
   snapshotResolvedHistorySource,
   historyAcquisitionFromBars,
+  historyCapabilityRecordSpan,
+  historyRecordSpanFromBars,
   isUtcWeekTimeframe,
   utcTimeframeAnchor,
   utcTimeframesNest,

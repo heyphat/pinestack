@@ -25,7 +25,7 @@ pinerun compare <a.pine> <b.pine> --symbol <sym> [options]
 
 Plus shared flags — see [common options](./common-options.md):
 
-- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
+- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` · `--data-dir` · `--csv-alignment` · `--csv-week-anchor` · `--csv-calendar` · `--csv-complete-record` ([exact CSV](./csv-data.md#exact-acquisition-and-bar-magnifier)) (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--no-security`
 - **Broker:** `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier exact mode](./common-options.md#fill-model--bar-magnifier)); one shared override applies to A and B while their source declarations remain independent
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`

@@ -15,10 +15,14 @@ import {
   isAssetClass,
   supportsPair,
   assetClassesForProvider,
+  snapshotHistorySessionCalendar,
+  unixSecond,
   type AssetClass,
   type DataProvider,
   type HistoryProvider,
   type HistoryRange,
+  type HistorySessionCalendar,
+  type UnixSecond,
 } from '@heyphat/pinery';
 import { cached, CsvProvider } from '@heyphat/pinery/node';
 import { createMagnifierResolutionScope, scan, type ScanReport } from './index.js';
@@ -46,6 +50,7 @@ import {
   drawdownChartAscii,
   sparkline,
   monthlyReturnsAscii,
+  monthlyTradesAscii,
   topDrawdownsAscii,
   profitHistogramAscii,
   correlationMatrixAscii,
@@ -680,14 +685,14 @@ function makeProgress(verb: string): {
 
 /**
  * The analysis tables shared by the backtest and portfolio tearsheets:
- * MONTHLY RETURNS and TOP DRAWDOWNS always print (they're stats, like the
- * blocks above them); the TRADE P/L histogram is a drawing, so it respects
- * `--no-chart` like the other charts.
+ * MONTHLY RETURNS, MONTHLY TRADES, and TOP DRAWDOWNS always print (they're
+ * stats, like the blocks above them); the TRADE P/L histogram is a drawing,
+ * so it respects `--no-chart` like the other charts.
  */
 function printAnalysisTables(
   equity: number[] | undefined,
   times: number[] | undefined,
-  trades: { profit: number }[] | undefined,
+  trades: { profit: number; exitTime: number }[] | undefined,
   chart: boolean,
 ): void {
   if (equity && times && equity.length === times.length && equity.length > 1) {
@@ -696,6 +701,15 @@ function printAnalysisTables(
       console.log('\n  MONTHLY RETURNS %');
       console.log(indent(monthly));
     }
+  }
+  if (trades && trades.length > 0) {
+    const tally = monthlyTradesAscii(trades, { color: useColor() });
+    if (tally) {
+      console.log('\n  MONTHLY TRADES  (win/loss/E even)');
+      console.log(indent(tally));
+    }
+  }
+  if (equity && times && equity.length === times.length && equity.length > 1) {
     const dd = topDrawdownsAscii(equity, times, { top: 5 });
     if (dd) {
       console.log('\n  TOP DRAWDOWNS');
@@ -1822,6 +1836,7 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
   if (provider === 'csv' && dataDir == null) {
     fail('--provider csv needs --data-dir <dir> (a directory of <SYMBOL>_<TF>.csv files)');
   }
+  const csvOptions = buildCsvProviderOptions(opts, dataDir);
   const requestedClass = legacy?.assetClass ?? opts.get('asset-class');
   if (
     requestedClass != null &&
@@ -1848,8 +1863,8 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
     feed: opts.get('feed') === 'sip' ? 'sip' : 'iex',
     providers: {
       csv:
-        dataDir != null
-          ? new CsvProvider({ dir: dataDir })
+        csvOptions != null
+          ? new CsvProvider(csvOptions)
           : {
               id: 'csv',
               history: async (symbol: string) => {
@@ -1862,6 +1877,166 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
       : (p) =>
           cached(p, { dir: opts.get('cache-dir'), refresh: forceRefresh || opts.has('refresh') }),
   });
+}
+
+interface CliCsvProviderOptions {
+  readonly dir: string;
+  readonly timeframes: 'arbitrary';
+  readonly alignment: 'utc-24x7' | 'exchange-calendar' | 'unknown';
+  readonly weekAnchorSec?: UnixSecond;
+  readonly calendar?: HistorySessionCalendar;
+  readonly coverageSemantics: 'bars-only' | 'complete-record';
+}
+
+/** Validate CLI-owned CSV assertions before constructing the one routed CSV leaf. */
+function buildCsvProviderOptions(
+  opts: Args,
+  dataDir: string | undefined,
+): CliCsvProviderOptions | undefined {
+  const alignmentRaw = requiredOptionValue(opts, 'csv-alignment');
+  const weekAnchorRaw = requiredOptionValue(opts, 'csv-week-anchor');
+  const calendarPath = requiredOptionValue(opts, 'csv-calendar');
+  const completeRecordValue = opts.get('csv-complete-record');
+  if (completeRecordValue !== undefined) {
+    fail('--csv-complete-record is a flag and does not take a value');
+  }
+  const completeRecord = opts.has('csv-complete-record');
+  const hasClaim =
+    alignmentRaw !== undefined ||
+    weekAnchorRaw !== undefined ||
+    calendarPath !== undefined ||
+    completeRecord;
+  if (dataDir == null) {
+    if (hasClaim) fail('CSV evidence options require --data-dir <dir>');
+    return undefined;
+  }
+  if (calendarPath !== undefined && (alignmentRaw !== undefined || weekAnchorRaw !== undefined)) {
+    fail('--csv-calendar cannot be used with --csv-alignment or --csv-week-anchor');
+  }
+  if (alignmentRaw !== undefined && alignmentRaw !== 'utc-24x7') {
+    fail(`invalid --csv-alignment "${alignmentRaw}": only utc-24x7 is supported`);
+  }
+  if (weekAnchorRaw !== undefined && alignmentRaw !== 'utc-24x7') {
+    fail('--csv-week-anchor requires --csv-alignment utc-24x7');
+  }
+  if (completeRecord && alignmentRaw === undefined && calendarPath === undefined) {
+    fail('--csv-complete-record requires explicit --csv-alignment or --csv-calendar evidence');
+  }
+
+  const calendar = calendarPath === undefined ? undefined : loadCsvCalendar(calendarPath);
+  return {
+    dir: dataDir,
+    timeframes: 'arbitrary',
+    alignment: calendar ? 'exchange-calendar' : (alignmentRaw ?? 'unknown'),
+    ...(weekAnchorRaw !== undefined ? { weekAnchorSec: parseCsvWeekAnchor(weekAnchorRaw) } : {}),
+    ...(calendar ? { calendar } : {}),
+    coverageSemantics: completeRecord ? 'complete-record' : 'bars-only',
+  };
+}
+
+function requiredOptionValue(opts: Args, key: string): string | undefined {
+  const value = opts.get(key);
+  if (value === undefined) return undefined;
+  if (value.length === 0 || value.startsWith('--')) {
+    fail(`--${key} requires an explicit value`);
+  }
+  return value;
+}
+
+function parseCsvWeekAnchor(raw: string): UnixSecond {
+  if (/^-?\d+$/.test(raw)) {
+    const value = Number(raw);
+    if (Number.isSafeInteger(value)) return unixSecond(value);
+    fail(`invalid --csv-week-anchor "${raw}": epoch seconds must be a safe integer`);
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) {
+    fail(`invalid --csv-week-anchor "${raw}": expected strict YYYY-MM-DD or integer seconds`);
+  }
+  const year = Number(match![1]);
+  const month = Number(match![2]);
+  const day = Number(match![3]);
+  const milliseconds = Date.UTC(year, month - 1, day);
+  const date = new Date(milliseconds);
+  if (
+    !Number.isFinite(milliseconds) ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    fail(`invalid --csv-week-anchor "${raw}": expected a real UTC calendar date`);
+  }
+  const seconds = milliseconds / 1_000;
+  if (!Number.isSafeInteger(seconds)) {
+    fail(`invalid --csv-week-anchor "${raw}": date is outside safe UNIX seconds`);
+  }
+  return unixSecond(seconds);
+}
+
+function loadCsvCalendar(path: string): HistorySessionCalendar {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    fail(`--csv-calendar ${path}: cannot read file: ${errorMessage(error)}`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text!);
+  } catch (error) {
+    fail(`--csv-calendar ${path}: invalid JSON: ${errorMessage(error)}`);
+  }
+  try {
+    assertStrictCsvCalendarShape(value);
+    return snapshotHistorySessionCalendar(value as HistorySessionCalendar);
+  } catch (error) {
+    const detail = error instanceof ExactHistoryError ? ` [${error.code}]` : '';
+    fail(`--csv-calendar ${path}:${detail} ${errorMessage(error)}`);
+  }
+}
+
+function assertStrictCsvCalendarShape(value: unknown): void {
+  if (!isPlainObject(value)) throw new Error('calendar document must be a JSON object');
+  assertOnlyKeys(value, ['calendarId', 'version', 'coverage', 'sessions', 'periods'], 'calendar');
+  assertStrictCalendarInterval(value.coverage, 'coverage');
+  if (!Array.isArray(value.sessions)) throw new Error('sessions must be an array');
+  value.sessions.forEach((interval, index) =>
+    assertStrictCalendarInterval(interval, `sessions[${index}]`),
+  );
+  if (value.periods !== undefined) {
+    if (!isPlainObject(value.periods)) throw new Error('periods must be an object');
+    for (const [timeframe, intervals] of Object.entries(value.periods)) {
+      if (!Array.isArray(intervals)) throw new Error(`periods.${timeframe} must be an array`);
+      intervals.forEach((interval, index) =>
+        assertStrictCalendarInterval(interval, `periods.${timeframe}[${index}]`),
+      );
+    }
+  }
+}
+
+function assertStrictCalendarInterval(value: unknown, label: string): void {
+  if (!isPlainObject(value)) throw new Error(`${label} must be an object`);
+  assertOnlyKeys(value, ['from', 'to'], label);
+  if (!Number.isSafeInteger(value.from) || !Number.isSafeInteger(value.to)) {
+    throw new Error(`${label} boundaries must be safe integer UNIX seconds`);
+  }
+}
+
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) throw new Error(`${label} contains unknown key "${unknown[0]}"`);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }
 
 /**
@@ -2014,6 +2189,9 @@ const VALUE_KEYS = new Set([
   'provider',
   'asset-class',
   'data-dir',
+  'csv-alignment',
+  'csv-week-anchor',
+  'csv-calendar',
   'workers',
   'cache-dir',
   'feed',
@@ -2114,6 +2292,7 @@ function parseArgs(args: string[]): Args {
       list.push(value);
       multi.set(key, list);
     } else {
+      if (values.has(key)) fail(`duplicate scalar option --${key}`);
       values.set(key, value);
     }
   };
@@ -2315,6 +2494,18 @@ INIT EXAMPLE
                           (e.g. BTCUSDT_1h.csv) with header
                           time,open,high,low,close,volume; optional
                           instruments.csv sidecar (symbol,minQty,mintick)
+  --csv-alignment <utc-24x7>
+                        Assert that CSV opens use the UTC fixed bar grid. This is
+                          a host assertion: pinerun validates observed grids but
+                          cannot prove session data was labelled correctly.
+  --csv-week-anchor <YYYY-MM-DD|seconds>
+                        Opening timestamp on the asserted UTC weekly grid
+  --csv-calendar <file.json>
+                        Authoritative exchange-session calendar JSON; conflicts
+                          with --csv-alignment and --csv-week-anchor
+  --csv-complete-record Assert absent bars inside each exact file's authenticated
+                          record span mean no trades. Requires explicit alignment
+                          or calendar evidence and <SYMBOL>_<TF>.csv files.
   CREDENTIALS (equities providers — Alpaca / Massive)
     Prefer environment variables — a key on the command line lands in shell
     history and process listings:
@@ -2375,9 +2566,10 @@ EXAMPLE
                           every <sec> seconds (default 60, min 5). Needs a
                           terminal; Ctrl-C exits. Incompatible with --json.
   --no-chart            Skip the in-terminal price/equity/drawdown charts and
-                          the trade P/L histogram (the MONTHLY RETURNS and TOP
-                          DRAWDOWNS tables always print)
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
+                          the trade P/L histogram (the MONTHLY RETURNS, MONTHLY
+                          TRADES, and TOP DRAWDOWNS tables always print)
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --csv-complete-record,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --mintick, --min-qty, --calc-on-order-fills / --no-calc-on-order-fills,
   --bar-magnifier / --no-bar-magnifier, --csv,
@@ -2386,7 +2578,9 @@ EXAMPLE
   Prints a full tearsheet: returns (net/gross, buy & hold, CAGR), risk (drawdown,
   volatility, Sharpe/Sortino/Calmar, exposure), and trade quality (win rate,
   profit factor, expectancy, streaks), then MONTHLY RETURNS (year × month %
-  grid), TOP DRAWDOWNS (the 5 deepest episodes with recovery dates), and a
+  grid), MONTHLY TRADES (the same grid tallying closed trades as win/loss/E
+  counts, green/red on a TTY),
+  TOP DRAWDOWNS (the 5 deepest episodes with recovery dates), and a
   TRADE P/L DISTRIBUTION histogram. The ledger + equity curve are always
   computed, so --csv / --plot / --json need no extra flags. Charts: a PRICE
   panel (close line, each trade marked at its fill price — ▲ long / ▼ short
@@ -2409,7 +2603,8 @@ BACKTEST EXAMPLE
   --input-b name=value  Fixed input override for script B (REPEATABLE)
   --label-a / --label-b Column/legend labels (default: the script filenames)
   --no-chart            Skip the equity overlay
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --csv-complete-record,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --bar-magnifier / --no-bar-magnifier, --no-security, --no-cache,
   --cache-dir, --refresh, --json   (as scan; one shared magnifier override is
@@ -2442,12 +2637,13 @@ COMPARE EXAMPLES
   --trades              Also print the merged, symbol-tagged ledger
                           (>20 trades elide to the first/last 5 rows)
   --no-chart            Skip the in-terminal equity/drawdown/sleeve charts and
-                          the trade P/L histogram (MONTHLY RETURNS, TOP
-                          DRAWDOWNS, and the isolated-mode SLEEVE RETURN
-                          CORRELATION matrix always print)
+                          the trade P/L histogram (MONTHLY RETURNS, MONTHLY
+                          TRADES, TOP DRAWDOWNS, and the isolated-mode SLEEVE
+                          RETURN CORRELATION matrix always print)
   --csv <dir>           portfolio-trades/equity.csv + per-sleeve CSVs
   --plot <dir>          portfolio.html + per-sleeve equity/drawdown charts
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --csv-complete-record,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --concurrency, --no-security, --no-cache, --cache-dir, --refresh,
   --json   (as scan)
@@ -2493,7 +2689,8 @@ PORTFOLIO EXAMPLE
                           strategy stats, error) — the whole optimization surface,
                           pandas-ready; cheap (no ledgers, unlike --csv)
   --tf, --from, --to, --limit, --rank, --top, --asc, --trades, --no-chart,
-  --concurrency, --workers, --backend, --provider, --asset-class, --data-dir, --api-key,
+  --concurrency, --workers, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --csv-complete-record, --api-key,
   --api-secret, --feed, --periods-per-year, --risk-free-rate, --mintick, --min-qty,
   --calc-on-order-fills / --no-calc-on-order-fills,
   --bar-magnifier / --no-bar-magnifier, --csv, --plot,
@@ -2534,7 +2731,8 @@ SWEEP EXAMPLES
   --rank <spec>         Metric that picks each window's winner
                           (default strategy.netProfit)
   --tf, --from, --to, --limit, --concurrency, --workers, --backend, --provider,
-  --asset-class, --data-dir, --api-key, --api-secret, --feed, --periods-per-year,
+  --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --csv-complete-record, --api-key, --api-secret, --feed, --periods-per-year,
   --risk-free-rate, --max-combos, --mintick, --min-qty,
   --calc-on-order-fills / --no-calc-on-order-fills,
   --bar-magnifier / --no-bar-magnifier, --no-security, --no-cache,

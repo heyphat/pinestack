@@ -1,19 +1,22 @@
 # CSV data files
 
-Run any pinerun command on **local CSV files** instead of a live provider —
-exported exchange data, vendor downloads, or synthetic series. Point
-`--data-dir` at a directory of files and either make csv the provider for every
-bare ticker (`--provider csv`) or address individual symbols with the `CSV:`
-prefix inside a mixed universe.
+Run any pinerun analysis command on local CSV files. Point `--data-dir` at the
+directory, then either select CSV as the fallback provider or address only the
+CSV instruments in a mixed universe:
 
 ```bash
-# everything from files
+# Every bare ticker comes from files.
 pinerun backtest strategy.pine --symbol BTCUSDT --tf 1h \
   --provider csv --data-dir ./data
 
-# mixed: AAPL from a file, BTCUSDT live from binance
-pinerun scan strategy.pine --symbols CSV:AAPL,BI:BTCUSDT --tf 1d --data-dir ./data
+# Only AAPL comes from CSV; BTCUSDT still uses Binance.
+pinerun scan strategy.pine --symbols CSV:AAPL,BI:BTCUSDT --tf 1d \
+  --provider binance --data-dir ./data
 ```
+
+CSV-specific evidence flags configure the CSV leaf created by `--data-dir`.
+They do **not** require `--provider csv`, so they also work with `CSV:` symbols
+in mixed routing.
 
 A runnable sample lives in [`examples/data/`](../examples/data/):
 
@@ -24,27 +27,29 @@ pinerun backtest examples/sma-cross-param.pine --symbol BTCUSDT --tf 1h \
 
 ## File layout
 
-One file per (symbol, timeframe), named `<SYMBOL>_<TF>.csv`, all in the data
-directory:
+Use one file per symbol and canonical timeframe:
 
-```
+```text
 data/
+  BTCUSDT_10m.csv
   BTCUSDT_1h.csv
   BTCUSDT_1d.csv
-  BTC_USD_1h.csv        # symbol BTC/USD — non-alphanumerics become _
-  instruments.csv       # optional sidecar (see below)
+  BTC_USD_1h.csv        # symbol BTC/USD; non-alphanumerics become _
+  instruments.csv      # optional sidecar
 ```
 
-- Symbols are sanitized for the filename: every run of non-alphanumeric
-  characters becomes `_` (`BTC/USD` → `BTC_USD`), the same convention as the
-  `.pinery-cache` filenames. Matching is case-insensitive.
-- `<TF>` is the canonical timeframe token you pass to `--tf`: `1m 5m 15m 1h 4h
-1d 1w …`.
-- A bare `<SYMBOL>.csv` (no timeframe suffix) is accepted as a fallback for any
-  timeframe, but only if its median bar spacing roughly matches the requested
-  timeframe — a file of 1h bars will refuse to serve a `--tf 1d` run instead of
-  silently producing wrong results. A single-row file has no spacing to verify,
-  so the fallback refuses it; give it the explicit `<SYMBOL>_<TF>.csv` name.
+- Exact filenames are `<SYMBOL>_<TF>.csv`, where `<TF>` is a canonical token
+  such as `1m`, `10m`, `1h`, `1d`, or `1w`. Matching is case-insensitive.
+- Symbols use `_` for each run of non-alphanumeric characters (`BTC/USD` →
+  `BTC_USD`), matching `.pinery-cache` naming.
+- A CLI-created CSV leaf advertises `timeframes: 'arbitrary'`: exact planning
+  discovers every canonical `<SYMBOL>_<TF>.csv` available for that symbol. It
+  can therefore use the mapped target file directly or select the largest
+  exact divisor available for aggregation.
+- A bare `<SYMBOL>.csv` remains a legacy fallback. Its median spacing must match
+  the requested timeframe, and one-row fallback files are rejected because
+  their spacing cannot be inferred. Complete-record mode never accepts a bare
+  fallback; use an explicit `<SYMBOL>_<TF>.csv` contract.
 
 ## Row format
 
@@ -54,26 +59,125 @@ time,open,high,low,close,volume
 2024-01-01T01:00:00Z,42350,42600,42200,42500,987.1
 ```
 
-- **Header row required.** Columns are matched by name (case-insensitive), in
-  any order; extra columns are ignored. `volume` is optional (defaults to 0);
-  the other five are required.
-- Fields may be RFC 4180-quoted (`"time","open",…` — the style most vendor
-  exports use); `""` inside a quoted field is a literal quote. Newlines inside
-  quoted fields are not supported.
-- **`time` is the bar OPEN time**, as unix seconds (`1704067200`), unix
-  milliseconds (auto-detected), or an ISO-8601 string (`2024-01-01T00:00:00Z`).
-- Rows may be in any order — they are sorted ascending. Duplicate timestamps
-  keep the last row (a re-export overwrites, it does not double bars).
-- A row with a missing or non-numeric cell fails the run with its line number —
-  bad data errors loudly rather than backtesting on NaNs.
-- `--from`/`--to`/`--limit` apply as usual, as a filter over the file's rows.
+- The header is required. Columns are case-insensitive and order-independent;
+  extra columns are ignored. `volume` is optional and defaults to `0`; the
+  other five fields are required.
+- RFC 4180-quoted fields are accepted. Newlines inside quoted fields are not.
+- `time` is the bar **open**. Unix seconds, auto-detected Unix milliseconds,
+  and ISO-8601 strings are accepted by ordinary CSV loading. Exact acquisition
+  requires the resulting open to be a whole, safe Unix second.
+- Every OHLCV value must be finite, with valid OHLC bounds. Exact rows must also
+  be strictly ascending, have unique opens, and lie on the asserted UTC or
+  exchange-session grid.
+- Ordinary `history()` preserves the compatibility behavior: it sorts rows and
+  keeps the last row at a duplicate timestamp. Exact acquisition deliberately
+  never sorts or deduplicates. An out-of-order or duplicate exact record fails
+  rather than silently changing the authenticated dataset.
+- Missing or invalid cells fail with their CSV line number.
+- `--from`, `--to`, and `--limit` select from the file as usual. In
+  complete-record mode the full exact file is parsed and validated before the
+  requested range is selected so its authenticated record span is stable.
+
+## Exact acquisition and Bar Magnifier
+
+CSV exact mode is disabled by default because a file alone does not prove its
+market-session alignment. Supply one explicit host assertion:
+
+```bash
+# Fixed UTC 24×7 grids.
+pinerun backtest strategy.pine --symbol CSV:BTCUSDT --tf 1h \
+  --data-dir ./data --csv-alignment utc-24x7
+
+# Weekly files may identify any opening timestamp on their weekly grid.
+pinerun backtest strategy.pine --symbol CSV:BTCUSDT --tf 1w \
+  --data-dir ./data --csv-alignment utc-24x7 --csv-week-anchor 2024-01-01
+
+# Exchange-session grids use a strict calendar document.
+pinerun backtest strategy.pine --symbol CSV:AAPL --tf 1d \
+  --data-dir ./data --csv-calendar ./data/xnys-calendar.json
+```
+
+| Flag                                      | Meaning                                                                                                                                     |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--csv-alignment utc-24x7`                | Assert that every CSV bar uses the UTC fixed 24×7 grid. No other value is accepted.                                                         |
+| `--csv-week-anchor <YYYY-MM-DD\|seconds>` | Identify an opening timestamp on the weekly grid. Requires UTC alignment; accepts only a real strict UTC date or safe integer Unix seconds. |
+| `--csv-calendar <file.json>`              | Load authoritative exchange-session metadata. The path is required and conflicts with alignment/week-anchor flags.                          |
+| `--csv-complete-record`                   | Assert complete-record semantics within each exact file's authenticated span. Requires an explicit alignment or calendar claim.             |
+
+These are assertions about host data. Pinerun validates observed source and
+chart grids, but cannot prove that session-market bars were correctly labelled
+as 24×7 or that a vendor omitted every no-trade interval consistently. Exact CSV
+also does not imply TradingView-feed parity.
+
+A chart-grid failure and a lower-timeframe failure are different diagnostics:
+the chart bars themselves must open on the authenticated chart grid, while the
+mapped target/source files must independently satisfy their lower-timeframe
+grid and coverage. Correctly aligned LTF files cannot make off-grid chart opens
+valid, and aligned chart bars cannot repair malformed LTF rows.
+
+Without an alignment/calendar assertion, Bar Magnifier and exact static
+`request.security` fail with `unknown-alignment`. Unsupported native/divisor
+sets, unsafe timestamps, missing coverage, and malformed grids also fail closed;
+nonempty fragments are never treated as exact success.
+
+## Exchange calendar JSON
+
+`--csv-calendar` requires an explicit JSON path. The document mirrors the
+history-session contract exactly:
+
+```json
+{
+  "calendarId": "XNYS",
+  "version": "2026a",
+  "coverage": { "from": 1767225600, "to": 1798761600 },
+  "sessions": [{ "from": 1767364200, "to": 1767387600 }],
+  "periods": {
+    "1d": [{ "from": 1767364200, "to": 1767387600 }]
+  }
+}
+```
+
+Only `calendarId`, `version`, `coverage`, `sessions`, and optional `periods`
+are allowed. Every interval contains only `from` and `to`, uses safe integer
+Unix seconds, is half-open (`from < to`), ordered, non-overlapping, and covered
+by the calendar envelope. `periods` keys must be canonical day/week timeframes;
+their intervals must satisfy the declared session partition. Unknown keys,
+unsafe boundaries, overlap, missing files, invalid JSON, and semantic calendar
+errors are rejected with the file path and reason. Calendar identity, version,
+sessions, and `periods` participate in exact source/proof identity.
+
+## Complete-record assertion
+
+By default CSV uses **bars-only** coverage: only returned bar intervals and
+calendar closures prove coverage. A missing active source bar is therefore a
+gap, preserving existing fail-closed behavior.
+
+`--csv-complete-record` makes the stronger assertion that each explicit exact
+file is the complete source record over its own span, so a missing bar inside
+that span means “no trade,” not “missing data.” The span begins at the first bar
+open and ends at the final bar's exact effective close. It is authenticated in
+source/acquisition identities, magnifier and static-security proofs, worker
+transport, and walk-forward prefixes.
+
+Consequences:
+
+- sparse source buckets inside the span may remain covered;
+- a partially populated aggregate uses its available source rows in order;
+- an empty aggregate bucket emits no target bar but remains covered, allowing
+  piner's chart-OHLC fallback for that target bucket;
+- a bucket crossing either record edge remains incomplete;
+- requests before or after the span remain gaps;
+- empty exact files and bare fallback files are rejected;
+- a one-row explicitly named file is valid and spans exactly that source bar.
+
+Use this flag only when the producer guarantees the claim. It does not prove
+that missing lower-timeframe bars match TradingView's feed.
 
 ## Instrument metadata
 
-Exchange providers report each symbol's lot step and tick size automatically;
-files can't, so runs on CSV data use piner's defaults (`minQty 0.001`, `mintick
-0.01`) unless you say otherwise. Either pass `--min-qty`/`--mintick`, or drop an
-`instruments.csv` sidecar in the data directory:
+Exchange providers report lot step and tick size automatically. CSV runs use
+piner's defaults (`minQty 0.001`, `mintick 0.01`) unless you pass
+`--min-qty`/`--mintick` or provide `instruments.csv`:
 
 ```csv
 symbol,minQty,mintick
@@ -81,27 +185,25 @@ BTCUSDT,0.001,0.1
 AAPL,1,0.01
 ```
 
-`symbol` plus at least one of `minQty`/`mintick`; blank cells fall through to
-the defaults, but a non-blank invalid value (non-numeric, zero, or negative)
-fails the run with its line number — a typo'd lot step must not silently become
-the default. This matters for TradingView parity — the broker truncates derived
-order sizes and margin-call liquidation quantities to the lot step, and rounds
-levels/slippage to the tick size.
+`symbol` plus at least one metadata field is required. Blank fields fall through
+to defaults; non-blank nonnumeric, zero, or negative values fail with their line
+number. Lot step affects derived order sizes and margin-call liquidation; tick
+size affects levels and slippage.
 
 ## Notes
 
-- CSV history bypasses the on-disk cache (`.pinery-cache`) — the files _are_
-  the storage, so `--no-cache`/`--refresh` don't apply to them.
-- Cross-symbol `request.security` dependencies follow the same addressing
-  rules as `--symbols`: a bare ticker resolves against `--provider`, so with
-  `--provider csv` a script that requests `ETHUSDT` at `1d` needs
-  `ETHUSDT_1d.csv` present. In a **mixed universe** (csv addressed per symbol,
-  another provider as fallback), qualify the dependency —
-  `request.security("CSV:MSFT", …)` — or it goes to the fallback provider. A
-  dependency that can't be fetched (e.g. a missing file) degrades to `na` and
-  prints a warning naming the dependency — this happens whenever resolution is
-  enabled, not only under `--no-security` (which skips resolution entirely and
-  degrades everything silently by design). Lower-timeframe requests on the
-  chart symbol itself keep its address and need no qualifying.
-- Programmatic use: `new CsvProvider({ dir })` from `@heyphat/pinery/node` is a
-  regular `HistoryProvider` — pass it straight to `backtest()`, `scan()`, etc.
+- CSV files are the storage, so their direct history path bypasses the ordinary
+  on-disk cache. Exact identities fingerprint relevant file content and verify
+  it again during acquisition.
+- Cross-symbol `request.security` follows normal routing. A bare dependency
+  resolves against `--provider`; qualify it as `CSV:MSFT` in a mixed universe
+  when the dependency must use the CSV leaf. Lower-timeframe requests on the
+  addressed chart symbol preserve that symbol address.
+- Outside Bar Magnifier exact mode, an unavailable security dependency degrades
+  to `na`/`[]` with a warning. Exact mode requires every static dependency and
+  does not permit that degradation; `--no-security` cannot bypass it.
+- Programmatic use remains backward compatible: `new CsvProvider({ dir })` from
+  `@heyphat/pinery/node` defaults to unknown alignment, no advertised exact
+  timeframes, and bars-only semantics. Supply `timeframes`, `alignment` or
+  `calendar`, and optional `coverageSemantics` explicitly when exact behavior
+  is intended.

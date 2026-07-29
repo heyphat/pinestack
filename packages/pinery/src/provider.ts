@@ -83,6 +83,15 @@ export interface HistorySessionCalendar {
 
 export type HistoryAlignment = 'utc-24x7' | 'exchange-calendar' | 'unknown';
 
+/** How absence of a returned bar may be interpreted as coverage evidence. */
+export type HistoryCoverageSemantics = 'bars-only' | 'complete-record';
+
+/** Authenticated evidence describing the source record represented by an acquisition. */
+export interface RecordCoverageEvidence {
+  readonly coverageSemantics: HistoryCoverageSemantics;
+  readonly recordSpan?: HalfOpenIntervalSec;
+}
+
 export interface HistoryCapabilities {
   /** Canonical timeframes requestable from this exact resolved source. */
   readonly timeframes: readonly string[] | 'arbitrary';
@@ -97,6 +106,12 @@ export interface HistoryCapabilities {
   readonly weekAnchorSec?: UnixSecond;
   /** Required whenever `alignment` is `exchange-calendar`. */
   readonly calendar?: HistorySessionCalendar;
+  /** Defaults to `bars-only` when omitted by a backward-compatible provider. */
+  readonly coverageSemantics?: HistoryCoverageSemantics;
+  /** Optional source-wide span; per-timeframe spans belong in acquisition provenance. */
+  readonly recordSpan?: HalfOpenIntervalSec;
+  /** Trusted per-timeframe spans for sources serving multiple exact datasets. */
+  readonly recordSpans?: Readonly<Record<string, HalfOpenIntervalSec>>;
 }
 
 /** Exact-source request. `requested` is logical; `query` may add bucket padding. */
@@ -114,6 +129,10 @@ export interface AcquisitionProvenance {
   readonly alignment: string;
   /** Exact UTC week-unit opening anchor carried from the resolved capability. */
   readonly weekAnchorSec?: UnixSecond;
+  /** Explicit on newly produced acquisitions; omitted legacy evidence means `bars-only`. */
+  readonly coverageSemantics?: HistoryCoverageSemantics;
+  /** Required and authenticated whenever coverageSemantics is `complete-record`. */
+  readonly recordSpan?: HalfOpenIntervalSec;
   readonly aggregationVersion: number;
 }
 

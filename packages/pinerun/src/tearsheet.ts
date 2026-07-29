@@ -2,7 +2,8 @@
  * Tearsheet tables — pure string builders (browser-safe, no I/O).
  *
  * `monthlyReturnsAscii` renders the classic year × month % grid off an equity
- * curve; `topDrawdownsAscii` tables the deepest peak→trough→recovery episodes;
+ * curve; `monthlyTradesAscii` tallies closed trades per exit month in the same
+ * grid; `topDrawdownsAscii` tables the deepest peak→trough→recovery episodes;
  * `profitHistogramAscii` buckets closed-trade profits into a horizontal-bar
  * distribution; `correlationMatrixAscii` prints a pairwise return-correlation
  * grid for aligned series. Monochrome and pipe-safe by default; the `color`
@@ -129,6 +130,106 @@ export function monthlyReturnsAscii(
     yearStart = yearEnd.equity;
     const cells = Array.from({ length: 12 }, (_, m) => cell(row[m]));
     lines.push(`  ${year}${cells.join('')}${cell(yearRet, cellW + 2)}`);
+  }
+  return lines.join('\n');
+}
+
+export interface MonthlyTradesOptions {
+  /** Paint win tallies green and loss tallies red. Default false. */
+  color?: boolean;
+}
+
+interface MonthTradeTally {
+  wins: number;
+  losses: number;
+  evens: number;
+}
+
+/**
+ * Year × month closed-trade tally grid in the MONTHLY RETURNS layout. Each
+ * trade counts toward its exit month (UTC) — the month its P/L is realized,
+ * matching the equity-based returns grid. Cells list only nonzero tallies in
+ * wins/losses/evens order (`5/3`, `5/2/1E`, `5/3E`); wins and losses are bare
+ * counts told apart by color (green/red), evens keep their `E` suffix because
+ * they have no color. Months without closed trades print `·`, and the YEAR
+ * column totals the row. Returns '' when no trade has a finite profit and
+ * exit time.
+ */
+export function monthlyTradesAscii(
+  trades: readonly { profit: number; exitTime: number }[],
+  opts: MonthlyTradesOptions = {},
+): string {
+  const byYear = new Map<number, MonthTradeTally[]>();
+  for (const trade of trades) {
+    if (!Number.isFinite(trade.profit) || !Number.isFinite(trade.exitTime)) continue;
+    const d = new Date(toMs(trade.exitTime));
+    let row = byYear.get(d.getUTCFullYear());
+    if (!row) {
+      row = Array.from({ length: 12 }, () => ({ wins: 0, losses: 0, evens: 0 }));
+      byYear.set(d.getUTCFullYear(), row);
+    }
+    const tally = row[d.getUTCMonth()]!;
+    if (trade.profit > 0) tally.wins++;
+    else if (trade.profit < 0) tally.losses++;
+    else tally.evens++;
+  }
+  if (byYear.size === 0) return '';
+
+  const color = opts.color === true;
+  const cellParts = (t: MonthTradeTally): { plain: string; painted: string } | undefined => {
+    const segments: [count: number, unit: string, ansi?: number][] = [
+      [t.wins, '', GREEN],
+      [t.losses, '', RED],
+      [t.evens, 'E'],
+    ];
+    const present = segments.filter(([count]) => count > 0);
+    if (present.length === 0) return undefined;
+    return {
+      plain: present.map(([count, unit]) => `${count}${unit}`).join('/'),
+      painted: present
+        .map(([count, unit, ansi]) =>
+          ansi === undefined ? `${count}${unit}` : paint(`${count}${unit}`, ansi, color),
+        )
+        .join('/'),
+    };
+  };
+
+  const years = [...byYear.keys()];
+  const rows: {
+    year: number;
+    months: (ReturnType<typeof cellParts> | undefined)[];
+    total: ReturnType<typeof cellParts> | undefined;
+  }[] = [];
+  for (let year = Math.min(...years); year <= Math.max(...years); year++) {
+    const row = byYear.get(year);
+    const totals = { wins: 0, losses: 0, evens: 0 };
+    for (const t of row ?? []) {
+      totals.wins += t.wins;
+      totals.losses += t.losses;
+      totals.evens += t.evens;
+    }
+    rows.push({
+      year,
+      months: Array.from({ length: 12 }, (_, m) => (row ? cellParts(row[m]!) : undefined)),
+      total: cellParts(totals),
+    });
+  }
+
+  const widest = (cells: (ReturnType<typeof cellParts> | undefined)[]): number =>
+    Math.max(1, ...cells.map((c) => (c ? c.plain.length : 0)));
+  const cellW = Math.max(7, widest(rows.flatMap((r) => r.months)) + 2);
+  const yearW = Math.max(cellW + 2, widest(rows.map((r) => r.total)) + 2);
+  // Pad BEFORE painting so ANSI codes never disturb the column alignment.
+  const cell = (c: ReturnType<typeof cellParts> | undefined, w: number): string =>
+    c === undefined ? '·'.padStart(w) : ' '.repeat(w - c.plain.length) + c.painted;
+
+  const lines: string[] = [];
+  lines.push(
+    `      ${MONTH_LABELS.map((m) => m.padStart(cellW)).join('')}${'YEAR'.padStart(yearW)}`,
+  );
+  for (const r of rows) {
+    const cells = r.months.map((c) => cell(c, cellW));
+    lines.push(`  ${r.year}${cells.join('')}${cell(r.total, yearW)}`);
   }
   return lines.join('\n');
 }

@@ -9,6 +9,7 @@ import {
   snapshotHistorySessionCalendar,
   utcTimeframeAnchor,
   utcTimeframesNest,
+  validateHistoryAcquisition,
   type HistorySessionCalendar,
   type UnixSecond,
 } from '@heyphat/pinery';
@@ -297,6 +298,13 @@ export function assertResolvedMagnifierDatasetForJob(
     dataset.provenance.alignment.length === 0 ||
     (dataset.provenance.weekAnchorSec !== undefined &&
       !Number.isSafeInteger(dataset.provenance.weekAnchorSec)) ||
+    (dataset.provenance.coverageSemantics !== undefined &&
+      dataset.provenance.coverageSemantics !== 'bars-only' &&
+      dataset.provenance.coverageSemantics !== 'complete-record') ||
+    ((dataset.provenance.coverageSemantics ?? 'bars-only') === 'complete-record' &&
+      !validSecondInterval(dataset.provenance.recordSpan)) ||
+    ((dataset.provenance.coverageSemantics ?? 'bars-only') === 'bars-only' &&
+      dataset.provenance.recordSpan !== undefined) ||
     !Number.isSafeInteger(dataset.provenance.aggregationVersion) ||
     dataset.provenance.aggregationVersion < 0
   ) {
@@ -418,7 +426,10 @@ export function assertResolvedMagnifierDatasetForJob(
   if (!millisecondIntervalsCover(dataset.coverage.covered, dataset.coverage.requested)) {
     mismatch('coverage-covered-envelope');
   }
-  if (alignmentEvidence && !magnifierCoverageMatchesBars(dataset, alignmentEvidence)) {
+  if (
+    alignmentEvidence &&
+    !magnifierCoverageMatchesAuthenticatedEvidence(dataset, alignmentEvidence)
+  ) {
     mismatch('coverage-evidence');
   }
 
@@ -545,6 +556,56 @@ interface MagnifierIntervalMs {
   readonly to: number;
 }
 
+/** Reconstruct coverage under the authenticated bars-only or complete-record contract. */
+function magnifierCoverageMatchesAuthenticatedEvidence(
+  dataset: ResolvedMagnifierDataset,
+  evidence: ValidatedMagnifierAlignmentEvidence,
+): boolean {
+  if ((dataset.provenance.coverageSemantics ?? 'bars-only') !== 'complete-record') {
+    return magnifierCoverageMatchesBars(dataset, evidence);
+  }
+  if (!validSecondInterval(dataset.provenance.recordSpan)) return false;
+  const seconds = (value: number): number =>
+    Number.isSafeInteger(value) && value % 1_000 === 0 ? value / 1_000 : NaN;
+  try {
+    validateHistoryAcquisition(
+      {
+        bars: dataset.barsMs.map((bar) => ({ ...bar, time: seconds(bar.time) })),
+        requested: {
+          from: seconds(dataset.coverage.requested.from),
+          to: seconds(dataset.coverage.requested.to),
+        } as import('@heyphat/pinery').HalfOpenIntervalSec,
+        covered: dataset.coverage.covered.map((interval) => ({
+          from: seconds(interval.from),
+          to: seconds(interval.to),
+        })) as import('@heyphat/pinery').HalfOpenIntervalSec[],
+        gaps: dataset.coverage.gaps.map((gap) => ({
+          from: seconds(gap.from),
+          to: seconds(gap.to),
+          reason: gap.reason,
+        })) as import('@heyphat/pinery').CoverageGapSec[],
+        complete: dataset.coverage.complete,
+        provenance: dataset.provenance,
+      },
+      {
+        cacheIdentity: dataset.provenance.cacheIdentity,
+        normalizedSymbol: dataset.provenance.normalizedSymbol,
+        sourceTimeframe: dataset.provenance.sourceTimeframe,
+        targetTimeframe: dataset.targetCanonicalTf,
+        aggregationVersion: dataset.provenance.aggregationVersion,
+        alignment: evidence.alignment,
+        weekAnchorSec: evidence.weekAnchorSec,
+        calendar: evidence.calendar,
+        coverageSemantics: 'complete-record',
+        recordSpan: dataset.provenance.recordSpan,
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Reconstruct target-grid coverage directly from barsMs without copying its rows. */
 function magnifierCoverageMatchesBars(
   dataset: ResolvedMagnifierDataset,
@@ -669,6 +730,17 @@ function validMagnifierBar(bar: Readonly<Bar>): boolean {
     values.every(Number.isFinite) &&
     bar.high >= Math.max(bar.open, bar.low, bar.close) &&
     bar.low <= Math.min(bar.open, bar.high, bar.close)
+  );
+}
+
+function validSecondInterval(
+  value: unknown,
+): value is import('@heyphat/pinery').HalfOpenIntervalSec {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.from) &&
+    Number.isSafeInteger(value.to) &&
+    (value.from as number) < (value.to as number)
   );
 }
 

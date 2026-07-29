@@ -93,12 +93,14 @@ export {
 } from './chart.js';
 export type {
   MonthlyReturnsOptions,
+  MonthlyTradesOptions,
   TopDrawdownsOptions,
   ProfitHistogramOptions,
   DrawdownEpisode,
 } from './tearsheet.js';
 export {
   monthlyReturnsAscii,
+  monthlyTradesAscii,
   topDrawdownsAscii,
   drawdownEpisodes,
   profitHistogramAscii,

@@ -379,7 +379,7 @@ test('exact acquisition aggregates the selected divisor with UTC OHLCV semantics
   expect(acquisition.gaps).toEqual([]);
   expect(acquisition.provenance.sourceTimeframe).toBe('1m');
   expect(acquisition.provenance.targetTimeframe).toBe('2m');
-  expect(acquisition.provenance.aggregationVersion).toBe(3);
+  expect(acquisition.provenance.aggregationVersion).toBe(4);
 });
 
 test('query padding can prove logical edge coverage but never extends reported coverage', async () => {
@@ -554,7 +554,7 @@ test('intraday aggregation pads and consumes the whole shortened 1d session', as
     { time: open, open: 10, high: 14, low: 9, close: 13, volume: 6 },
   ]);
   expect(acquisition.covered).toEqual([{ from: open + 60, to: open + 120 }]);
-  expect(acquisition.provenance.aggregationVersion).toBe(3);
+  expect(acquisition.provenance.aggregationVersion).toBe(4);
 });
 
 test('weekly aggregation uses one 1d member per selected session across holidays', async () => {
@@ -597,7 +597,7 @@ test('weekly aggregation uses one 1d member per selected session across holidays
   expect(acquisition.provenance).toMatchObject({
     sourceTimeframe: '1d',
     targetTimeframe: '1w',
-    aggregationVersion: 3,
+    aggregationVersion: 4,
   });
 });
 
@@ -1313,7 +1313,7 @@ test('authoritative calendar periods group split sessions into one native and ag
     { time: open, open: 10, high: 23, low: 9, close: 22, volume: 4 },
   ]);
   expect(aggregated.covered).toEqual([requested]);
-  expect(aggregated.provenance.aggregationVersion).toBe(3);
+  expect(aggregated.provenance.aggregationVersion).toBe(4);
 });
 
 test('malformed authoritative calendar periods fail before identity or acquisition', () => {
@@ -1401,7 +1401,7 @@ test('authoritative split-session daily bars compose into one weekly aggregate',
   expect(acquisition.provenance).toMatchObject({
     sourceTimeframe: '1d',
     targetTimeframe: '1w',
-    aggregationVersion: 3,
+    aggregationVersion: 4,
   });
 });
 
@@ -1611,7 +1611,7 @@ test('exact target week anchors select a finer source instead of relabeling nati
     sourceTimeframe: '1d',
     targetTimeframe: '1w',
     weekAnchorSec: MONDAY_UTC_WEEK_ANCHOR,
-    aggregationVersion: 3,
+    aggregationVersion: 4,
   });
 });
 
@@ -1660,4 +1660,91 @@ test('native equivalent UTC grids normalize provenance to the requested week anc
     weekAnchorSec: 0,
     aggregationVersion: 0,
   });
+});
+
+test('complete-record aggregation admits partial and empty covered buckets inside the span', () => {
+  const requested = halfOpenIntervalSec(0, 360);
+  const raw = historyAcquisitionFromBars({
+    bars: [bar(0, 10, 2), bar(300, 30, 5)],
+    request: { timeframe: '1m', requested },
+    cacheIdentity: 'complete-record-aggregate',
+    normalizedSymbol: 'BTC',
+    alignment: 'utc-24x7',
+    coverageSemantics: 'complete-record',
+    recordSpan: requested,
+  });
+  const acquisition = aggregateBars(raw, {
+    sourceTimeframe: '1m',
+    targetTimeframe: '2m',
+    alignment: { kind: 'utc' },
+  });
+
+  expect(acquisition.complete).toBe(true);
+  expect(acquisition.covered).toEqual([requested]);
+  expect(acquisition.gaps).toEqual([]);
+  expect(acquisition.bars).toEqual([
+    { time: 0, open: 10, high: 12, low: 9, close: 11, volume: 2 },
+    { time: 240, open: 30, high: 32, low: 29, close: 31, volume: 5 },
+  ]);
+  expect(acquisition.provenance).toMatchObject({
+    coverageSemantics: 'complete-record',
+    recordSpan: requested,
+    aggregationVersion: 4,
+  });
+  validateHistoryAcquisition(acquisition, {
+    alignment: 'utc-24x7',
+    coverageSemantics: 'complete-record',
+    recordSpan: requested,
+  });
+});
+
+test('complete-record aggregation preserves record-edge gaps and rejects tampered evidence', () => {
+  const requested = halfOpenIntervalSec(60, 300);
+  const raw = historyAcquisitionFromBars({
+    bars: [bar(60, 11), bar(120, 12), bar(240, 14)],
+    request: { timeframe: '1m', requested, query: halfOpenIntervalSec(0, 360) },
+    cacheIdentity: 'complete-record-edge',
+    normalizedSymbol: 'BTC',
+    alignment: 'utc-24x7',
+    coverageSemantics: 'complete-record',
+    recordSpan: requested,
+  });
+  const acquisition = aggregateBars(raw, {
+    sourceTimeframe: '1m',
+    targetTimeframe: '2m',
+    alignment: { kind: 'utc' },
+  });
+
+  expect(acquisition.complete).toBe(false);
+  expect(acquisition.covered).toEqual([halfOpenIntervalSec(120, 240)]);
+  expect(acquisition.gaps).toEqual([
+    { from: 60, to: 120, reason: 'partial-aggregate' },
+    { from: 240, to: 300, reason: 'partial-aggregate' },
+  ]);
+  validateHistoryAcquisition(acquisition, {
+    alignment: 'utc-24x7',
+    coverageSemantics: 'complete-record',
+    recordSpan: requested,
+  });
+
+  const tampered = {
+    ...raw,
+    provenance: {
+      ...raw.provenance,
+      recordSpan: halfOpenIntervalSec(60, 240),
+    },
+  };
+  expect(() =>
+    validateHistoryAcquisition(tampered, {
+      alignment: 'utc-24x7',
+      coverageSemantics: 'complete-record',
+      recordSpan: requested,
+    }),
+  ).toThrow(ExactHistoryError);
+  expect(() =>
+    validateHistoryAcquisition(raw, {
+      alignment: 'utc-24x7',
+      coverageSemantics: 'bars-only',
+    }),
+  ).toThrow(ExactHistoryError);
 });

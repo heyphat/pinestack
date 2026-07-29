@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test';
 import {
   monthlyReturnsAscii,
+  monthlyTradesAscii,
   topDrawdownsAscii,
   drawdownEpisodes,
   profitHistogramAscii,
@@ -56,6 +57,60 @@ test('monthlyReturnsAscii: months with no bars print a dot; empty input → empt
   expect(row).toContain('·'); // FEB (and later months) empty
   expect(monthlyReturnsAscii([], [])).toBe('');
   expect(monthlyReturnsAscii([1], [T0])).toBe('');
+});
+
+/** A closed trade exiting on `day` (UTC) with the given profit. */
+const exit = (iso: string, profit: number): { profit: number; exitTime: number } => ({
+  profit,
+  exitTime: Date.parse(`${iso}T12:00:00Z`),
+});
+
+test('monthlyTradesAscii: tallies exit months, omits zero segments, totals the YEAR', () => {
+  const trades = [
+    // Jan 2025: 2 wins, 1 loss.
+    exit('2025-01-03', 50),
+    exit('2025-01-10', 25),
+    exit('2025-01-20', -10),
+    // Feb 2025: 1 win, 1 loss, 1 even.
+    exit('2025-02-04', 5),
+    exit('2025-02-11', -5),
+    exit('2025-02-18', 0),
+    // Mar 2025: evens only.
+    exit('2025-03-05', 0),
+    exit('2025-03-06', 0),
+    // Then nothing until Jan 2027 (2026 is a gap year).
+    exit('2027-01-15', -100),
+  ];
+  const out = monthlyTradesAscii(trades);
+  const rows = out.split('\n');
+  expect(rows[0]).toContain('JAN');
+  expect(rows[0]).toContain('YEAR');
+  const y2025 = rows.find((l) => l.includes('2025'))!;
+  expect(y2025).toContain('2/1'); // Jan — wins/losses, no even segment
+  expect(y2025).toContain('1/1/1E'); // Feb — all three
+  expect(y2025).toContain('2E'); // Mar — evens only
+  expect(y2025).toContain('3/2/3E'); // YEAR totals
+  expect(y2025).toContain('·'); // Apr onward has no trades
+  const y2026 = rows.find((l) => l.includes('2026'))!;
+  expect(y2026.replace(/[·\s]/g, '')).toBe('2026'); // gap year is all dots
+  expect(rows.find((l) => l.includes('2027'))).toMatch(/2027\s+1\s+·/); // JAN: 1 loss
+  expect(out).not.toMatch(/\x1b/); // monochrome by default
+});
+
+test('monthlyTradesAscii: color paints wins green and losses red without touching layout', () => {
+  const trades = [exit('2025-01-03', 50), exit('2025-01-10', -10), exit('2025-02-04', 0)];
+  const plain = monthlyTradesAscii(trades);
+  const colored = monthlyTradesAscii(trades, { color: true });
+  expect(colored).toContain('\x1b[32m1\x1b[39m/\x1b[31m1\x1b[39m'); // Jan: 1 win / 1 loss
+  expect(colored).toMatch(/ 1E/); // Feb's even tally stays unpainted
+  expect(colored.replace(/\x1b\[\d+m/g, '')).toBe(plain);
+});
+
+test('monthlyTradesAscii: seconds-based exit times and empty ledgers', () => {
+  // pinery-convention unix seconds are converted like the other tables.
+  expect(monthlyTradesAscii([{ profit: 1, exitTime: T0 }])).toMatch(/2025\s+1\s+·/);
+  expect(monthlyTradesAscii([])).toBe('');
+  expect(monthlyTradesAscii([{ profit: NaN, exitTime: T0 }])).toBe('');
 });
 
 test('drawdownEpisodes: finds, orders, and bounds episodes', () => {

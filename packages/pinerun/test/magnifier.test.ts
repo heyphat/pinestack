@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compile } from '@heyphat/piner';
@@ -13,7 +13,7 @@ import {
   type HistoryRequest,
   type ResolvedHistorySource,
 } from '@heyphat/pinery';
-import { cached } from '@heyphat/pinery/node';
+import { cached, CsvProvider } from '@heyphat/pinery/node';
 import {
   BarMagnifierError,
   assertResolvedMagnifierDatasetForJob,
@@ -121,10 +121,11 @@ function capableRuntimeWithPinerMetadata(additiveMetadata = true) {
                 // compiler while piner did not yet emit lookahead /
                 // expressionPriorBars — it now does, so pass-through would be
                 // COMPLETE metadata and no rejection would fire.
-                const { lookahead: _l, expressionPriorBars: _e, ...rest } = dependency as Record<
-                  string,
-                  unknown
-                >;
+                const {
+                  lookahead: _l,
+                  expressionPriorBars: _e,
+                  ...rest
+                } = dependency as Record<string, unknown>;
                 return rest;
               }),
         },
@@ -469,7 +470,7 @@ describe('exact magnifier resolver and reuse identity', () => {
     expect(dataset.coverage.requested).toEqual({ from: 0, to: 7_200_000 });
     expect(dataset.barsDigest).toBe(marketDataDigest(dataset.barsMs));
     expect(dataset.alignmentEvidence).toEqual({ kind: 'utc-24x7' });
-    expect(dataset.acquisitionKey).toStartWith('magnifier-dataset-acquisition-v3:');
+    expect(dataset.acquisitionKey).toStartWith('magnifier-dataset-acquisition-v4:');
     expect(dataset.acquisitionKey).toBe(magnifierDatasetAcquisitionKey(dataset));
     expect(Object.isFrozen(dataset)).toBe(true);
     expect(Object.isFrozen(dataset.coverage)).toBe(true);
@@ -1510,5 +1511,108 @@ test('chart 2W uses Pine runtime phase while elapsed 14D remains epoch-anchored'
         },
       });
     }
+  }
+});
+
+test('complete-record magnifier evidence is identity-bearing, executable, and prefix-safe', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pinerun-complete-record-magnifier-'));
+  const toCsv = (bars: Bar[]) =>
+    [
+      'time,open,high,low,close,volume',
+      ...bars.map(
+        (row) => `${row.time},${row.open},${row.high},${row.low},${row.close},${row.volume}`,
+      ),
+    ].join('\n');
+  try {
+    const sparse = targetBars().filter((_, index) => index !== 4);
+    writeFileSync(join(dir, 'X_10m.csv'), toCsv(sparse));
+    writeFileSync(join(dir, 'Y_10m.csv'), toCsv(targetBars()));
+    const adapter = createPinerCapabilityAdapter(capableRuntime().runtime);
+    const barsOnly = new CsvProvider({
+      dir,
+      timeframes: 'arbitrary',
+      alignment: 'utc-24x7',
+    });
+    const complete = new CsvProvider({
+      dir,
+      timeframes: 'arbitrary',
+      alignment: 'utc-24x7',
+      coverageSemantics: 'complete-record',
+    });
+
+    const barsOnlySource = await barsOnly.resolveHistorySource('X');
+    const completeSource = await complete.resolveHistorySource('X');
+    const operation = (source: ResolvedHistorySource) =>
+      magnifierAcquisitionKey({
+        source,
+        symbol: 'X',
+        requested: { from: 0, to: 7_200 },
+        targetPineTf: '10',
+        targetCanonicalTf: '10m',
+        sourceCanonicalTf: '10m',
+        chartOpensSec: [0, 3_600],
+        chartCloseTimesSec: [3_600, 7_200],
+        chartIntervalSource: 'utc-fixed',
+        aggregationVersion: 0,
+        contractVersion: 1,
+        mappingVersion: 1,
+      });
+    expect(operation(completeSource)).not.toBe(operation(barsOnlySource));
+
+    await expect(
+      resolveBarMagnifier(
+        { source: STRATEGY_ON, symbol: 'X', timeframe: '60', bars: chartBars() },
+        '1h',
+        barsOnly,
+        { adapter },
+      ),
+    ).rejects.toMatchObject({ code: 'incomplete-required-coverage' });
+
+    const job: Job = { source: STRATEGY_ON, symbol: 'X', timeframe: '60', bars: chartBars() };
+    const resolution = await resolveBarMagnifier(job, '1h', complete, { adapter });
+    expect(resolution.dataset?.provenance).toMatchObject({
+      coverageSemantics: 'complete-record',
+      recordSpan: { from: 0, to: 7_200 },
+    });
+    expect(resolution.dataset?.acquisitionKey).toStartWith('magnifier-dataset-acquisition-v4:');
+    expect(() => assertResolvedMagnifierDatasetForJob(job, resolution.preflight)).not.toThrow();
+
+    const prefix = deriveResolverIssuedMagnifierPrefix(resolution.dataset!, 1);
+    expect(prefix.provenance.recordSpan).toEqual({ from: 0, to: 7_200 });
+    expect(() =>
+      assertResolvedMagnifierDatasetForJob(
+        { ...job, bars: job.bars.slice(0, 1), magnifier: prefix },
+        resolution.preflight,
+      ),
+    ).not.toThrow();
+
+    const completeY: Job = { source: STRATEGY_ON, symbol: 'Y', timeframe: '60', bars: chartBars() };
+    const barsOnlyY: Job = { ...completeY };
+    const completeYResolution = await resolveBarMagnifier(completeY, '1h', complete, { adapter });
+    const barsOnlyYResolution = await resolveBarMagnifier(barsOnlyY, '1h', barsOnly, { adapter });
+    expect(completeYResolution.dataset?.barsDigest).toBe(barsOnlyYResolution.dataset?.barsDigest);
+    expect(completeYResolution.dataset?.acquisitionKey).not.toBe(
+      barsOnlyYResolution.dataset?.acquisitionKey,
+    );
+
+    const forged = reboundMagnifierDataset(resolution.dataset!, resolution.dataset!.barsMs, {
+      provenance: deepFreezeFixture({
+        ...resolution.dataset!.provenance,
+        recordSpan: { from: 0, to: 3_600 },
+      }),
+    });
+    try {
+      assertResolvedMagnifierDatasetForJob({ ...job, magnifier: forged }, resolution.preflight);
+      throw new Error('expected complete-record tamper rejection');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'invalid-injected-bar-magnifier-data',
+        details: {
+          mismatches: expect.arrayContaining(['resolver-authentication', 'coverage-evidence']),
+        },
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

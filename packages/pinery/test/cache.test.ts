@@ -12,7 +12,7 @@ import {
   type HistoryRequest,
   type ResolvedHistorySource,
 } from '../src/index.js';
-import { cached } from '../src/node.js';
+import { cached, CsvProvider } from '../src/node.js';
 
 function bar(time: number): Bar {
   return { time, open: 10, high: 12, low: 9, close: 11, volume: 5 };
@@ -80,6 +80,7 @@ test('cached wrapper forwards asset class, leaf identity, capabilities, and prov
       alignment: 'utc-24x7',
       maxBarsPerRequest: 100,
       maxBarsPerAcquisition: 1000,
+      coverageSemantics: 'bars-only',
     });
     expect(Object.isFrozen(source)).toBe(true);
     expect(Object.isFrozen(source.capabilities)).toBe(true);
@@ -173,7 +174,7 @@ test('exact cache payload round-trips bars, exact range, coverage, gaps, and pro
     const payload = JSON.parse(readFileSync(join(dir, files[0]!), 'utf8'));
     expect(payload).toMatchObject({
       schema: 'pinery.history-acquisition',
-      version: 2,
+      version: 3,
       key: {
         cacheIdentity: 'feed-options-v1',
         normalizedSymbol: 'BTC',
@@ -181,6 +182,8 @@ test('exact cache payload round-trips bars, exact range, coverage, gaps, and pro
         requested: { from: 0, to: 120 },
         query: { from: 0, to: 180 },
         weekAnchorSec: null,
+        coverageSemantics: 'bars-only',
+        recordSpan: null,
       },
       acquisition: {
         bars: acquisition.bars,
@@ -352,8 +355,12 @@ test('exact cache keys and payload validation bind explicit weekly anchor eviden
       .find(({ payload }) => payload.key?.weekAnchorSec === mondayAnchor)!;
     expect(mondayFile.payload).toMatchObject({
       schema: 'pinery.history-acquisition',
-      version: 2,
-      key: { weekAnchorSec: mondayAnchor },
+      version: 3,
+      key: {
+        weekAnchorSec: mondayAnchor,
+        coverageSemantics: 'bars-only',
+        recordSpan: null,
+      },
       acquisition: { provenance: { weekAnchorSec: mondayAnchor } },
     });
 
@@ -422,4 +429,54 @@ test('fresh exact acquisition rejects a mismatched weekly anchor before caching'
     });
     expect(exactCalls).toBe(1);
     expect(readdirSync(dir)).toEqual([]);
+  }));
+
+test('complete-record cache replay authenticates per-timeframe spans', async () =>
+  withTempDir(async (dir) => {
+    const data = mkdtempSync(join(tmpdir(), 'pinery-cache-complete-record-'));
+    try {
+      const header = 'time,open,high,low,close,volume\n';
+      writeFileSync(join(data, 'BTC_1m.csv'), header + '0,1,2,0.5,1.5,10\n60,2,3,1.5,2.5,20\n');
+      writeFileSync(join(data, 'BTC_5m.csv'), header + '0,1,2,0.5,1.5,10\n');
+      const provider = new CsvProvider({
+        dir: data,
+        alignment: 'utc-24x7',
+        coverageSemantics: 'complete-record',
+        timeframes: 'arbitrary',
+      });
+      const source = await cached(provider, { dir }).resolveHistorySource!('BTC');
+      expect(source.capabilities.recordSpan).toBeUndefined();
+      expect(source.capabilities.recordSpans).toEqual({
+        '1m': halfOpenIntervalSec(0, 120),
+        '5m': halfOpenIntervalSec(0, 300),
+      });
+      expect(Object.isFrozen(source.capabilities.recordSpans)).toBe(true);
+      expect(Object.isFrozen(source.capabilities.recordSpans?.['1m'])).toBe(true);
+
+      const request = {
+        timeframe: '1m',
+        requested: halfOpenIntervalSec(0, 180),
+      };
+      const first = await source.history(request);
+      expect(first.complete).toBe(false);
+      expect(first.provenance.recordSpan).toEqual(halfOpenIntervalSec(0, 120));
+
+      const file = join(
+        dir,
+        readdirSync(dir).find((name) => name.endsWith('.json'))!,
+      );
+      const payload = JSON.parse(readFileSync(file, 'utf8'));
+      payload.acquisition.provenance.recordSpan = { from: 0, to: 180 };
+      payload.acquisition.covered = [{ from: 0, to: 180 }];
+      payload.acquisition.gaps = [];
+      payload.acquisition.complete = true;
+      writeFileSync(file, JSON.stringify(payload));
+
+      const replay = await source.history(request);
+      expect(replay.complete).toBe(false);
+      expect(replay.provenance.recordSpan).toEqual(halfOpenIntervalSec(0, 120));
+      expect(replay.gaps).toEqual([{ from: 120, to: 180, reason: 'provider-missing' }]);
+    } finally {
+      rmSync(data, { recursive: true, force: true });
+    }
   }));

@@ -1648,7 +1648,7 @@ export type SecurityDatasetAcquisitionKeyInput = Omit<
 
 /** Canonical execution identity binding coverage and source evidence to exact bar content. */
 export function securityDatasetAcquisitionKey(input: SecurityDatasetAcquisitionKeyInput): string {
-  return `security-dataset-acquisition-v2:${canonicalDigest({
+  return `security-dataset-acquisition-v3:${canonicalDigest({
     requestKind: input.requestKind,
     requestedSymbol: input.requestedSymbol,
     dependencies: input.dependencies,
@@ -1662,7 +1662,10 @@ export function securityDatasetAcquisitionKey(input: SecurityDatasetAcquisitionK
     provenance: input.provenance,
     alignmentEvidence: input.alignmentEvidence,
     barsDigest: input.barsDigest,
-    completenessPolicy: 'bar-derived-exact-complete-v2',
+    completenessPolicy:
+      (input.provenance.coverageSemantics ?? 'bars-only') === 'complete-record'
+        ? 'authenticated-complete-record-v1'
+        : 'bar-derived-exact-complete-v2',
   })}`;
 }
 
@@ -1796,7 +1799,17 @@ function snapshotSecurityAcquisition(
     Object.freeze({ from: value.from, to: value.to });
   const gap = (value: CoverageGapSec): CoverageGapSec =>
     Object.freeze({ from: value.from, to: value.to, reason: value.reason });
-  const provenance = Object.freeze({ ...acquisition.provenance }) as AcquisitionProvenance;
+  const provenance = Object.freeze({
+    ...acquisition.provenance,
+    ...(acquisition.provenance.recordSpan
+      ? {
+          recordSpan: Object.freeze({
+            from: acquisition.provenance.recordSpan.from,
+            to: acquisition.provenance.recordSpan.to,
+          }),
+        }
+      : {}),
+  }) as AcquisitionProvenance;
   const bound = {
     requestKind,
     requestedSymbol,
@@ -2130,6 +2143,13 @@ export function assertResolvedSecurityForBarMagnifier(
       typeof provenance.alignment !== 'string' ||
       provenance.alignment.length === 0 ||
       (provenance.weekAnchorSec !== undefined && !Number.isSafeInteger(provenance.weekAnchorSec)) ||
+      (provenance.coverageSemantics !== undefined &&
+        provenance.coverageSemantics !== 'bars-only' &&
+        provenance.coverageSemantics !== 'complete-record') ||
+      ((provenance.coverageSemantics ?? 'bars-only') === 'complete-record' &&
+        !validInterval(provenance.recordSpan)) ||
+      ((provenance.coverageSemantics ?? 'bars-only') === 'bars-only' &&
+        provenance.recordSpan !== undefined) ||
       !Number.isSafeInteger(provenance.aggregationVersion) ||
       (provenance.aggregationVersion as number) < 0
     ) {
@@ -2216,6 +2236,10 @@ export function assertResolvedSecurityForBarMagnifier(
             alignment: evidence.alignment,
             weekAnchorSec: evidence.weekAnchorSec,
             calendar: evidence.calendar,
+            coverageSemantics:
+              (provenance.coverageSemantics as 'bars-only' | 'complete-record' | undefined) ??
+              'bars-only',
+            recordSpan: validInterval(provenance.recordSpan) ? provenance.recordSpan : undefined,
           },
         );
       } catch {

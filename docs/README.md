@@ -32,15 +32,17 @@ flags in full and links there for the rest.
 ## Concepts
 
 - [**Bar Magnifier exact mode**](./common-options.md#fill-model--bar-magnifier) —
-  strict tri-state overrides, automatic piner mapping, shipped 0.10.0
-  capability rejection, future requested/inactive reporting, provider support
-  matrices, typed outcomes, and the 200k fold guard.
+  strict tri-state overrides, automatic piner mapping, the shipped
+  contract-capable engine's authoritative active/inactive reporting, provider
+  support matrices, typed outcomes, and the 200k fold guard.
 - [**How the portfolio model works**](./portfolio-model.md) — capital models
   (isolated vs shared), the union clock, per-bar execution order, and the exact
   identities behind the `portfolio` numbers.
 - [**CSV data files**](./csv-data.md) — run any command on local CSV history
   (`--provider csv --data-dir <dir>`, or `CSV:` symbols in a mixed universe):
-  file naming, row format, instrument-metadata sidecar.
+  file naming, row format, instrument-metadata sidecar, and the exact-mode
+  evidence flags (`--csv-alignment`, `--csv-week-anchor`, `--csv-calendar`,
+  `--csv-complete-record`) that enable Bar Magnifier over CSV files.
 
 ## Typical flow
 

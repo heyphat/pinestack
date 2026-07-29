@@ -2,7 +2,7 @@
 
 > Analyze: one strategy on one symbol — a full tearsheet.
 
-Where [`scan`](./scan.md) answers _"which symbols does this strategy work on?"_, `backtest` answers _"how good is this strategy, exactly?"_ — one Pine strategy script, one symbol, full detail. It is a single run (no worker pool) that prints a complete tearsheet: returns, risk, and trade quality, followed by MONTHLY RETURNS, TOP DRAWDOWNS, a TRADE P/L DISTRIBUTION histogram, and PRICE / EQUITY / DRAWDOWN charts. Indicator scripts are rejected with a pointer to `scan`; strategies only.
+Where [`scan`](./scan.md) answers _"which symbols does this strategy work on?"_, `backtest` answers _"how good is this strategy, exactly?"_ — one Pine strategy script, one symbol, full detail. It is a single run (no worker pool) that prints a complete tearsheet: returns, risk, and trade quality, followed by MONTHLY RETURNS, MONTHLY TRADES, TOP DRAWDOWNS, a TRADE P/L DISTRIBUTION histogram, and PRICE / EQUITY / DRAWDOWN charts. Indicator scripts are rejected with a pointer to `scan`; strategies only.
 
 ## Synopsis
 
@@ -18,7 +18,7 @@ pinerun backtest <script.pine> --symbol <sym> [options]
 | `--input name=value` | —            | Fixed input override, repeatable, one value each (grids → [`sweep`](./sweep.md)). Validated against the script's `input()` titles before anything runs. See [input syntax](./common-options.md#swept-input-grammar---input). |
 | `--trades`           | off          | Also print the closed-trade ledger under the tearsheet. More than 20 trades elide to the first and last 5 rows.                                                                                                              |
 | `--watch [sec]`      | `60` (min 5) | Live mode: refresh history, rerun, and redraw the tearsheet in place every `<sec>` seconds. Requires a live terminal (refuses when piped); Ctrl-C exits. Incompatible with `--json`.                                         |
-| `--no-chart`         | off          | Skip the in-terminal PRICE / EQUITY / DRAWDOWN charts and the trade P/L histogram. The MONTHLY RETURNS and TOP DRAWDOWNS tables always print.                                                                                |
+| `--no-chart`         | off          | Skip the in-terminal PRICE / EQUITY / DRAWDOWN charts and the trade P/L histogram. The MONTHLY RETURNS, MONTHLY TRADES, and TOP DRAWDOWNS tables always print.                                                               |
 | `--csv <dir>`        | —            | Write the trade ledger + equity curve as `<label>-trades.csv` / `<label>-equity.csv` into `<dir>`.                                                                                                                           |
 | `--plot <dir>`       | —            | Write a self-contained `<label>.html` equity + drawdown chart into `<dir>`.                                                                                                                                                  |
 
@@ -27,17 +27,15 @@ The ledger and equity curve are **always** computed, so `--csv`, `--plot`, and `
 With Bar Magnifier requested, metadata and the complete exact/static-security
 plan must resolve before execution. A permanent exact-mode failure is emitted as
 a typed failed `RunResult`; live `--watch` stops instead of retrying an
-unsupported configuration forever. In the shipped self-contained binary,
-`@heyphat/piner` 0.10.0 fails an effective request at capability preflight before
-that exact plan is prepared. A future contract-capable but traversal-disabled
-piner may prepare the plan, but must report requested/inactive and retain chart-
-OHLC fills.
+unsupported configuration forever. The shipped self-contained binary pins the
+contract-capable `@heyphat/piner` 0.11.1 engine: after exact preparation, piner
+is the authority for active/inactive state, coverage, counters, and fills.
 
 ## Common options
 
 Plus shared flags — see [common options](./common-options.md):
 
-- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
+- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` · `--data-dir` · `--csv-alignment` · `--csv-week-anchor` · `--csv-calendar` · `--csv-complete-record` ([exact CSV](./csv-data.md#exact-acquisition-and-bar-magnifier)) (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
 - **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills)) · `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier](./common-options.md#fill-model--bar-magnifier))
@@ -52,11 +50,17 @@ The tearsheet prints in sections, in order:
 2. **RISK** — max drawdown, max runup, annualized volatility, Sharpe, Sortino, Calmar, and market exposure.
 3. **TRADES** — closed trades (W/L/E), win rate, profit factor, expectancy, avg and largest win/loss, max consecutive win/loss streaks, avg bars in trade, commission, and max contracts held.
 
-Then three analysis tables (always printed, even with `--no-chart`):
+Then the analysis tables (always printed, even with `--no-chart`):
 
 - **MONTHLY RETURNS** — a year × month % grid, green/red on a TTY.
+- **MONTHLY TRADES** — the same year × month grid tallying closed trades by
+  exit month in win/loss/even order: `5/3`, or `5/2/1E` when a month has
+  break-even trades (zero tallies are omitted, so all-even is `3E`). Wins are
+  green and losses red on a TTY; evens keep their `E` suffix because they have
+  no color. The YEAR column totals the row.
 - **TOP DRAWDOWNS** — the five deepest episodes with peak / trough / recovery dates and durations; `—` + `>N` marks one still underwater.
-- **TRADE P/L DISTRIBUTION** — a bucketed histogram of closed-trade profits (zero is always a bucket edge, so every bar is purely wins or purely losses).
+
+And a **TRADE P/L DISTRIBUTION** — a bucketed histogram of closed-trade profits (zero is always a bucket edge, so every bar is purely wins or purely losses). It is a drawing, so `--no-chart` skips it like the charts below.
 
 Then three in-terminal charts (skipped with `--no-chart`):
 
@@ -74,9 +78,21 @@ Basic backtest of a strategy on one symbol over 500 hourly bars:
 pinerun backtest examples/sma-cross-param.pine --symbol SOLUSDT --tf 1h --limit 500
 ```
 
+Run a source-requested Bar Magnifier strategy over exact UTC CSV files (for
+example `BTCUSDT_1h.csv` plus its mapped lower-timeframe file):
+
+```bash
+pinerun backtest strategy.pine --symbol CSV:BTCUSDT --tf 1h \
+  --data-dir ./data --csv-alignment utc-24x7
+```
+
+Add `--csv-complete-record` only when the producer guarantees that missing rows
+inside each exact file's full span mean no trades; the bars-only default treats
+those rows as coverage gaps.
+
 Which prints the full tearsheet — returns, risk, and trade quality, then the
-MONTHLY RETURNS grid, TOP DRAWDOWNS, the TRADE P/L DISTRIBUTION histogram, and
-the PRICE / EQUITY / DRAWDOWN charts:
+MONTHLY RETURNS and MONTHLY TRADES grids, TOP DRAWDOWNS, the TRADE P/L
+DISTRIBUTION histogram, and the PRICE / EQUITY / DRAWDOWN charts:
 
 ```text
   backtest: SOLUSDT @ 1h — 499 bars, 2026-06-21 → 2026-07-12
@@ -113,6 +129,10 @@ the PRICE / EQUITY / DRAWDOWN charts:
   MONTHLY RETURNS %
             JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
     2026      ·      ·      ·      ·      ·   -4.9    1.2      ·      ·      ·      ·      ·     -3.8
+
+  MONTHLY TRADES  (win/loss/E even)
+            JAN    FEB    MAR    APR    MAY    JUN    JUL    AUG    SEP    OCT    NOV    DEC     YEAR
+    2026      ·      ·      ·      ·      ·    1/5    2/3      ·      ·      ·      ·      ·      3/8
 
   TOP DRAWDOWNS
      #   DEPTH%  PEAK        TROUGH      RECOVERY     BARS

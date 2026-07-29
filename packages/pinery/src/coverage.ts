@@ -9,6 +9,7 @@ import {
   type HistoryAcquisition,
   type HistoryAlignment,
   type HistoryCapabilities,
+  type HistoryCoverageSemantics,
   type HistoryRequest,
   type HistorySessionCalendar,
   type HistoryTruncation,
@@ -16,6 +17,14 @@ import {
   type UnixSecond,
 } from './provider.js';
 import { canonicalTimeframeSecondsExact, parseCanonicalTimeframeExact } from './timeframe.js';
+
+export interface RecordSpanFromBarsOptions {
+  readonly bars: readonly Bar[];
+  readonly timeframe: string;
+  readonly alignment: HistoryAlignment;
+  readonly weekAnchorSec?: UnixSecond;
+  readonly calendar?: HistorySessionCalendar;
+}
 
 export interface HistoryAcquisitionFromBarsOptions {
   readonly bars: readonly Bar[];
@@ -26,6 +35,10 @@ export interface HistoryAcquisitionFromBarsOptions {
   /** Explicit opening anchor for UTC week-unit bars. */
   readonly weekAnchorSec?: UnixSecond;
   readonly calendar?: HistorySessionCalendar;
+  /** Omitted callers retain byte-for-byte bars-only coverage behavior. */
+  readonly coverageSemantics?: HistoryCoverageSemantics;
+  /** Required source-record evidence for complete-record semantics. */
+  readonly recordSpan?: HalfOpenIntervalSec;
   readonly truncated?: HistoryTruncation;
 }
 
@@ -366,6 +379,59 @@ export function snapshotHistoryCapabilities(
     }
   }
 
+  if (
+    capabilities.coverageSemantics !== undefined &&
+    capabilities.coverageSemantics !== 'bars-only' &&
+    capabilities.coverageSemantics !== 'complete-record'
+  ) {
+    malformed(
+      'capability-coverage-semantics',
+      'history capability coverageSemantics is invalid',
+      capabilities.coverageSemantics,
+    );
+  }
+  const coverageSemantics = capabilities.coverageSemantics ?? 'bars-only';
+  if (capabilities.recordSpan !== undefined) {
+    validateInterval(capabilities.recordSpan, 'capability record span');
+    if (coverageSemantics !== 'complete-record') {
+      malformed(
+        'capability-record-span-semantics',
+        'recordSpan capability evidence requires complete-record semantics',
+      );
+    }
+  }
+
+  let recordSpans: Readonly<Record<string, HalfOpenIntervalSec>> | undefined;
+  if (capabilities.recordSpans !== undefined) {
+    if (
+      !capabilities.recordSpans ||
+      typeof capabilities.recordSpans !== 'object' ||
+      Array.isArray(capabilities.recordSpans) ||
+      coverageSemantics !== 'complete-record'
+    ) {
+      malformed(
+        'capability-record-spans',
+        'recordSpans capability evidence requires a timeframe map and complete-record semantics',
+      );
+    }
+    const snapshot: Record<string, HalfOpenIntervalSec> = {};
+    for (const timeframe of Object.keys(capabilities.recordSpans).sort((a, b) =>
+      a.localeCompare(b),
+    )) {
+      const parsed = parseCanonicalTimeframeExact(timeframe);
+      if (parsed.kind !== 'ok' || parsed.value.canonical !== timeframe) {
+        malformed(
+          'capability-record-span-timeframe',
+          `recordSpans key "${timeframe}" must be canonical`,
+        );
+      }
+      const span = capabilities.recordSpans[timeframe]!;
+      validateInterval(span, `capability ${timeframe} record span`);
+      snapshot[timeframe] = Object.freeze({ from: span.from, to: span.to });
+    }
+    recordSpans = Object.freeze(snapshot);
+  }
+
   const timeframes = snapshotHistoryTimeframes(capabilities.timeframes);
   const calendar = capabilities.calendar
     ? snapshotHistorySessionCalendar(capabilities.calendar)
@@ -383,7 +449,25 @@ export function snapshotHistoryCapabilities(
       ? { weekAnchorSec: capabilities.weekAnchorSec }
       : {}),
     ...(calendar ? { calendar } : {}),
+    coverageSemantics,
+    ...(capabilities.recordSpan
+      ? {
+          recordSpan: Object.freeze({
+            from: capabilities.recordSpan.from,
+            to: capabilities.recordSpan.to,
+          }),
+        }
+      : {}),
+    ...(recordSpans ? { recordSpans } : {}),
   });
+}
+
+/** Select trusted record-span evidence for one requested source timeframe. */
+export function historyCapabilityRecordSpan(
+  capabilities: HistoryCapabilities,
+  timeframe: string,
+): HalfOpenIntervalSec | undefined {
+  return capabilities.recordSpans?.[timeframe] ?? capabilities.recordSpan;
 }
 
 /** Freeze the resolved envelope and replace mutable capability references with a snapshot. */
@@ -400,6 +484,37 @@ export function snapshotResolvedHistorySource(
   });
 }
 
+/** Derive an immutable exact source span from a fully parsed, validated record. */
+export function historyRecordSpanFromBars(options: RecordSpanFromBarsOptions): HalfOpenIntervalSec {
+  const duration = fixedDuration(options.timeframe);
+  const calendar = options.calendar ? snapshotHistorySessionCalendar(options.calendar) : undefined;
+  validateBarsExact(
+    options.bars,
+    duration,
+    options.alignment,
+    calendar,
+    options.timeframe,
+    options.weekAnchorSec,
+  );
+  if (options.bars.length === 0) {
+    malformed('record-span-empty', 'complete-record evidence requires at least one source bar');
+  }
+  const periods =
+    calendar && isCalendarSessionTimeframe(options.timeframe)
+      ? new Map(
+          calendarSessionPeriods(calendar, options.timeframe).map(
+            (period) => [period.from as number, period] as const,
+          ),
+        )
+      : undefined;
+  const first = options.bars[0]!;
+  const last = options.bars.at(-1)!;
+  const to = periods
+    ? periods.get(last.time)!.to
+    : safeSecondAdd(last.time, duration, 'record span close');
+  return Object.freeze(halfOpenIntervalSec(first.time, to));
+}
+
 /** Construct evidence from complete returned bar intervals, never from query success. */
 export function historyAcquisitionFromBars(
   options: HistoryAcquisitionFromBarsOptions,
@@ -413,6 +528,19 @@ export function historyAcquisitionFromBars(
       requested: request.requested,
       query,
     });
+  }
+
+  const coverageSemantics = options.coverageSemantics ?? 'bars-only';
+  if (coverageSemantics !== 'bars-only' && coverageSemantics !== 'complete-record') {
+    malformed('coverage-semantics', 'history coverage semantics is invalid', coverageSemantics);
+  }
+  if (coverageSemantics === 'complete-record') {
+    if (!options.recordSpan) {
+      malformed('record-span-missing', 'complete-record coverage requires recordSpan evidence');
+    }
+    validateInterval(options.recordSpan, 'record span');
+  } else if (options.recordSpan !== undefined) {
+    malformed('record-span-semantics', 'recordSpan evidence requires complete-record semantics');
   }
 
   if (options.weekAnchorSec !== undefined) {
@@ -456,26 +584,32 @@ export function historyAcquisitionFromBars(
     options.weekAnchorSec,
   );
 
-  const completeIntervals: HalfOpenIntervalSec[] = [];
+  const recordCoverage =
+    coverageSemantics === 'complete-record'
+      ? intersect(options.recordSpan!, request.requested)
+      : null;
+  const completeIntervals: HalfOpenIntervalSec[] = recordCoverage ? [recordCoverage] : [];
   const periodsByOpen = periods
     ? new Map(periods.map((period) => [period.from as number, period] as const))
     : undefined;
-  for (const bar of options.bars) {
-    if (periodsByOpen) {
-      const period = periodsByOpen.get(bar.time)!;
-      for (const session of period.sessions) {
-        const clipped = intersect(session, request.requested);
-        if (clipped) completeIntervals.push(clipped);
+  if (coverageSemantics === 'bars-only') {
+    for (const bar of options.bars) {
+      if (periodsByOpen) {
+        const period = periodsByOpen.get(bar.time)!;
+        for (const session of period.sessions) {
+          const clipped = intersect(session, request.requested);
+          if (clipped) completeIntervals.push(clipped);
+        }
+        continue;
       }
-      continue;
+      const close = safeSecondAdd(bar.time, duration, 'bar close');
+      const clipped = intersect(halfOpenIntervalSec(bar.time, close), request.requested);
+      if (clipped) completeIntervals.push(clipped);
     }
-    const close = safeSecondAdd(bar.time, duration, 'bar close');
-    const clipped = intersect(halfOpenIntervalSec(bar.time, close), request.requested);
-    if (clipped) completeIntervals.push(clipped);
-  }
 
-  if (calendar) {
-    completeIntervals.push(...closedCalendarIntervals(calendar, request.requested));
+    if (calendar) {
+      completeIntervals.push(...closedCalendarIntervals(calendar, request.requested));
+    }
   }
 
   const covered = mergeIntervals(completeIntervals);
@@ -492,6 +626,15 @@ export function historyAcquisitionFromBars(
     targetTimeframe: request.timeframe,
     alignment: alignmentIdentity(options.alignment, calendar),
     ...(options.weekAnchorSec !== undefined ? { weekAnchorSec: options.weekAnchorSec } : {}),
+    coverageSemantics,
+    ...(options.recordSpan
+      ? {
+          recordSpan: Object.freeze({
+            from: options.recordSpan.from,
+            to: options.recordSpan.to,
+          }),
+        }
+      : {}),
     aggregationVersion: 0,
   };
 
@@ -622,6 +765,8 @@ export function validateHistoryAcquisition(
     readonly alignment?: HistoryAlignment;
     readonly weekAnchorSec?: UnixSecond;
     readonly calendar?: HistorySessionCalendar;
+    readonly coverageSemantics?: HistoryCoverageSemantics;
+    readonly recordSpan?: HalfOpenIntervalSec;
   },
 ): void {
   if (!acquisition || typeof acquisition !== 'object') {
@@ -655,6 +800,25 @@ export function validateHistoryAcquisition(
     p.aggregationVersion < 0
   ) {
     malformed('provenance', 'history acquisition provenance is incomplete or invalid', p);
+  }
+  const provenanceCoverageSemantics = p.coverageSemantics ?? 'bars-only';
+  if (
+    provenanceCoverageSemantics !== 'bars-only' &&
+    provenanceCoverageSemantics !== 'complete-record'
+  ) {
+    malformed('provenance-coverage-semantics', 'acquisition coverage semantics is invalid', p);
+  }
+  if (provenanceCoverageSemantics === 'complete-record') {
+    if (!p.recordSpan) {
+      malformed('provenance-record-span', 'complete-record provenance requires recordSpan', p);
+    }
+    validateInterval(p.recordSpan, 'provenance record span');
+  } else if (p.recordSpan !== undefined) {
+    malformed(
+      'provenance-record-span-semantics',
+      'recordSpan provenance requires complete-record semantics',
+      p,
+    );
   }
   const provenanceUsesUtcWeeks =
     p.alignment === 'utc-24x7' &&
@@ -734,6 +898,25 @@ export function validateHistoryAcquisition(
   ) {
     malformed('acquisition-alignment', 'acquisition alignment does not match the resolved source');
   }
+  if (
+    expected?.coverageSemantics !== undefined &&
+    provenanceCoverageSemantics !== expected.coverageSemantics
+  ) {
+    malformed(
+      'acquisition-coverage-semantics',
+      'acquisition coverage semantics do not match the resolved source',
+      { expected: expected.coverageSemantics, actual: provenanceCoverageSemantics },
+    );
+  }
+  if (expected?.recordSpan !== undefined) {
+    if (!p.recordSpan || !sameInterval(p.recordSpan, expected.recordSpan)) {
+      malformed(
+        'acquisition-record-span',
+        'acquisition record span does not match the resolved source',
+        { expected: expected.recordSpan, actual: p.recordSpan },
+      );
+    }
+  }
   if (expected?.weekAnchorSec !== undefined && p.weekAnchorSec !== expected.weekAnchorSec) {
     malformed(
       'acquisition-week-anchor',
@@ -812,14 +995,88 @@ export function validateHistoryAcquisition(
     alignment,
     weekAnchorSec: expected?.weekAnchorSec ?? p.weekAnchorSec,
     calendar: expected?.calendar,
+    coverageSemantics: provenanceCoverageSemantics,
+    recordSpan: p.recordSpan,
     truncated: acquisition.truncated,
   });
-  if (!sameIntervals(evidence.covered, acquisition.covered)) {
+  const provenCovered =
+    provenanceCoverageSemantics === 'complete-record' && p.aggregationVersion > 0
+      ? completeRecordAggregateCoverage(
+          acquisition.requested,
+          p.targetTimeframe,
+          p.recordSpan!,
+          alignment,
+          expected?.calendar,
+          expected?.weekAnchorSec ?? p.weekAnchorSec,
+        )
+      : evidence.covered;
+  if (!sameIntervals(provenCovered, acquisition.covered)) {
     malformed('coverage-evidence', 'reported coverage is not proven by returned bars/calendar', {
       reported: acquisition.covered,
-      proven: evidence.covered,
+      proven: provenCovered,
     });
   }
+}
+
+function completeRecordAggregateCoverage(
+  requested: HalfOpenIntervalSec,
+  timeframe: string,
+  recordSpan: HalfOpenIntervalSec,
+  alignment: HistoryAlignment,
+  calendar: HistorySessionCalendar | undefined,
+  weekAnchorSec: UnixSecond | undefined,
+): HalfOpenIntervalSec[] {
+  const duration = fixedDuration(timeframe);
+  const covered: HalfOpenIntervalSec[] = [];
+  if (alignment === 'utc-24x7') {
+    const anchor = utcTimeframeAnchor(timeframe, weekAnchorSec);
+    let open = floorTo(requested.from, duration, anchor);
+    while (open < requested.to) {
+      const bucket = halfOpenIntervalSec(open, safeSecondAdd(open, duration, 'aggregate close'));
+      if (covers([recordSpan], bucket)) {
+        const clipped = intersect(bucket, requested);
+        if (clipped) covered.push(clipped);
+      }
+      open = bucket.to;
+    }
+    return mergeIntervals(covered);
+  }
+
+  if (alignment !== 'exchange-calendar' || !calendar) return [];
+  if (isCalendarSessionTimeframe(timeframe)) {
+    for (const period of calendarSessionPeriods(calendar, timeframe)) {
+      if (
+        !calendarPeriodIntersects(period, requested) ||
+        !covers([recordSpan], halfOpenIntervalSec(period.from, period.to))
+      ) {
+        continue;
+      }
+      for (const session of period.sessions) {
+        const clipped = intersect(session, requested);
+        if (clipped) covered.push(clipped);
+      }
+    }
+  } else {
+    for (const session of calendar.sessions) {
+      if (!intersect(session, requested)) continue;
+      let open = session.from as number;
+      while (open < session.to) {
+        const close = safeSecondAdd(open, duration, 'aggregate session close');
+        if (close > session.to) break;
+        const bucket = halfOpenIntervalSec(open, close);
+        if (covers([recordSpan], bucket)) {
+          const clipped = intersect(bucket, requested);
+          if (clipped) covered.push(clipped);
+        }
+        open = close;
+      }
+    }
+  }
+  for (const closure of closedCalendarIntervals(calendar, requested)) {
+    const clipped = intersect(closure, recordSpan);
+    if (clipped) covered.push(clipped);
+  }
+  return mergeIntervals(covered);
 }
 
 export function mergeIntervals(intervals: readonly HalfOpenIntervalSec[]): HalfOpenIntervalSec[] {

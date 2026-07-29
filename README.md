@@ -138,8 +138,8 @@ pinerun backtest strategy.pine --symbol BTCUSDT --tf 1h --limit 500
 
 `init` writes a runnable, commented SMA-crossover strategy; `backtest` runs it on
 500 hourly BTC bars and prints a full tearsheet — returns, risk, and trade quality,
-then monthly returns, top drawdowns, and in-terminal price / equity / drawdown
-charts (abbreviated here):
+then monthly returns, monthly trade tallies, top drawdowns, and in-terminal
+price / equity / drawdown charts (abbreviated here):
 
 ```text
   backtest: BTCUSDT @ 1h — 499 bars, 2026-06-21 → 2026-07-12

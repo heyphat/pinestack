@@ -530,9 +530,9 @@ chart bars.
 
 | Runtime                                                                         | Effective request                                                                                                                                                                                                                      |
 | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Shipped self-contained binary / this root checkout: `@heyphat/piner` 0.10.0** | Permanent `piner-bar-magnifier-capability-unavailable` during metadata preflight, before exact provider/static-security I/O or piner execution. No exact dataset is prepared. Explicit/source-effective false continues on chart OHLC. |
+| **Shipped self-contained binary / this root checkout: `@heyphat/piner` 0.11.1** | Contract-capable with traversal enabled. Pinerun maps, acquires, validates, and injects the exact dataset; piner alone reports whether magnification was active and owns target, counters, coverage, and fill timestamps.              |
+| **Older or contract-incomplete piner**                                          | Permanent `piner-bar-magnifier-capability-unavailable` during metadata preflight, before exact provider/static-security I/O or piner execution. No exact dataset is prepared. Explicit/source-effective false continues on chart OHLC. |
 | **Future contract-capable piner, traversal disabled**                           | May map, prepare, validate, and inject exact data, but piner must report `requested: true`, `active: false`; fills remain chart OHLC.                                                                                                  |
-| **Future contract-capable piner, traversal enabled**                            | Reported as magnified only when piner's authoritative block says `active: true`; piner owns target, counters, coverage, and fill timestamps.                                                                                           |
 
 The release binary bakes in the Bun runtime, pinery, and the root-pinned piner
 version. Workspace packages are source/API entry points, not independently
@@ -540,15 +540,15 @@ published npm artifacts that can replace the engine inside an existing binary.
 
 #### Provider matrix behind the runtime gate
 
-| Provider         | Exact source evidence                                                                                     | Limits / current posture                                                                                                                                                                                                                                          |
-| ---------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Binance spot     | UTC 24×7; `1s` plus `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `3d`, `1w` | 1,000/page, newest-first, default 50,000 source-bar cap.                                                                                                                                                                                                          |
-| Binance futures  | UTC 24×7; same common list, no `1s`                                                                       | 1,000/page, default 50,000 source-bar cap.                                                                                                                                                                                                                        |
-| OKX spot/swap    | UTC variants; `1s`, common minute/hour steps, `1d`, `2d`, `3d`, `1w`                                      | 300/page recent, 100/page history, 200 pages; default effective 50,000 cap (60,000 page-capacity ceiling).                                                                                                                                                        |
-| Kraken spot      | UTC 24×7; `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `15d`                                         | Recent 720 bars only; older requested coverage fails provider-limited.                                                                                                                                                                                            |
-| Alpaca / Massive | Advertised equity cadences through weekly                                                                 | Alignment is `unknown` without versioned exchange-session evidence, so exact planning fails closed. Their feed/adjustment and cap settings remain part of source identity.                                                                                        |
-| Static / CSV     | Default: unknown alignment and no declared exact timeframes                                               | Programmatic callers must provide alignment/timeframe evidence (plus a calendar for exchange alignment); content is fingerprinted and `cacheIdentity` can version the dataset. CLI CSV exposes no evidence flags, so it cannot currently establish exact support. |
-| Legacy provider  | No `resolveHistorySource` exact contract                                                                  | Rejected in exact mode; non-magnifier `history()` behavior is preserved.                                                                                                                                                                                          |
+| Provider         | Exact source evidence                                                                                     | Limits / current posture                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Binance spot     | UTC 24×7; `1s` plus `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `3d`, `1w` | 1,000/page, newest-first, default 50,000 source-bar cap.                                                                                                                                                                                                                                                                                                                                                                    |
+| Binance futures  | UTC 24×7; same common list, no `1s`                                                                       | 1,000/page, default 50,000 source-bar cap.                                                                                                                                                                                                                                                                                                                                                                                  |
+| OKX spot/swap    | UTC variants; `1s`, common minute/hour steps, `1d`, `2d`, `3d`, `1w`                                      | 300/page recent, 100/page history, 200 pages; default effective 50,000 cap (60,000 page-capacity ceiling).                                                                                                                                                                                                                                                                                                                  |
+| Kraken spot      | UTC 24×7; `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `15d`                                         | Recent 720 bars only; older requested coverage fails provider-limited.                                                                                                                                                                                                                                                                                                                                                      |
+| Alpaca / Massive | Advertised equity cadences through weekly                                                                 | Alignment is `unknown` without versioned exchange-session evidence, so exact planning fails closed. Their feed/adjustment and cap settings remain part of source identity.                                                                                                                                                                                                                                                  |
+| Static / CSV     | Default: unknown alignment and no declared exact timeframes                                               | Programmatic callers must provide alignment/timeframe evidence (plus a calendar for exchange alignment); content is fingerprinted and `cacheIdentity` can version the dataset. The CLI's `--data-dir` leaf discovers exact `<SYMBOL>_<TF>.csv` files and accepts explicit evidence: `--csv-alignment utc-24x7`, `--csv-week-anchor`, `--csv-calendar <file.json>`, and the authenticated `--csv-complete-record` assertion. |
+| Legacy provider  | No `resolveHistorySource` exact contract                                                                  | Rejected in exact mode; non-magnifier `history()` behavior is preserved.                                                                                                                                                                                                                                                                                                                                                    |
 
 Provider caps apply to acquired source bars and are independent of piner's
 200,000 eligible target-bar cap; either limit fails rather than attaching a
@@ -557,10 +557,10 @@ partial fragment. See the complete provider lists and evidence requirements in
 
 Results mirror only piner's optional authoritative `strategy.barMagnifier`
 block. `formatFillModel()` distinguishes standard chart OHLC,
-requested/inactive, and active states without inspecting injected data. Under
-the shipped 0.10.0 runtime effective requests never reach data preparation. A
-future compatible but traversal-disabled runtime may prepare exact data and
-then authoritatively report requested/inactive; only an enabled piner report can
+requested/inactive, and active states without inspecting injected data. The
+shipped 0.11.1 runtime can report active traversal after exact preparation. A
+compatible but traversal-disabled runtime may prepare exact data and then
+authoritatively report requested/inactive; only an enabled piner report can
 claim active magnification.
 
 Provider exactness is not TradingView-feed parity. Matching TradingView also
@@ -632,6 +632,17 @@ string builder — only the CLI touches the filesystem.
                         crypto | futures; default: the provider's default)
 --data-dir <dir>      Local CSV history for --provider csv / CSV: symbols
                         (one <SYMBOL>_<TF>.csv per instrument)
+--csv-alignment utc-24x7
+                      Assert CSV bars use the fixed UTC 24×7 grid (enables
+                        exact planning over CSV files)
+--csv-week-anchor <YYYY-MM-DD|seconds>
+                      Opening timestamp on the CSV weekly grid (requires
+                        --csv-alignment utc-24x7)
+--csv-calendar <file.json>
+                      Strict exchange-session calendar; conflicts with the
+                        UTC alignment/week-anchor flags
+--csv-complete-record Assert missing bars inside each exact file's span mean
+                        no trades (requires explicit alignment/calendar)
 --no-cache            Disable the on-disk history cache
 --no-security         Skip request.security resolution (cross-symbol / lower-TF
                         fetch + inject); those requests degrade to na
@@ -937,12 +948,15 @@ pinerun backtest examples/sma-cross-param.pine \
 
 The ledger, equity curve, and bar times are **always** computed, so `--trades`
 (print the ledger), `--csv <dir>` / `--plot <dir>` (export), and `--json` (the
-full `RunResult`) need no extra flags. The stats blocks are followed by three
+full `RunResult`) need no extra flags. The stats blocks are followed by the
 analysis tables: **MONTHLY RETURNS %** (year × month grid, green/red on a TTY),
-**TOP DRAWDOWNS** (the five deepest episodes with peak/trough/recovery dates
-and durations; `—` + `>N` marks one still underwater), and **TRADE P/L
-DISTRIBUTION** (a bucketed histogram of closed-trade profits — zero is always
-a bucket edge, so every bar is purely wins or purely losses). Then three
+**MONTHLY TRADES** (the same grid tallying closed trades by exit month in
+win/loss/even order — `5/3`, `5/2/1E`; zero tallies omitted, wins green and
+losses red on a TTY, evens suffixed `E`), **TOP DRAWDOWNS** (the five deepest
+episodes with peak/trough/recovery dates and durations; `—` + `>N` marks one
+still underwater), and **TRADE P/L DISTRIBUTION** (a bucketed histogram of
+closed-trade profits — zero is always a bucket edge, so every bar is purely
+wins or purely losses). Then three
 in-terminal charts (the histogram and charts skip with `--no-chart`; the
 tables always print): the **PRICE** panel — the close series as a braille line
 with every trade marked at its actual fill price: `▲` long / `▼` short entry,
@@ -1513,8 +1527,9 @@ prints the **SLEEVE RETURN CORRELATION** matrix — every pairwise per-bar retur
 correlation, the direct answer to "do I hold four strategies or one strategy
 four times?" (skipped in `shared` mode, where sleeve curves sample the pot and
 every pair would read 1.00). The portfolio tearsheet also carries the same
-**MONTHLY RETURNS**, **TOP DRAWDOWNS**, and **TRADE P/L DISTRIBUTION** blocks
-as `backtest`, computed on the combined curve and merged ledger.
+**MONTHLY RETURNS**, **MONTHLY TRADES**, **TOP DRAWDOWNS**, and **TRADE P/L
+DISTRIBUTION** blocks as `backtest`, computed on the combined curve and merged
+ledger.
 
 The tearsheet ends with **in-terminal charts** (skip with `--no-chart`): the
 combined equity curve as a braille line chart with a dashed initial-capital
@@ -1540,8 +1555,9 @@ segment** as a sparkline — the "did the edge survive out of sample" question,
 answered per row at a glance. `portfolio` charts equity only: a basket mixes
 price scales, so per-trade context lives in the per-sleeve CSV/HTML exports
 instead. The `backtest` and `portfolio` tearsheets also print **MONTHLY
-RETURNS**, **TOP DRAWDOWNS**, and **TRADE P/L DISTRIBUTION** blocks (see the
-backtest section) — pure-text tables that survive any pipe.
+RETURNS**, **MONTHLY TRADES**, **TOP DRAWDOWNS**, and **TRADE P/L
+DISTRIBUTION** blocks (see the backtest section) — pure-text tables that
+survive any pipe.
 
 **Portfolio drawdown/run-up are close-to-close** on the combined curve, in both
 modes — the sleeves' worst intrabar moments don't coincide and cross-symbol
@@ -1736,10 +1752,10 @@ identities fail permanently as
   `PriceChartTrade`, `priceChartAscii`, `OverlayChartOptions`, `overlayChartAscii`,
   `drawdownChartAscii`, `sparkline` (pure string builders — the CLI's braille
   price/equity/drawdown/overlay charts, trade markers, and table sparklines)
-- Tearsheet tables: `monthlyReturnsAscii`, `topDrawdownsAscii`, `drawdownEpisodes`,
-  `profitHistogramAscii`, `correlationMatrixAscii` (+ their option types) — the
-  MONTHLY RETURNS / TOP DRAWDOWNS / TRADE P/L / SLEEVE CORRELATION blocks as
-  pure string builders
+- Tearsheet tables: `monthlyReturnsAscii`, `monthlyTradesAscii`, `topDrawdownsAscii`,
+  `drawdownEpisodes`, `profitHistogramAscii`, `correlationMatrixAscii` (+ their
+  option types) — the MONTHLY RETURNS / MONTHLY TRADES / TOP DRAWDOWNS /
+  TRADE P/L / SLEEVE CORRELATION blocks as pure string builders
 - Scaffold (`init`): `StarterTemplate`, `ScaffoldOptions`, `starterStrategy`,
   `isStarterTemplate`, `STARTER_TEMPLATES`, `STARTER_DESCRIPTIONS`, `SUGGESTED_FILE`
 - Params (sweep axis grammar): `Axis`, `ComboBudgetOptions`, `parseAxes`, `parseAxis`,

@@ -27,6 +27,7 @@ import {
   isUtcWeekTimeframe,
   snapshotHistoryCapabilities,
   snapshotHistorySessionCalendar,
+  historyCapabilityRecordSpan,
   snapshotResolvedHistorySource,
   utcTimeframeAnchor,
   utcTimeframesNest,
@@ -271,6 +272,8 @@ export async function acquireExactHistory(
     alignment: source.capabilities.alignment,
     weekAnchorSec: source.capabilities.weekAnchorSec,
     calendar: source.capabilities.calendar,
+    coverageSemantics: source.capabilities.coverageSemantics,
+    recordSpan: historyCapabilityRecordSpan(source.capabilities, plan.sourceTimeframe),
   });
 
   const acquisition =
@@ -303,6 +306,8 @@ export async function acquireExactHistory(
         ? plan.alignment.weekAnchorSec
         : source.capabilities.weekAnchorSec,
     calendar: source.capabilities.calendar,
+    coverageSemantics: source.capabilities.coverageSemantics,
+    recordSpan: historyCapabilityRecordSpan(source.capabilities, plan.sourceTimeframe),
   });
 
   if (!acquisition.complete) {

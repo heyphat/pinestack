@@ -30,7 +30,7 @@ import {
 } from './coverage.js';
 import { parseCanonicalTimeframeExact } from './timeframe.js';
 
-export const HISTORY_AGGREGATION_VERSION = 3;
+export const HISTORY_AGGREGATION_VERSION = 4;
 
 export type AggregateAlignment =
   | {
@@ -74,6 +74,8 @@ export function aggregateBars(
     alignment: spec.alignment.kind === 'utc' ? 'utc-24x7' : 'exchange-calendar',
     weekAnchorSec: sourceWeekAnchorSec,
     calendar,
+    coverageSemantics: acquisition.provenance.coverageSemantics,
+    recordSpan: acquisition.provenance.recordSpan,
   });
   const sourceDuration = fixedDuration(spec.sourceTimeframe);
   const targetDuration = fixedDuration(spec.targetTimeframe);
@@ -110,6 +112,9 @@ export function aggregateBars(
     sourceWeekAnchorSec,
   );
 
+  const completeRecord =
+    (acquisition.provenance.coverageSemantics ?? 'bars-only') === 'complete-record';
+  const recordSpan = acquisition.provenance.recordSpan;
   const barsByOpen = new Map(acquisition.bars.map((bar) => [bar.time, bar] as const));
   const bars: Bar[] = [];
   const covered: HalfOpenIntervalSec[] = [];
@@ -140,6 +145,8 @@ export function aggregateBars(
     for (const bucket of targetBuckets) {
       const members: Bar[] = [];
       let missing = false;
+      const completeRecordBucket =
+        completeRecord && recordSpan !== undefined && covers([recordSpan], bucket);
       for (let i = 0; i < ratio; i++) {
         const open = bucket.from + i * sourceDuration;
         const bar = barsByOpen.get(open);
@@ -149,20 +156,22 @@ export function aggregateBars(
         );
         const logicalPart = intersect(sourceInterval, acquisition.requested);
         const proven = !logicalPart || covers(acquisition.covered, logicalPart);
-        if (!bar || !proven) {
-          missing = true;
-        } else {
+        if (bar && (completeRecordBucket || proven)) {
           members.push(bar);
+        } else if (!completeRecordBucket) {
+          missing = true;
         }
       }
 
       const expectedClose = safeSecondAdd(bucket.from, targetDuration, 'aggregate bucket close');
-      const full = !missing && members.length === ratio && expectedClose === bucket.to;
+      const full =
+        expectedClose === bucket.to &&
+        (completeRecordBucket || (!missing && members.length === ratio));
       const clipped = intersect(bucket, acquisition.requested);
       if (!clipped) continue;
 
       if (full) {
-        bars.push(aggregateBucket(bucket.from, members));
+        if (members.length > 0) bars.push(aggregateBucket(bucket.from, members));
         covered.push(clipped);
       } else {
         explicitGapReasons.push({
@@ -179,7 +188,14 @@ export function aggregateBars(
   }
 
   if (spec.alignment.kind === 'session') {
-    covered.push(...closedSessionIntervals(spec.alignment, acquisition.requested));
+    const closures = closedSessionIntervals(spec.alignment, acquisition.requested);
+    covered.push(
+      ...(completeRecord && recordSpan
+        ? closures
+            .map((closure) => intersect(closure, recordSpan))
+            .filter((value): value is HalfOpenIntervalSec => value !== null)
+        : closures),
+    );
   }
 
   const mergedCovered = mergeIntervals(covered);
@@ -335,24 +351,31 @@ function aggregateCalendarPeriods(
   const covered: HalfOpenIntervalSec[] = [];
   const gaps: CoverageGapSec[] = [];
 
+  const completeRecord =
+    (acquisition.provenance.coverageSemantics ?? 'bars-only') === 'complete-record';
+  const recordSpan = acquisition.provenance.recordSpan;
   for (const period of periods) {
     assertCalendarPeriodCoverage(calendar, period);
     const expected = expectedCalendarMembers(period, dailySource, sourceDuration, calendar);
     const members: Bar[] = [];
     let missing = false;
+    const completeRecordPeriod =
+      completeRecord &&
+      recordSpan !== undefined &&
+      covers([recordSpan], halfOpenIntervalSec(period.from, period.to));
     for (const member of expected) {
       const bar = barsByOpen.get(member.open);
       const logicalPart = intersect(member.interval, acquisition.requested);
       const proven = !logicalPart || covers(acquisition.covered, logicalPart);
-      if (!bar || !proven) {
-        missing = true;
-      } else {
+      if (bar && (completeRecordPeriod || proven)) {
         members.push(bar);
+      } else if (!completeRecordPeriod) {
+        missing = true;
       }
     }
 
-    if (!missing && members.length === expected.length) {
-      bars.push(aggregateBucket(period.from, members));
+    if (completeRecordPeriod || (!missing && members.length === expected.length)) {
+      if (members.length > 0) bars.push(aggregateBucket(period.from, members));
       for (const session of period.sessions) {
         const clipped = intersect(session, acquisition.requested);
         if (clipped) covered.push(clipped);

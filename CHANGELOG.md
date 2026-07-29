@@ -9,6 +9,46 @@ README). The workspace packages run from TypeScript source and version in
 lockstep with the release tag; publishing the library to npm remains a possible
 follow-up.
 
+## [0.6.0] - 2026-07-29
+
+### Added
+
+- **MONTHLY TRADES tearsheet table.** `backtest` and `portfolio` print a year ×
+  month grid in the MONTHLY RETURNS layout tallying closed trades by exit month
+  in win/loss/even order (`5/3`, `5/2/1E`; zero tallies are omitted), with a
+  YEAR total column. Wins paint green and losses red on a TTY; evens keep an
+  `E` suffix because they carry no color. Like the other stats tables it always
+  prints, independent of `--no-chart`.
+- **Exact CSV CLI evidence for Bar Magnifier and static security.** Every CSV
+  leaf created by `--data-dir` now discovers canonical `<SYMBOL>_<TF>.csv`
+  datasets for native or exactly aggregatable acquisition. `--csv-alignment
+utc-24x7`, strict `--csv-week-anchor <YYYY-MM-DD|seconds>`, and
+  `--csv-calendar <file.json>` provide explicit alignment evidence; strict
+  calendar loading rejects unknown keys, unsafe intervals, and invalid
+  `periods`. Claims work for `CSV:` symbols in mixed routing without making CSV
+  the fallback provider, and duplicate/conflicting scalar options fail early.
+- **Authenticated CSV complete-record semantics.** `--csv-complete-record`
+  asserts that absent bars inside an explicit exact file's full record span mean
+  no trades. The bars-only default is unchanged. Semantics and record spans are
+  content- and identity-bound through native/aggregated acquisition, magnifier
+  and static-security proofs, local/worker execution, and walk-forward prefix
+  derivation. Bare fallback and empty files fail closed; requests and buckets
+  crossing the record edge remain incomplete.
+
+### Changed
+
+- Repeating any scalar CLI option (for example `--symbol a --symbol b`) is now
+  rejected with a `duplicate scalar option` error on every command instead of
+  silently using the last value. The repeatable options (`--input`,
+  `--input-a`/`--input-b`, `--weights`) are unchanged.
+- Exact CSV documentation now distinguishes compatibility `history()` row
+  normalization from strict exact acquisition, documents whole-second/grid and
+  OHLCV validation, strict exchange calendars, mixed routing, and the risk of
+  complete-record assertions. CLI help exposes the same evidence flags on every
+  analysis command. Bar Magnifier docs now describe the shipped
+  contract-capable piner 0.11.1 runtime (active-traversal reporting) instead of
+  the pre-0.5.0 capability-rejection state.
+
 ## [0.5.0] - 2026-07-28
 
 ### Added
@@ -47,13 +87,13 @@ follow-up.
     TradingView parity** — COOF, realtime, and risk/margin cadence keep the
     established chart-OHLC behavior.
 
-  - **Known limitations (typed rejections, not silent fallbacks):** the CLI's
-    `--provider csv` cannot declare bar alignment yet, so exact magnifier
-    resolution over CSV data fails with `unknown-alignment` — use a live
-    provider, or the programmatic `CsvProvider({ alignment: 'utc-24x7', … })`.
-    Chart timeframes whose mapped target the provider serves natively work
-    best (e.g. Binance: 30m chart → 5m target); targets needing aggregation
-    may report `incomplete-required-coverage` depending on fetch depth.
+  - **CSV exact acquisition:** the CLI now accepts explicit UTC or strict
+    exchange-calendar evidence for `--data-dir` leaves, including mixed
+    `CSV:` routing. Bars-only remains the default; callers may opt into the
+    stronger authenticated complete-record assertion when their file producer
+    guarantees it. Targets needing aggregation still fail with
+    `incomplete-required-coverage` whenever the selected evidence cannot cover
+    the complete requested envelope.
 
 ### Changed
 
@@ -245,6 +285,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.6.0]: https://github.com/heyphat/pinestack/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/heyphat/pinestack/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/heyphat/pinestack/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/heyphat/pinestack/compare/v0.2.0...v0.3.0

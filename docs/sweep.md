@@ -37,7 +37,7 @@ pinerun sweep <script.pine> --symbol <sym> --input <name=spec> ... [options]
 
 Plus shared flags — see [common options](./common-options.md):
 
-- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
+- **Data:** `--tf` · `--from` · `--to` · `--limit` · `--provider` · `--asset-class` · `--data-dir` · `--csv-alignment` · `--csv-week-anchor` · `--csv-calendar` · `--csv-complete-record` ([exact CSV](./csv-data.md#exact-acquisition-and-bar-magnifier)) (+ [credentials](./common-options.md#credentials-equities-providers--alpaca--massive))
 - **Execution:** `--backend` · `--concurrency` · `--workers` · `--no-security`
 - **Cache:** `--no-cache` · `--cache-dir` · `--refresh`
 - **Broker:** `--mintick` · `--min-qty` · `--calc-on-order-fills` / `--no-calc-on-order-fills` ([fill model](./common-options.md#fill-model--calc_on_order_fills)) · `--bar-magnifier` / `--no-bar-magnifier` ([Bar Magnifier exact mode](./common-options.md#fill-model--bar-magnifier))

@@ -14,8 +14,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import type {
   Bar,
+  HalfOpenIntervalSec,
   HistoryAcquisition,
   HistoryAlignment,
+  HistoryCoverageSemantics,
   HistoryProvider,
   HistoryRange,
   HistoryRequest,
@@ -39,6 +41,7 @@ import {
 import {
   createHistoryCacheIdentity,
   historyAcquisitionFromBars,
+  historyRecordSpanFromBars,
   snapshotHistoryCapabilities,
   snapshotHistorySessionCalendar,
   snapshotHistoryTimeframes,
@@ -55,6 +58,8 @@ export interface CsvProviderOptions {
   weekAnchorSec?: UnixSecond;
   /** Required metadata when alignment is `exchange-calendar`. */
   calendar?: HistorySessionCalendar;
+  /** Coverage interpretation. Default `bars-only`; complete-record requires explicit alignment. */
+  coverageSemantics?: HistoryCoverageSemantics;
   /** Canonical timeframes the files can serve exactly. Default none. */
   timeframes?: readonly string[] | 'arbitrary';
   /** Stable caller-owned dataset/version label for cache separation. */
@@ -68,6 +73,7 @@ export class CsvProvider implements HistoryProvider {
   private readonly alignment: HistoryAlignment;
   private readonly weekAnchorSec?: UnixSecond;
   private readonly calendar?: HistorySessionCalendar;
+  private readonly coverageSemantics: HistoryCoverageSemantics;
   private readonly timeframes: readonly string[] | 'arbitrary';
   private readonly datasetIdentity?: string;
   private readonly parsed = new Map<string, { text: string; bars: Bar[] }>();
@@ -81,6 +87,18 @@ export class CsvProvider implements HistoryProvider {
     this.weekAnchorSec =
       opts.weekAnchorSec === undefined ? undefined : unixSecond(opts.weekAnchorSec);
     this.calendar = opts.calendar ? snapshotHistorySessionCalendar(opts.calendar) : undefined;
+    this.coverageSemantics = opts.coverageSemantics ?? 'bars-only';
+    if (this.coverageSemantics !== 'bars-only' && this.coverageSemantics !== 'complete-record') {
+      throw new Error(`csv: unsupported coverage semantics "${String(this.coverageSemantics)}"`);
+    }
+    if (this.coverageSemantics === 'complete-record' && this.alignment === 'unknown') {
+      throw new ExactHistoryError({
+        kind: 'unsupported',
+        code: 'csv-complete-record-alignment-required',
+        message:
+          'csv: complete-record semantics require explicit UTC or exchange-calendar alignment',
+      });
+    }
     this.timeframes = snapshotHistoryTimeframes(opts.timeframes ?? []);
     this.datasetIdentity = opts.cacheIdentity;
   }
@@ -126,16 +144,60 @@ export class CsvProvider implements HistoryProvider {
     );
   }
 
+  private loadCompleteRecordHistory(
+    symbol: string,
+    timeframe: string,
+    range: HistoryRange | undefined,
+  ): { readonly bars: Bar[]; readonly recordSpan: HalfOpenIntervalSec } {
+    const exact = `${sanitize(symbol)}_${sanitize(timeframe)}.csv`.toLowerCase();
+    const fallback = `${sanitize(symbol)}.csv`.toLowerCase();
+    const files = this.scan();
+    this.ensureInstruments();
+    const exactFile = files.get(exact);
+    if (!exactFile) {
+      if (files.has(fallback)) {
+        throw new ExactHistoryError({
+          kind: 'unsupported',
+          code: 'csv-complete-record-requires-exact-file',
+          message:
+            `csv: complete-record semantics require an explicit ${sanitize(symbol)}_` +
+            `${timeframe}.csv dataset; bare fallback files are not authoritative`,
+          details: { symbol, timeframe },
+        });
+      }
+      throw new Error(`csv: no data for "${symbol}" (${timeframe}) in ${this.dir}`);
+    }
+
+    const fullRecord = this.parse(exactFile, true);
+    const recordSpan = historyRecordSpanFromBars({
+      bars: fullRecord,
+      timeframe,
+      alignment: this.alignment,
+      weekAnchorSec: this.weekAnchorSec,
+      calendar: this.calendar,
+    });
+    const selected = applyExactQueryRange(fullRecord, range);
+    return { bars: snapshotExactBars(selected), recordSpan };
+  }
+
   async resolveHistorySource(symbol: string): Promise<ResolvedHistorySource> {
     const normalizedSymbol = sanitize(symbol.trim()).toUpperCase();
     if (!normalizedSymbol) throw new Error('csv: cannot resolve an empty symbol');
     const resolvedTimeframes = this.resolveTimeframes(normalizedSymbol);
+    const resolvedRecordSpans = this.resolveRecordSpans(normalizedSymbol, resolvedTimeframes);
+    const soleRecordSpan =
+      Object.keys(resolvedRecordSpans).length === 1
+        ? resolvedRecordSpans[Object.keys(resolvedRecordSpans)[0]!]
+        : undefined;
     const resolvedFingerprint = this.fingerprintRelevantFiles(normalizedSymbol);
     const capabilities = snapshotHistoryCapabilities({
       timeframes: resolvedTimeframes,
       alignment: this.alignment,
       ...(this.weekAnchorSec !== undefined ? { weekAnchorSec: this.weekAnchorSec } : {}),
       ...(this.calendar ? { calendar: this.calendar } : {}),
+      coverageSemantics: this.coverageSemantics,
+      ...(soleRecordSpan ? { recordSpan: soleRecordSpan } : {}),
+      ...(Object.keys(resolvedRecordSpans).length > 0 ? { recordSpans: resolvedRecordSpans } : {}),
     });
     const cacheIdentity = createHistoryCacheIdentity(this.id, {
       symbol: normalizedSymbol,
@@ -147,6 +209,8 @@ export class CsvProvider implements HistoryProvider {
       declaredTimeframes: this.timeframes,
       resolvedTimeframes: capabilities.timeframes,
       filenameMatching: 'case-insensitive-sanitized-v1',
+      coverageSemantics: capabilities.coverageSemantics,
+      recordSpans: resolvedRecordSpans,
       capabilities,
     });
 
@@ -169,13 +233,24 @@ export class CsvProvider implements HistoryProvider {
         }
         this.assertResolvedFingerprint(normalizedSymbol, resolvedFingerprint);
         let bars: Bar[];
+        let recordSpan: HalfOpenIntervalSec | undefined;
         try {
-          bars = this.loadHistory(
-            normalizedSymbol,
-            request.timeframe,
-            historyRequestRange(request),
-            true,
-          );
+          if (this.coverageSemantics === 'complete-record') {
+            const loaded = this.loadCompleteRecordHistory(
+              normalizedSymbol,
+              request.timeframe,
+              historyRequestRange(request),
+            );
+            bars = loaded.bars;
+            recordSpan = loaded.recordSpan;
+          } else {
+            bars = this.loadHistory(
+              normalizedSymbol,
+              request.timeframe,
+              historyRequestRange(request),
+              true,
+            );
+          }
         } catch (error) {
           if (error instanceof ExactHistoryError) throw error;
           throw exactCsvLoadError(error, normalizedSymbol, request.timeframe);
@@ -189,6 +264,8 @@ export class CsvProvider implements HistoryProvider {
           alignment: capabilities.alignment,
           weekAnchorSec: capabilities.weekAnchorSec,
           calendar: capabilities.calendar,
+          coverageSemantics: capabilities.coverageSemantics,
+          recordSpan,
         });
       },
     });
@@ -250,9 +327,14 @@ export class CsvProvider implements HistoryProvider {
     for (const name of files.values()) {
       const lower = name.toLowerCase();
       if (!lower.startsWith(exactPrefix) || lower === `${sanitized}.csv`) continue;
-      const suffix = name.slice(exactPrefix.length, -4);
+      const suffix = lower.slice(exactPrefix.length, -4);
       const parsed = parseCanonicalTimeframeExact(suffix);
-      if (parsed.kind === 'ok') exactTimeframes.add(parsed.value.canonical);
+      // Matching is case-insensitive, but the timeframe token itself must be
+      // canonical. Otherwise discovery could advertise (for example) `01h` as
+      // `1h` even though exact loading correctly looks for `<SYMBOL>_1h.csv`.
+      if (parsed.kind === 'ok' && parsed.value.canonical === suffix) {
+        exactTimeframes.add(parsed.value.canonical);
+      }
     }
 
     const fallbackFile = files.get(`${sanitized}.csv`);
@@ -269,14 +351,13 @@ export class CsvProvider implements HistoryProvider {
     };
 
     if (this.timeframes !== 'arbitrary') {
-      return [...new Set(this.timeframes)].filter(
-        (timeframe) =>
-          files.has(`${sanitized}_${sanitize(timeframe)}`.toLowerCase() + '.csv') ||
-          fallbackSupports(timeframe),
-      );
+      return [...new Set(this.timeframes)].filter((timeframe) => {
+        const hasExact = files.has(`${sanitized}_${sanitize(timeframe)}`.toLowerCase() + '.csv');
+        return hasExact || (this.coverageSemantics === 'bars-only' && fallbackSupports(timeframe));
+      });
     }
 
-    if (fallbackFile) {
+    if (fallbackFile && this.coverageSemantics === 'bars-only') {
       try {
         fallbackBars ??= this.parse(fallbackFile, true);
         const inferred = inferCanonicalTimeframe(fallbackBars);
@@ -287,6 +368,18 @@ export class CsvProvider implements HistoryProvider {
       }
     }
     return [...exactTimeframes].sort((a, b) => a.localeCompare(b));
+  }
+
+  private resolveRecordSpans(
+    symbol: string,
+    timeframes: readonly string[],
+  ): Readonly<Record<string, HalfOpenIntervalSec>> {
+    if (this.coverageSemantics === 'bars-only') return Object.freeze({});
+    const spans: Record<string, HalfOpenIntervalSec> = {};
+    for (const timeframe of timeframes) {
+      spans[timeframe] = this.loadCompleteRecordHistory(symbol, timeframe, undefined).recordSpan;
+    }
+    return Object.freeze(spans);
   }
 
   private fingerprintRelevantFiles(symbol: string): string {

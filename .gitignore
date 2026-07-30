@@ -58,3 +58,5 @@ dev-docs/
 pinelive*.local.*
 
 semantic-review
+.tigeropen
+tiger_openapi_config.properties

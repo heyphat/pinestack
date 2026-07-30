@@ -1,7 +1,7 @@
 {
   "name": "@heyphat/pinelive",
   "version": "0.1.0",
-  "description": "SDK-free forward runner and broker protocol for mirroring piner strategy positions into live or paper accounts.",
+  "description": "Forward runner and broker protocol for mirroring piner strategy positions into paper accounts or Tiger through the official OpenAPI SDK.",
   "type": "module",
   "license": "AGPL-3.0-only",
   "author": "Phat Huynh (heyphat)",
@@ -40,7 +40,8 @@
     }
   },
   "dependencies": {
-    "@heyphat/pinery": "workspace:*"
+    "@heyphat/pinery": "workspace:*",
+    "@tigeropenapi/tigeropen": "0.5.4"
   },
   "peerDependencies": {
     "@heyphat/piner": "*"

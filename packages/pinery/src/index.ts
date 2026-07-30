@@ -57,6 +57,7 @@ export {
   dropUnclosedBars,
   barCloseTime,
   normalizeBars,
+  normalizeExpiryDate,
   assertResolvedDataInstrument,
   MarketDataError,
   isMarketDataProvider,
@@ -80,6 +81,8 @@ export {
   canonicalTimeframeToPineExact,
   canonicalTimeframeSecondsExact,
   selectLargestExactDivisor,
+  resolveLowerFetchTf,
+  resolveSameSymbolFetchTf,
 } from './timeframe.js';
 export type {
   HistoryAcquisitionPlan,

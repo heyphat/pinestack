@@ -13,8 +13,9 @@ bridges historical providers into the `DataFeed` piner's `Engine` consumes.
 - **Browser-safe core** (`@heyphat/pinery`): contracts/config, timeframe helpers,
   browser-capable historical adapters, `ReplayProvider`, and transport-injected
   `TigerProvider`. No Node built-ins.
-- **Node entry** (`@heyphat/pinery/node`): filesystem cache/CSV live construction
-  and optional production transport registration. Never bundled into a browser.
+- **Node entry** (`@heyphat/pinery/node`): filesystem cache/CSV live construction,
+  the official Tiger OpenAPI SDK adapter, and custom transport registration.
+  Never bundled into a browser.
 
 `piner` (`@heyphat/piner`) is a **peer dependency** — pinery implements its
 `Bar`/`DataFeed` types and expects the host to provide the engine.
@@ -408,38 +409,52 @@ changes surface within a day. `refresh: true` bypasses instrument reads as well.
 
 ## API summary
 
+The lists below highlight the main public surface; the TypeScript declarations
+remain authoritative.
+
 **`@heyphat/pinery`**
 
-- Types: `Bar`, `HistoryProvider`, `HistoryRange`, `InstrumentInfo`, `Timeframe`, and each provider's `*Options`
-- `toDataFeed`, `applyRange`
-- `timeframeSeconds`, `toPinerTimeframe`, `parseTimeframe`, `pinerTimeframeToCanonical`
-- `fetchJson` (shared retrying JSON GET), `FetchJsonOptions`
-- Symbol helpers: `normalizeOkxSpot`, `normalizeOkxSwap`, `normalizeKrakenSpot`, `splitConcatenatedPair`
-- Adapters: `BinanceProvider`, `OkxProvider`, `KrakenProvider`, `AlpacaProvider`, `MassiveProvider`, `StaticProvider`, `barsFromCsv`
+- Historical contracts: `Bar`, `HistoryProvider`, `HistoryRange`,
+  `InstrumentInfo`, `toDataFeed`, and `applyRange`.
+- Forward contracts: `MarketDataProvider`, `ResolvedDataInstrument`,
+  `MarketDataError`, provider config types, and cancellation/lifecycle types.
+- Timeframes: `timeframeSeconds`, `toPinerTimeframe`, `parseTimeframe`, and
+  `pinerTimeframeToCanonical`.
+- Addressing/factories: asset-class registry and instrument-address helpers,
+  `createProvider`, `createMarketDataProvider`, `resolveInstrument`, and
+  `InstrumentRouter`.
+- Historical adapters: `BinanceProvider`, `OkxProvider`, `KrakenProvider`,
+  `AlpacaProvider`, `MassiveProvider`, `StaticProvider`, and `barsFromCsv`.
+- Forward adapters: `ReplayProvider`, transport-injected `TigerProvider`, and
+  Tiger market-data transport types.
+- Shared HTTP/symbol helpers, including `fetchJson` and exchange normalization.
 
 **`@heyphat/pinery/node`**
 
-- `cached`, `DiskCacheOptions`
-- `CsvProvider`, `CsvProviderOptions` — serve history from a directory of
+- `cached` and `DiskCacheOptions`, including source-identity-keyed legacy
+  history, exact-acquisition, and instrument metadata caching.
+- `CsvProvider` and `CsvProviderOptions` — serve history from a directory of
   `<SYMBOL>_<TF>.csv` files (header `time,open,high,low,close,volume`; optional
   `instruments.csv` sidecar for lot step / tick size). Node-only because it
   reads the filesystem; route it through `InstrumentRouter` via
   `InstrumentRouterOptions.providers`. Exact acquisition stays fail-closed by
   default (unknown alignment, no advertised exact timeframes, bars-only
-  coverage); opt in explicitly with `timeframes`, `alignment: 'utc-24x7'` +
+  coverage); opt in explicitly with `timeframes`, `alignment: 'utc-24x7'` plus
   optional `weekAnchorSec`, or a `calendar`, plus
   `coverageSemantics: 'complete-record'` to treat missing bars inside an exact
   file's authenticated record span as no-trade intervals. `cacheIdentity`
   versions the dataset; all claims join the fingerprinted source identity.
+- `createNodeMarketDataProvider` for Node-only CSV/Replay and official Tiger
+  construction.
+- The official Tiger OpenAPI market-data adapter and
+  `registerTigerMarketDataTransport` override for fixtures/custom transports.
 
-## Writing a new provider
+## Writing a historical provider
 
-Implement `HistoryProvider`. Return ascending bars in unix seconds; honor
-`range` (or lean on `applyRange` after materializing). Keep the core browser-safe
-— put any Node-only I/O behind a separate `/node`-style module. If the venue
-exposes trading rules (lot step / tick size), also implement `instrument()` so
-hosts can run the broker on the symbol's real quantization; it's optional and
-callers must tolerate `undefined`.
+Implement `HistoryProvider`. Return ascending bars in Unix seconds and honor
+`range` (or apply `applyRange` after materializing). Keep the core browser-safe;
+put filesystem or vendor-SDK work behind a `/node` entry. If the venue exposes
+lot/tick rules, implement `instrument()` so hosts use real quantization.
 
 ```ts
 import type { Bar, HistoryProvider, HistoryRange } from '@heyphat/pinery';
@@ -447,6 +462,7 @@ import { applyRange } from '@heyphat/pinery';
 
 export class MyProvider implements HistoryProvider {
   readonly id = 'myprovider';
+
   async history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
     const bars = await fetchSomehow(symbol, timeframe);
     return applyRange(bars, range);
@@ -454,26 +470,84 @@ export class MyProvider implements HistoryProvider {
 }
 ```
 
-## License
+Forward providers have a stricter contract: exact instrument resolution,
+resolved warmup history, exclusive-after closed-bar streaming, cancellation,
+and cleanup. Follow the existing `ReplayProvider`/`TigerProvider` behavior and
+add deterministic transport-level coverage for closure, gaps, pagination,
+identity, cancellation, and malformed data.
 
-[GNU AGPL-3.0](../../../piner/LICENSE) © Phat Huynh.
+## Forward market data
 
-## Live market data
+`MarketDataProvider` extends the historical surface with strict resolution,
+resolved history, an exclusive-after stream of closed bars, cancellation, and
+optional cleanup. `ResolvedDataInstrument` freezes the strategy symbol, opaque
+provider handle, exact venue symbol, tick size, native quantity step, minimum
+order, and available point-value/exchange/expiry metadata. `MarketDataError`
+classifies connectivity, authentication, rate-limit, invalid-symbol,
+entitlement, and malformed-data failures without exposing credentials.
 
-`MarketDataProvider` extends `HistoryProvider` with strict instrument resolution, resolved history, an exclusive-after stream of closed bars, cancellation, and optional cleanup. Its `ResolvedDataInstrument` fixes the strategy symbol, opaque provider handle, exact venue symbol, tick size, native quantity step, minimum order, and available point-value/exchange/expiry metadata for a run. `MarketDataError` classifies connectivity, authentication, rate-limit, invalid-symbol, entitlement, and malformed-data failures without exposing credentials.
+### Replay
 
-`ReplayProvider` wraps any historical provider with an explicit `cutoverTime`: `historyResolved({ limit })` returns the most recent bars before cutover, and `closedBars({ after })` emits later closed bars in ascending unique order. With a virtual clock it waits and rechecks each not-yet-closed bar instead of dropping it; cancellation interrupts that wait. The Node factory turns a CSV directory config into `CsvProvider` plus `ReplayProvider`; CSV parsing never belongs in pinelive.
+`ReplayProvider` wraps any historical provider with an explicit `cutoverTime`.
+`historyResolved({ limit })` returns the most recent bars before cutover, while
+`closedBars({ after })` emits later closed bars in ascending unique order. With
+a virtual clock it waits and rechecks a not-yet-closed bar instead of dropping
+it; cancellation interrupts that wait. The Node factory combines CSV data with
+ReplayProvider, so CSV parsing and replay timing remain in pinery rather than
+pinelive.
 
 ```ts
 import { ReplayProvider, StaticProvider } from '@heyphat/pinery';
 
-const history = new StaticProvider({ MGC: bars }).setInstrument('MGC', { minQty: 1, mintick: 0.1 });
+const history = new StaticProvider({ MGC: bars }).setInstrument('MGC', {
+  minQty: 1,
+  mintick: 0.1,
+});
 const data = new ReplayProvider(history, {
   cutoverTime: 1_704_067_200,
   instrument: { minOrderQty: 1, pointValue: 10 },
 });
 ```
 
-`ProviderConfig` is a strict discriminated union. `createMarketDataProvider` is browser-safe; `createNodeMarketDataProvider` handles CSV/filesystem and optional runtime transport registration. Existing `createProvider` remains the permissive historical factory. Explicit live symbol/provider or asset-class mismatches fail instead of coercing.
+`ProviderConfig` is a strict discriminated union. The browser-safe
+`createMarketDataProvider` handles compatible core providers;
+`createNodeMarketDataProvider` handles CSV/filesystem and the default official
+Tiger transport. Existing `createProvider` remains the permissive historical
+factory. Forward symbol/provider or asset-class mismatches fail instead of
+coercing to another instrument.
 
-Tiger is registered as `TG:` / futures-only. `TigerProvider` uses an injected `TigerMarketDataTransport` to resolve and freeze an exact contract, fetch authoritative closed history, and poll with overlap, deduplication, paged gap recovery, retry and cancellation. `nextCursor` denotes an older page and its absence declares the requested range complete; history continues paging when finality filtering would otherwise underfill a requested limit, while live polling drains every page before yielding the complete gap. The repository intentionally does **not** invent or claim an unverified production Tiger SDK transport. A real connection requires a separately registered transport, credentials, entitlements, and credentialed validation.
+### Tiger
+
+Tiger is registered as `TG:` and futures-only. `TigerProvider` uses an injected
+`TigerMarketDataTransport` to resolve and freeze one exact contract, fetch
+closed history, and poll with overlap, deduplication, paged gap recovery, retry,
+and cancellation. `nextCursor` identifies an older page; its absence declares
+the requested range complete. History continues paging when conservative
+finality filtering would otherwise underfill a limit, and live polling drains
+all pages before yielding a recovered gap.
+
+`@heyphat/pinery/node` defaults to the pinned official
+[`@tigeropenapi/tigeropen`](https://github.com/tigerfintech/openapi-typescript-sdk)
+adapter. `registerTigerMarketDataTransport` remains an override for fixtures and
+reviewed custom transports.
+
+Supported timeframes are `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, and
+`6h`. Their K-line timestamps are treated as bar opens. `1d`, `1w`, and `1M` are
+rejected because Tiger stamps them at a session-close boundary that cannot be
+safely converted into a session open. `8h`, `12h`, and `3d` are not offered.
+The newest bar on the newest page is conservatively withheld as still forming,
+which can add up to one bar of latency. Pagination cursors retain the first
+page's request parameters because Tiger rejects a cursor request with changed
+parameters. The SDK has no request-level `AbortSignal`, so cancellation is
+checked immediately before and after, not during, an in-flight SDK call.
+
+> **Readiness:** Tiger coverage is offline only, using injected SDK facades. No
+> credentialed contract resolution, quote/history response, entitlement,
+> demo/live order, cancellation, or fill was validated by this audit. The data
+> and execution adapters are not sandbox- or production-approved. See the
+> [pinelive forward guide](../../docs/pinelive.md#paper-and-tiger) and permanent
+> [`feat/pinelive` audit](../../docs/feat-pinelive-audit.md).
+
+## License
+
+[GNU AGPL-3.0](../../LICENSE) © Phat Huynh.

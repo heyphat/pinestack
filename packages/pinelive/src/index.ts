@@ -13,7 +13,7 @@ export type {
   ResolvedDataInstrument,
   ClosedBarsOptions,
 } from '@heyphat/pinery';
-export type { Broker, Capabilities, BrokerErrorCode } from './core/broker.js';
+export type { Broker, CancelOutcome, Capabilities, BrokerErrorCode } from './core/broker.js';
 export { BrokerError, isBrokerError } from './core/broker.js';
 export { snap, nativeQtyStep, toBrokerQty, toNativeQty, quantitiesEqual } from './core/units.js';
 export {
@@ -35,6 +35,7 @@ export type {
   ForwardRecord,
   BindingRecord,
   StartupRecord,
+  SecurityFeedHealthRecord,
   LedgerRecord,
   LedgerSink,
   ReconcileAction,
@@ -42,6 +43,28 @@ export type {
 export { MemoryLedger } from './core/ledger.js';
 export type { ForwardRunnerOptions } from './core/runner.js';
 export { ForwardRunner, ForwardRunnerError } from './core/runner.js';
+export type {
+  SecurityFeedSpec,
+  SecurityFeedKind,
+  SecurityFeedManagerOptions,
+  SecurityFeedHealth,
+  SecurityPlan,
+  DiscoverOptions,
+} from './core/security.js';
+export {
+  SecurityFeedManager,
+  SecurityFeedError,
+  planSecurityFromStatic,
+  planSecurityFromRequests,
+  findUncoveredSecurityFeeds,
+  discoverSecurityRequests,
+  PROBE_SYMBOL,
+  DEFAULT_MAX_SECURITY_BARS,
+  DEFAULT_MAX_SECURITY_FEEDS,
+  DEFAULT_SECURITY_CONCURRENCY,
+  DEFAULT_SECURITY_REQUEST_TIMEOUT_MS,
+  DEFAULT_MAX_SECURITY_STALE_REFRESHES,
+} from './core/security.js';
 export type { ForwardServerOptions, ForwardServerResult } from './core/server.js';
 export { runForwardServer } from './core/server.js';
 export type { BrokerFactory, BrokerFactoryContext, BrokerRegistration } from './core/registry.js';

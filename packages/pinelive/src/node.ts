@@ -53,17 +53,32 @@ export async function readConfig(path: string): Promise<Readonly<Record<string, 
 }
 
 import { TigerBroker, type TigerTradingTransport } from './brokers/tiger.js';
+import { createOfficialTigerTradingTransport } from './brokers/tiger-official.js';
+
+export {
+  OfficialTigerTradingTransport,
+  createOfficialTigerTradingTransport,
+  tigerUserMark,
+  type OfficialTigerTradeClient,
+  type OfficialTigerTradingOptions,
+} from './brokers/tiger-official.js';
 
 export interface TigerBrokerConfig {
   id: 'tiger';
   profile?: string;
   account?: string;
+  orderPollIntervalMs?: number;
+  maxOrderPolls?: number;
+  cancelStuckOrders?: boolean;
 }
 
 export interface TigerTradingCredentials {
   tigerId?: string;
   privateKey?: string;
   account?: string;
+  secretKey?: string;
+  license?: string;
+  token?: string;
 }
 
 export type TigerTradingTransportFactory = (
@@ -73,7 +88,7 @@ export type TigerTradingTransportFactory = (
 
 let tigerTradingTransportFactory: TigerTradingTransportFactory | undefined;
 
-/** Register an independently verified production Tiger execution transport. */
+/** Override the built-in official Tiger OpenAPI execution transport. */
 export function registerTigerTradingTransport(factory: TigerTradingTransportFactory): void {
   tigerTradingTransportFactory = factory;
 }
@@ -82,17 +97,40 @@ export function assertTigerBrokerConfig(value: unknown): TigerBrokerConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('pinelive: Tiger broker config must be an object');
   const config = value as Record<string, unknown>;
-  const unknown = Object.keys(config).find((key) => !['id', 'profile', 'account'].includes(key));
+  const allowed = [
+    'id',
+    'profile',
+    'account',
+    'orderPollIntervalMs',
+    'maxOrderPolls',
+    'cancelStuckOrders',
+  ];
+  const unknown = Object.keys(config).find((key) => !allowed.includes(key));
   if (unknown) throw new Error(`pinelive: Tiger broker config does not allow "${unknown}"`);
   if (config.id !== 'tiger') throw new Error('pinelive: Tiger broker config requires id "tiger"');
   for (const key of ['profile', 'account'] as const) {
     if (config[key] != null && typeof config[key] !== 'string')
       throw new Error(`pinelive: Tiger broker ${key} must be a string`);
   }
+  if (
+    config.orderPollIntervalMs != null &&
+    (!Number.isInteger(config.orderPollIntervalMs) || (config.orderPollIntervalMs as number) < 0)
+  )
+    throw new Error('pinelive: Tiger broker orderPollIntervalMs must be a non-negative integer');
+  if (
+    config.maxOrderPolls != null &&
+    (!Number.isInteger(config.maxOrderPolls) || (config.maxOrderPolls as number) < 0)
+  )
+    throw new Error('pinelive: Tiger broker maxOrderPolls must be a non-negative integer');
+  if (config.cancelStuckOrders != null && typeof config.cancelStuckOrders !== 'boolean')
+    throw new Error('pinelive: Tiger broker cancelStuckOrders must be boolean');
   return {
     id: 'tiger',
     profile: config.profile as string | undefined,
     account: config.account as string | undefined,
+    orderPollIntervalMs: config.orderPollIntervalMs as number | undefined,
+    maxOrderPolls: config.maxOrderPolls as number | undefined,
+    cancelStuckOrders: config.cancelStuckOrders as boolean | undefined,
   };
 }
 
@@ -100,26 +138,39 @@ export function createNodeTigerBroker(
   input: TigerBrokerConfig,
   armed: boolean,
   credentials: Readonly<TigerTradingCredentials> = {
-    tigerId: process.env.TIGER_ID,
-    privateKey: process.env.TIGER_PRIVATE_KEY,
-    account: process.env.TIGER_ACCOUNT,
+    tigerId: process.env.TIGEROPEN_TIGER_ID ?? process.env.TIGER_ID,
+    privateKey: process.env.TIGEROPEN_PRIVATE_KEY ?? process.env.TIGER_PRIVATE_KEY,
+    account: process.env.TIGEROPEN_ACCOUNT ?? process.env.TIGER_ACCOUNT,
+    secretKey: process.env.TIGEROPEN_SECRET_KEY,
+    license: process.env.TIGEROPEN_LICENSE,
+    token: process.env.TIGEROPEN_TOKEN,
   },
 ): TigerBroker {
   const config = assertTigerBrokerConfig(input);
   if (!armed) throw new Error('pinelive: Tiger execution requires explicit arming');
-  if (!tigerTradingTransportFactory)
-    throw new Error(
-      'pinelive: no production Tiger trading transport is registered; install/register a verified credentialed transport',
-    );
   const credentialSlice: TigerTradingCredentials = {
     tigerId: optionalCredential(credentials.tigerId, 'tigerId'),
     privateKey: optionalCredential(credentials.privateKey, 'privateKey'),
     account: optionalCredential(credentials.account, 'account'),
+    secretKey: optionalCredential(credentials.secretKey, 'secretKey'),
+    license: optionalCredential(credentials.license, 'license'),
+    token: optionalCredential(credentials.token, 'token'),
   };
+  const factory =
+    tigerTradingTransportFactory ??
+    ((value: TigerBrokerConfig, secrets: TigerTradingCredentials) =>
+      createOfficialTigerTradingTransport({
+        ...secrets,
+        account: value.account ?? secrets.account,
+        propertiesFilePath: value.profile,
+      }));
   return new TigerBroker({
-    transport: tigerTradingTransportFactory(config, credentialSlice),
+    transport: factory(config, credentialSlice),
     armed,
-    accountId: config.account,
+    accountId: config.account ?? credentialSlice.account,
+    orderPollIntervalMs: config.orderPollIntervalMs,
+    maxOrderPolls: config.maxOrderPolls,
+    cancelStuckOrders: config.cancelStuckOrders,
   });
 }
 

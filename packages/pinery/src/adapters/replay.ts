@@ -107,9 +107,10 @@ export class ReplayProvider implements MarketDataProvider {
   ): Promise<Bar[]> {
     this.assertOwned(instrument);
     throwIfAborted(signal);
+    const capAtCutover = range?.to == null;
     const sourceRange = {
       ...range,
-      to: Math.min(range?.to ?? Number.POSITIVE_INFINITY, this.options.cutoverTime - 1),
+      ...(capAtCutover ? { to: this.options.cutoverTime - 1 } : {}),
       limit: undefined,
     };
     const bars = normalizeBars(
@@ -117,7 +118,7 @@ export class ReplayProvider implements MarketDataProvider {
     );
     throwIfAborted(signal);
     return applyRange(
-      bars.filter((bar) => bar.time < this.options.cutoverTime),
+      capAtCutover ? bars.filter((bar) => bar.time < this.options.cutoverTime) : bars,
       range,
     ).map((bar) => ({ ...bar }));
   }

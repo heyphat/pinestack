@@ -5,22 +5,48 @@ function assertPositive(value: number, name: string): void {
     throw new RangeError(`${name} must be a positive finite number`);
 }
 
-function decimals(value: number): number {
-  const text = value.toString().toLowerCase();
-  if (text.includes('e-')) return Math.min(12, Number(text.split('e-')[1]));
-  return Math.min(12, text.includes('.') ? text.length - text.indexOf('.') - 1 : 0);
+/** Maximum accepted floating error as a fraction of one quantity step. */
+const GRID_ALIGNMENT_TOLERANCE = 1e-12;
+
+/** True only when a finite value is demonstrably on a positive finite increment. */
+export function isStepAligned(value: number, step: number): boolean {
+  if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) return false;
+  const nearestUnits = Math.round(value / step);
+  if (!Number.isSafeInteger(nearestUnits)) return false;
+  const candidate = nearestUnits * step;
+  if (!Number.isFinite(candidate)) return false;
+  return Math.abs(value - candidate) <= step * GRID_ALIGNMENT_TOLERANCE;
 }
 
 /** Snap toward zero. This is deliberately conservative: it can undershoot, never overshoot. */
 export function snap(qty: number, step: number): number {
   if (!Number.isFinite(qty)) throw new RangeError('qty must be finite');
   assertPositive(step, 'step');
-  const scale = 10 ** Math.max(decimals(qty), decimals(step));
-  const units = Math.floor(
-    (Math.abs(qty) * scale + Number.EPSILON * scale) / Math.round(step * scale),
-  );
-  const snapped = (units * Math.round(step * scale)) / scale;
-  return Math.sign(qty) * snapped;
+  const magnitude = Math.abs(qty);
+  if (isStepAligned(magnitude, step)) return qty;
+
+  const ratio = magnitude / step;
+  if (!Number.isFinite(ratio)) throw new RangeError('qty/step ratio must be finite');
+  let units = Math.floor(ratio);
+  if (!Number.isSafeInteger(units))
+    throw new RangeError('qty exceeds the safely representable quantity grid');
+
+  let snapped = units * step;
+  if (!Number.isFinite(snapped)) throw new RangeError('snapped qty must be finite');
+  // Division can round a quotient upward at the edge of floating precision. Never trust it
+  // without comparing the reconstructed quantity to the actual requested magnitude.
+  if (snapped > magnitude && units > 0) {
+    units--;
+    snapped = units * step;
+  }
+  if (!Number.isFinite(snapped) || snapped > magnitude)
+    throw new RangeError('qty cannot be snapped conservatively on this quantity grid');
+
+  // Clean ordinary multiplication noise only when the cleaned value remains both on-grid and
+  // conservative. Otherwise retain the direct grid product rather than rounding economics up.
+  const normalized = Number(snapped.toPrecision(15));
+  const result = normalized <= magnitude && isStepAligned(normalized, step) ? normalized : snapped;
+  return Math.sign(qty) * result;
 }
 
 export function nativeQtyStep(instrument: Instrument): number {

@@ -201,6 +201,19 @@ test('resolved objects cannot be forged and Tiger errors retain no secret-bearin
 });
 
 test('live router rejects capability-erasing overrides and config validates branch fields', () => {
+  // pinerun's Tiger routing depends on a history-only override being accepted.
+  expect(
+    () =>
+      new InstrumentRouter({
+        providers: {
+          tiger: {
+            id: 'tiger',
+            history: async () => [],
+            instrument: async () => ({ minQty: 1, mintick: 0.1 }),
+          },
+        },
+      }),
+  ).not.toThrow();
   expect(
     () =>
       new InstrumentRouter({

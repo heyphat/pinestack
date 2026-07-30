@@ -260,6 +260,188 @@ test('TigerBroker polls a working partial fill to terminal before caching it', a
   expect(transport.submits).toBe(1);
 });
 
+test('TigerBroker cancels a stuck order only when explicitly enabled and armed', async () => {
+  function stuckTransport() {
+    const transport = new FixtureTradingTransport();
+    let state: TigerOrderResult | undefined;
+    transport.submitMarket = async (_account, request) => {
+      transport.submits++;
+      state = { ...request, orderId: 'order-1', requestedQty: request.qty, status: 'working' };
+      return state;
+    };
+    transport.findOrderByClientId = async () => state;
+    return {
+      transport,
+      cancelled: [] as string[],
+      settle: (next: Partial<TigerOrderResult>) => {
+        state = { ...state!, ...next } as TigerOrderResult;
+      },
+    };
+  }
+  const order = {
+    symbol: 'MGCZ24',
+    side: 'buy' as const,
+    qty: 1,
+    type: 'market' as const,
+    clientId: 'stuck',
+  };
+
+  // Default: no cancel is attempted and the caller sees a retryable timeout.
+  const untouched = stuckTransport();
+  untouched.transport.cancelOrder = async () => {
+    untouched.cancelled.push('called');
+  };
+  await expect(
+    new TigerBroker({
+      transport: untouched.transport,
+      armed: true,
+      maxOrderPolls: 1,
+      sleep: async () => {},
+    }).submit(order),
+  ).rejects.toMatchObject({ code: 'timeout', retryable: true });
+  expect(untouched.cancelled).toEqual([]);
+
+  // Enabled: cancel is requested and the re-read decides the outcome.
+  const cancelling = stuckTransport();
+  cancelling.transport.cancelOrder = async (_account, orderId) => {
+    cancelling.cancelled.push(orderId);
+    cancelling.settle({ status: 'cancelled', filledQty: 0 });
+  };
+  await expect(
+    new TigerBroker({
+      transport: cancelling.transport,
+      armed: true,
+      maxOrderPolls: 1,
+      cancelStuckOrders: true,
+      sleep: async () => {},
+    }).submit(order),
+  ).rejects.toMatchObject({ code: 'reject', retryable: false });
+  expect(cancelling.cancelled).toEqual(['order-1']);
+});
+
+test('TigerBroker honours a fill that wins the race against its own cancel', async () => {
+  const transport = new FixtureTradingTransport();
+  let state: TigerOrderResult | undefined;
+  transport.submitMarket = async (_account, request) => {
+    transport.submits++;
+    state = { ...request, orderId: 'order-1', requestedQty: request.qty, status: 'working' };
+    return state;
+  };
+  transport.findOrderByClientId = async () => state;
+  transport.cancelOrder = async () => {
+    // The venue filled before the cancel landed, then rejected the cancel.
+    state = { ...state!, status: 'filled', filledQty: 1, price: 100, time: 1_700_000_000 };
+    throw new Error('order already filled');
+  };
+  const broker = new TigerBroker({
+    transport,
+    armed: true,
+    maxOrderPolls: 1,
+    cancelStuckOrders: true,
+    sleep: async () => {},
+  });
+  const order = {
+    symbol: 'MGCZ24',
+    side: 'buy' as const,
+    qty: 1,
+    type: 'market' as const,
+    clientId: 'cancel-race',
+  };
+  const fill = await broker.submit(order);
+  expect(fill).toMatchObject({ status: 'filled', filledQty: 1, price: 100 });
+  // The winning fill is cached, so a retry never resubmits.
+  expect(await broker.submit(order)).toEqual(fill);
+  expect(transport.submits).toBe(1);
+});
+
+test('TigerBroker refuses to cancel while unarmed', async () => {
+  const transport = new FixtureTradingTransport();
+  let attempted = false;
+  transport.submitMarket = async (_account, request) => ({
+    ...request,
+    orderId: 'order-1',
+    requestedQty: request.qty,
+    status: 'working',
+  });
+  transport.findOrderByClientId = async () => undefined;
+  transport.cancelOrder = async () => {
+    attempted = true;
+  };
+  const broker = new TigerBroker({
+    transport,
+    armed: false,
+    maxOrderPolls: 1,
+    cancelStuckOrders: true,
+    sleep: async () => {},
+  });
+  await expect(
+    broker.submit({
+      symbol: 'MGCZ24',
+      side: 'buy',
+      qty: 1,
+      type: 'market',
+      clientId: 'unarmed-cancel',
+    }),
+  ).rejects.toMatchObject({ code: 'precondition' });
+  expect(attempted).toBe(false);
+});
+
+test('TigerBroker exposes protocol cancel only when the transport supports it', async () => {
+  const withoutCancel = new FixtureTradingTransport();
+  const plain = new TigerBroker({ transport: withoutCancel, armed: true });
+  expect(plain.capabilities().supportsCancel).toBe(false);
+  expect(plain.cancel).toBeUndefined();
+
+  const transport = new FixtureTradingTransport();
+  let state: TigerOrderResult | undefined;
+  const cancelled: string[] = [];
+  transport.findOrderByClientId = async () => state;
+  transport.cancelOrder = async (_account, orderId) => {
+    cancelled.push(orderId);
+    state = { ...state!, status: 'cancelled', filledQty: 0 };
+  };
+  const broker = new TigerBroker({ transport, armed: true, accountId: 'demo' });
+  expect(broker.capabilities().supportsCancel).toBe(true);
+
+  // Unknown client id is reported, not invented.
+  await expect(broker.cancel!('never-sent')).resolves.toEqual({
+    clientId: 'never-sent',
+    status: 'not-found',
+    filledQty: 0,
+  });
+
+  state = {
+    clientId: 'resting',
+    orderId: 'order-9',
+    symbol: 'MGCZ24',
+    side: 'buy',
+    requestedQty: 1,
+    status: 'working',
+  };
+  await expect(broker.cancel!('resting')).resolves.toEqual({
+    clientId: 'resting',
+    status: 'cancelled',
+    filledQty: 0,
+  });
+  expect(cancelled).toEqual(['order-9']);
+
+  // A fill that beat the cancel is reported as filled, not raised as an error.
+  state = { ...state, status: 'working' };
+  transport.cancelOrder = async () => {
+    state = { ...state!, status: 'filled', filledQty: 1 };
+    throw new Error('order already filled');
+  };
+  await expect(broker.cancel!('resting')).resolves.toEqual({
+    clientId: 'resting',
+    status: 'filled',
+    filledQty: 1,
+  });
+
+  // Cancel is armed-gated exactly like submit and flatten.
+  const unarmed = new TigerBroker({ transport, armed: false });
+  await expect(unarmed.cancel!('resting')).rejects.toMatchObject({ code: 'precondition' });
+});
+
 test('TigerBroker flatten operation ids do not collide across broker instances', async () => {
   const firstTransport = new FixtureTradingTransport();
   const secondTransport = new FixtureTradingTransport();
@@ -311,7 +493,7 @@ test('TigerBroker rejects and does not cache an unknown runtime order status', a
       requestedQty: request.qty,
       filledQty: request.qty,
       price: 100,
-      status: 'working',
+      status: 'not-a-tiger-status',
     } as unknown as TigerOrderResult;
   };
   const broker = new TigerBroker({ transport, armed: true });

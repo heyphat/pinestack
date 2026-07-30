@@ -224,6 +224,7 @@ export type ProviderConfig =
       assetClass: 'futures';
       profile?: string;
       baseUrl?: string;
+      cacheIdentity?: string;
       transport?: TigerMarketDataTransport;
       pollIntervalMs?: number;
       retryDelayMs?: number;
@@ -284,6 +285,7 @@ export function assertProviderConfig(value: unknown): ProviderConfig {
       'assetClass',
       'profile',
       'baseUrl',
+      'cacheIdentity',
       'transport',
       'pollIntervalMs',
       'retryDelayMs',
@@ -293,6 +295,7 @@ export function assertProviderConfig(value: unknown): ProviderConfig {
       throw new Error('pinery: Tiger live config requires assetClass "futures"');
     optionalString(config, 'profile');
     optionalString(config, 'baseUrl');
+    optionalString(config, 'cacheIdentity');
     optionalNumber(config, 'pollIntervalMs', { minimum: 0 });
     optionalNumber(config, 'retryDelayMs', { minimum: 0 });
     optionalNumber(config, 'maxRetries', { minimum: 0, integer: true });
@@ -393,6 +396,7 @@ export function createMarketDataProvider(configInput: ProviderConfig): MarketDat
       );
     return new TigerProvider({
       transport: config.transport,
+      cacheIdentity: config.cacheIdentity,
       pollIntervalMs: config.pollIntervalMs,
       retryDelayMs: config.retryDelayMs,
       maxRetries: config.maxRetries,

@@ -54,6 +54,8 @@ export interface TigerMarketDataTransport {
 
 export interface TigerProviderOptions {
   transport: TigerMarketDataTransport;
+  /** Stable non-secret namespace for caches shared by multiple Tiger profiles. */
+  cacheIdentity?: string;
   pollIntervalMs?: number;
   retryDelayMs?: number;
   maxRetries?: number;
@@ -63,6 +65,7 @@ export interface TigerProviderOptions {
 
 export class TigerProvider implements MarketDataProvider {
   readonly id = 'tiger';
+  readonly cacheIdentity?: string;
   readonly assetClass = 'futures' as const;
   private readonly contracts = new Map<string, Readonly<TigerFutureContract>>();
   private readonly resolved = new Map<string, ResolvedDataInstrument>();
@@ -71,6 +74,12 @@ export class TigerProvider implements MarketDataProvider {
 
   constructor(private readonly options: TigerProviderOptions) {
     if (!options.transport) throw new Error('tiger: a market-data transport is required');
+    if (
+      options.cacheIdentity != null &&
+      (typeof options.cacheIdentity !== 'string' || !options.cacheIdentity.trim())
+    )
+      throw new RangeError('tiger: cacheIdentity must be a non-empty string');
+    this.cacheIdentity = options.cacheIdentity;
     for (const [name, value] of [
       ['pollIntervalMs', options.pollIntervalMs],
       ['retryDelayMs', options.retryDelayMs],

@@ -1,39 +1,324 @@
 # @heyphat/pinelive
 
-Forward orchestration and broker execution for piner strategies. Market data is owned by `@heyphat/pinery`: pinelive consumes a resolved `MarketDataProvider`, advances piner once per yielded closed bar, reads `strategy.position_size`, and reconciles an exact execution contract.
+`@heyphat/pinelive` is pinestack's forward-execution layer. It advances a piner
+strategy on closed bars supplied by `@heyphat/pinery`, reads piner's target
+position, and reconciles that target through a broker while writing an auditable
+JSONL ledger.
 
-The canonical CLI uses a versioned JSON config:
+## Availability and safety status
+
+Pinelive is currently **source-checkout/workspace-only**:
+
+- It is not published to npm.
+- Pinestack GitHub Releases contain standalone `pinerun` binaries only.
+- The `curl | sh` installer and `pinerun upgrade` do not install `pinelive`.
+- Run the CLI from a pinestack checkout with Bun 1.2.5.
+
+`PaperBroker` is the safe default. The Tiger market-data and execution adapters
+have extensive offline tests against injected SDK facades, but no credentialed
+quote/history, entitlement, demo/live order, cancellation, or fill validation.
+They are **not sandbox- or production-approved**. See
+[Tiger readiness](#tiger-readiness) before configuring Tiger.
+
+## Architecture boundaries
+
+Pinelive coordinates three owners without duplicating their responsibilities:
+
+1. **pinery owns market data.** A `MarketDataProvider` resolves one exact
+   instrument, returns warmup history, and yields closed bars. CSV parsing,
+   closure decisions, overlap, deduplication, and gap recovery stay in pinery.
+2. **piner owns strategy state.** Pinelive advances piner once per yielded closed
+   chart bar and reads `strategy.position_size` as the target.
+3. **pinelive owns execution orchestration.** A `Broker` reports the exact
+   position/account, submits corrections, and exposes truthful capabilities.
+   The runner binds identities, enforces arming, drains provider work, and writes
+   the ledger.
+
+```text
+pinery MarketDataProvider ──closed bars──▶ piner strategy
+          │                                    │ target position
+          │ exact resolved instrument          ▼
+          └──────────────────────────────▶ pinelive runner ──▶ Broker
+                                                   │
+                                                   └──▶ JSONL ledger
+```
+
+A run freezes one `RunInstrumentBinding`. The Pine strategy sees its configured
+strategy symbol, while pinery and the broker retain the opaque/exact venue
+identity. Pinelive does not silently roll contracts or substitute a nearby
+instrument.
+
+## Run from source
+
+From the repository root:
+
+```bash
+bun install --frozen-lockfile
+bun packages/pinelive/src/cli.ts --help
+```
+
+The CLI has two commands:
+
+```text
+run --config <path> [--tiger-profile <path>]
+parity <live.jsonl> <expected.jsonl>
+```
+
+## Paper quick start
+
+This example uses only checked-in CSV fixtures and `PaperBroker`; it does not
+contact a market-data or broker service.
+
+Create `pinelive.paper.json` in the repository root:
 
 ```json
 {
   "configVersion": 1,
-  "strategy": "strategy.pine",
+  "strategy": "examples/rsi-mean-reversion.pine",
   "symbol": "BTCUSDT",
   "timeframe": "1h",
-  "warmupBars": 100,
+  "warmupBars": 20,
   "data": {
     "provider": "csv",
     "dataDir": "examples/data",
-    "cutoverTime": 1704067200,
-    "mintick": 0.01,
-    "qtyStep": 1
+    "cutoverTime": 1704139200
   },
-  "broker": { "id": "paper" },
+  "broker": {
+    "id": "paper"
+  },
   "armed": false,
   "ledger": ".pinelive/ledger.jsonl"
 }
 ```
 
+Run it:
+
 ```bash
-bun packages/pinelive/src/cli.ts run --config pinelive.local.json
+bun packages/pinelive/src/cli.ts run --config pinelive.paper.json
 ```
 
-Warmup establishes piner state without submitting an order. `reconcileOnStart: true` is an explicit drift-correction mode and writes a separate startup record. Each normal cycle follows one pinery yield and records a schema-v2 binding id, strategy symbol, and exact execution symbol. Shutdown cancels first, attempts provider/broker/ledger cleanup, and never flattens automatically.
+`cutoverTime` is a Unix-seconds replay boundary. The CSV provider returns the 20
+most recent `BTCUSDT` one-hour bars before it as warmup, then `ReplayProvider`
+yields later closed bars in order. `examples/data/instruments.csv` supplies the
+instrument tick and quantity metadata. Warmup establishes piner state without
+submitting an order; subsequent bars are reconciled through PaperBroker and
+recorded in `.pinelive/ledger.jsonl`.
 
-`PaperBroker` is the safe default. `TigerBroker` is execution-only and uses an injected `TigerTradingTransport`; it implements exact-contract account/position reads, deterministic reconciliation client-id submission, working-partial polling, terminal fill mapping, collision-resistant flatten operation ids, classified errors, and independent submit/flatten arming gates. No unverified production Tiger SDK transport is bundled or claimed as validated. A real run requires a separately registered, credentialed transport, stale-contract exposure preflight, and demo validation.
+Keep `armed: false` for Paper runs. Real Tiger submission and flatten paths
+require explicit arming, but arming alone does not make the adapter safe for
+sandbox or production use.
 
-The former pinelive `LiveFeed` and `CsvReplayFeed` APIs were intentionally removed. Use pinery's `MarketDataProvider` and `ReplayProvider`; this is a breaking data-boundary migration.
+## Configuration
 
-Public entry points: `@heyphat/pinelive` (broker/runner core), `@heyphat/pinelive/node` (JSONL and optional production transport registration), and `@heyphat/pinelive/testing` (broker conformance).
+The CLI accepts one versioned JSON document. The primary fields are:
 
-See [the forward guide](../../docs/pinelive.md) and [adapter contract](../../docs/pinelive-adapter-contract.md).
+| Field              | Purpose                                                                          |
+| ------------------ | -------------------------------------------------------------------------------- |
+| `configVersion`    | Must be `1`.                                                                     |
+| `strategy`         | Path to a Pine strategy.                                                         |
+| `symbol`           | Strategy-facing symbol; the provider resolves the exact execution instrument.    |
+| `timeframe`        | Canonical pinery timeframe such as `5m` or `1h`.                                 |
+| `warmupBars`       | Chart bars replayed before forward reconciliation.                               |
+| `data`             | Strict pinery provider configuration (`csv`, replay-backed providers, or Tiger). |
+| `broker`           | `{"id":"paper"}` or a configured Tiger broker.                                   |
+| `order`            | Optional execution policy; market is the default, limit is explicit.             |
+| `armed`            | Global execution gate. Tiger also applies independent submit/flatten gates.      |
+| `ledger`           | JSONL output path.                                                               |
+| `reconcileOnStart` | Optional explicit startup drift correction; disabled by default.                 |
+| `tigerProfile`     | Optional shared Tiger profile path for both data and broker sections.            |
+
+Advanced secondary-feed, shutdown, Tiger polling, and credential fields are
+documented in the [forward-testing guide](../../docs/pinelive.md).
+Configuration is fail-closed: unknown or incompatible provider/symbol/asset-class
+combinations do not silently coerce into a different live instrument.
+
+## Lifecycle, reconciliation, and ledger
+
+Startup performs these steps in order:
+
+1. Validate the config and compile the strategy.
+2. Resolve and freeze the exact pinery instrument.
+3. Connect the broker and verify contract, tick, quantity, minimum-order, and
+   point-value compatibility.
+4. Load chart and `request.security` warmup without ordering.
+5. Optionally perform the separately recorded `reconcileOnStart` correction.
+6. For each yielded closed chart bar, refresh dependencies, tick piner once,
+   read the target, reconcile, and append one cycle record.
+
+Schema-v2 ledgers start with a binding record and preserve the provider/broker
+ids, strategy and execution symbols, metadata, stable binding fingerprint, and
+the complete requested order economics. Existing schema-v1 cycle JSON remains
+readable by parity tooling.
+
+Shutdown cancels first, asks the provider to disconnect, and drains real
+secondary-feed operations before broker/ledger cleanup. A provider that ignores
+abort and disconnect produces a bounded cleanup failure instead of a false
+successful shutdown. Remaining cleanup is still attempted. Shutdown never
+flattens automatically.
+
+Deterministic client ids frame every identity component with its length. The
+binding, side, quantity, order type, and snapped limit price therefore cannot
+collide merely because user strings contain separators. Ambiguous Tiger
+submissions are not retransmitted within the same process, but durable
+crash/restart pending state is not implemented.
+
+## Market and limit orders
+
+Market orders are the default. To mirror target changes with limits:
+
+```json
+{
+  "order": {
+    "type": "limit",
+    "limitOffsetTicks": 0
+  }
+}
+```
+
+The closed chart bar's close is the reference. A buy limit subtracts
+`limitOffsetTicks * mintick`; a sell limit adds it. Side-aware rounding keeps the
+result on the passive side of the venue tick grid.
+
+PaperBroker does not simulate an order book. It fills only an immediately
+marketable limit, caps the fill so it cannot violate the limit, and rejects a
+non-marketable limit instead of inventing a resting order.
+
+Tiger sends native futures `LMT` orders. Limit mode requires
+`broker.cancelStuckOrders: true` and cancellation-capable transport. If an order
+outlives the initial polling budget, the broker requests cancellation and
+continues bounded terminal-state polling; it refuses a different correction
+while the previous submission remains unresolved. A fill that wins the
+cancellation race remains authoritative. `flatten()` is always market-only.
+
+## `request.security` secondary feeds
+
+Pinelive supports static dependencies and runtime inputs that remain fixed for
+the run. It deduplicates call sites into pinery feed states, fetches the finest
+required base timeframe, injects warmup before chart replay, and performs
+bounded overlap/catch-up refreshes before each live chart tick. A self-reference
+reuses the chart's exact resolved instrument.
+
+Safety is fail-closed by default:
+
+- Resolution, history, timeout, malformed-data, and insufficient-depth failures
+  abort startup.
+- A dependency first discovered during live evaluation stops the run before
+  broker reconciliation rather than trading on `na` or `[]`.
+- The first refresh failure records a durable security-health event and stops
+  before reconciliation unless `maxSecurityStaleRefreshes` explicitly permits a
+  bounded stale window.
+- `maxSecurityBars` stops the run instead of silently truncating stateful
+  indicator history.
+- Provider work and shutdown drainage are concurrency- and timeout-bounded.
+
+See [`request.security` secondary feeds](../../docs/pinelive.md#requestsecurity-secondary-feeds)
+for addressing, timeframe planning, health snapshots, and configuration limits.
+
+## Paper broker
+
+PaperBroker models signed net quantity, weighted basis, realized/unrealized PnL,
+point value, commission, quantity/tick validation, and client-id idempotency. It
+is deterministic and intended for replay, development, conformance, and parity
+work—not as a claim that bar-close fills model live execution quality.
+
+## Tiger readiness
+
+The Node entry defaults to the pinned official
+[`@tigeropenapi/tigeropen`](https://github.com/tigerfintech/openapi-typescript-sdk)
+SDK adapters. Transport registration remains available for fixtures and custom
+implementations.
+
+Offline SDK-facade tests cover futures resolution, intraday timeframe and
+end-time conversion, conservative pagination/finality, account/contract/position
+mapping, exact `userMark` lookup, market/limit placement response handling,
+working/partial/terminal polling, cancellation races, redaction, and ambiguous
+same-process submission suppression. They do not contact Tiger.
+
+The following remain unvalidated or unimplemented:
+
+- Credentialed quote/history and entitlement behavior.
+- Demo or live order placement, cancellation, and fills.
+- Production operational procedures and market-access checks.
+- Durable pending-transmission state across crashes/restarts.
+- Armed-restart stale-contract and existing-exposure preflight.
+- Automatic futures contract rolling.
+
+`userMark` is searchable metadata, not a venue-enforced idempotency key. The SDK
+also lacks request-level `AbortSignal` support, so in-flight HTTP calls cannot be
+interrupted. Operators must not treat this adapter as sandbox- or
+production-approved.
+
+For a future reviewed data dry run, use Tiger data with `broker.id: "paper"`.
+Do not enable real Tiger execution until credentialed validation and the missing
+restart controls have been completed and separately approved.
+
+### Tiger credentials
+
+Prefer one local mode-0600 properties file at
+`~/.tigeropen/tiger_openapi_config.properties` (or the working directory). To
+use another location, set top-level `tigerProfile`, pass
+`--tiger-profile <path>`, or set `TIGEROPEN_CONFIG_PATH`; a per-section `profile`
+overrides it. `~` is expanded, a directory resolves to the standard filename,
+and a nonexistent explicit path fails immediately.
+
+Environment alternatives are:
+
+- `TIGEROPEN_TIGER_ID`
+- `TIGEROPEN_PRIVATE_KEY`
+- `TIGEROPEN_ACCOUNT`
+- `TIGEROPEN_TOKEN`
+- optional `TIGEROPEN_LICENSE`
+- optional institutional `TIGEROPEN_SECRET_KEY`
+
+Legacy `TIGER_ID`, `TIGER_PRIVATE_KEY`, and `TIGER_ACCOUNT` remain fallbacks.
+Never commit credentials or include them in logs, ledgers, fixtures, or error
+messages. Entitlement and live-operation instructions remain intentionally
+undocumented until credentialed validation exists.
+
+## Parity
+
+Expected JSONL rows use `{ "barTime": 1700000000, "target": 1 }`. Compare them
+with one live/replay ledger:
+
+```bash
+bun packages/pinelive/src/cli.ts parity \
+  .pinelive/ledger.jsonl expected-targets.jsonl
+```
+
+Parity scopes one run/strategy/binding/timeframe and reports missing or duplicate
+cycles, target mismatches, rejects, and execution drift. It does not claim
+fill-price parity.
+
+## Public entry points
+
+- `@heyphat/pinelive` — browser-safe broker protocol, PaperBroker, binding,
+  mirror, runner, units, parity, and shared types.
+- `@heyphat/pinelive/node` — JSONL ledger, Node factories, official Tiger SDK
+  adapters, and transport overrides.
+- `@heyphat/pinelive/testing` — `runBrokerConformance()` and test helpers for
+  broker implementations.
+- `packages/pinelive/src/cli.ts` — source-checkout `run` and `parity` CLI.
+
+A broker implements `Broker` (`id`, `capabilities`, `instrument`, `getPosition`,
+`getAccount`, `submit`, `flatten`, and optional lifecycle/cancel methods) and
+must pass `runBrokerConformance()`. Capabilities must describe the behavior the
+adapter actually implements. See the
+[broker adapter contract](../../docs/pinelive-adapter-contract.md).
+
+## Data-boundary migration
+
+The former pinelive `LiveFeed` and `CsvReplayFeed` APIs were removed. Use
+pinery's `MarketDataProvider`, `ReplayProvider`, and Node CSV provider/factory.
+This is a deliberate breaking migration: pinelive consumes resolved closed bars
+but no longer parses CSV or owns replay timing.
+
+## More documentation
+
+- [Forward-testing guide](../../docs/pinelive.md)
+- [Broker adapter contract](../../docs/pinelive-adapter-contract.md)
+- [`feat/pinelive` audit and remediation record](../../docs/feat-pinelive-audit.md)
+- [Pinery market-data API](../pinery/README.md)
+
+## License
+
+[GNU AGPL-3.0](../../LICENSE) © Phat Huynh.

@@ -8,6 +8,8 @@ export interface ReconcileContext {
   executionSymbol: string;
   bindingId: string;
   barTime: number;
+  /** Closed-bar reference used to derive a configured limit price. */
+  referencePrice?: number;
   timeframe: string;
   /** Stable operator-defined deployment/stream namespace. */
   executionId?: string;
@@ -52,6 +54,10 @@ export interface PositionMirrorOptions {
   epsilon?: number;
   transientRetries?: number;
   retryDelayMs?: number;
+  /** Execution order type. Market remains the backward-compatible default. */
+  orderType?: 'market' | 'limit';
+  /** Passive offset from the closed-bar reference. Buy subtracts; sell adds. Default 0. */
+  limitOffsetTicks?: number;
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
@@ -69,8 +75,13 @@ function stableClientId(
   actual: number,
   target: number,
   quantity: number,
+  type: 'market' | 'limit',
+  limitPrice?: number,
 ): string {
-  const safe = (value: string) => value.replace(/[^a-zA-Z0-9_.:-]/g, '_');
+  const frame = (value: unknown): string => {
+    const text = String(value);
+    return `${text.length}:${text}`;
+  };
   return [
     ctx.executionId ?? 'default',
     ctx.strategyId,
@@ -82,10 +93,31 @@ function stableClientId(
     stableNumber(actual),
     stableNumber(target),
     stableNumber(quantity),
+    ...(type === 'limit' ? ['limit', stableNumber(limitPrice!)] : []),
     'reconcile',
   ]
-    .map((value) => safe(String(value)))
-    .join(':');
+    .map(frame)
+    .join('|');
+}
+
+function passiveLimitPrice(
+  referencePrice: number,
+  mintick: number,
+  side: 'buy' | 'sell',
+  offsetTicks: number,
+): number {
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0)
+    throw new RangeError('limit order requires a positive finite reference price');
+  if (!Number.isFinite(mintick) || mintick <= 0)
+    throw new RangeError('limit order requires a positive finite instrument mintick');
+  const raw = referencePrice + (side === 'buy' ? -1 : 1) * offsetTicks * mintick;
+  const units = raw / mintick;
+  // Small tolerance removes floating noise without ever crossing the intended passive side.
+  const snappedUnits = side === 'buy' ? Math.floor(units + 1e-10) : Math.ceil(units - 1e-10);
+  const price = Number((snappedUnits * mintick).toPrecision(15));
+  if (!Number.isFinite(price) || price <= 0)
+    throw new RangeError('derived limit price must be positive and finite');
+  return price;
 }
 
 export class PositionMirror {
@@ -121,6 +153,18 @@ export class PositionMirror {
     ) {
       throw new RangeError('retryDelayMs must be a non-negative finite number');
     }
+    const orderType = options.orderType ?? 'market';
+    if (orderType !== 'market' && orderType !== 'limit')
+      throw new RangeError('orderType must be "market" or "limit"');
+    if (
+      options.limitOffsetTicks != null &&
+      (!Number.isInteger(options.limitOffsetTicks) || options.limitOffsetTicks < 0)
+    )
+      throw new RangeError('limitOffsetTicks must be a non-negative integer');
+    if (orderType === 'market' && options.limitOffsetTicks != null)
+      throw new RangeError('limitOffsetTicks is only valid when orderType is "limit"');
+    if (!broker.capabilities().orderTypes.includes(orderType))
+      throw new RangeError(`${broker.id} does not support ${orderType} orders`);
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
@@ -166,13 +210,35 @@ export class PositionMirror {
       };
     }
 
-    const order: OrderRequest = {
-      symbol: ctx.executionSymbol,
-      side: rawDelta > 0 ? 'buy' : 'sell',
-      qty: quantity,
-      type: 'market',
-      clientId: stableClientId(ctx, actual.qty, target, quantity),
-    };
+    const side = rawDelta > 0 ? 'buy' : 'sell';
+    const orderType = this.options.orderType ?? 'market';
+    const limitPrice =
+      orderType === 'limit'
+        ? passiveLimitPrice(
+            ctx.referencePrice!,
+            this.instrument.mintick,
+            side,
+            this.options.limitOffsetTicks ?? 0,
+          )
+        : undefined;
+    const clientId = stableClientId(ctx, actual.qty, target, quantity, orderType, limitPrice);
+    const order: OrderRequest =
+      orderType === 'limit'
+        ? {
+            symbol: ctx.executionSymbol,
+            side,
+            qty: quantity,
+            type: 'limit',
+            limitPrice: limitPrice!,
+            clientId,
+          }
+        : {
+            symbol: ctx.executionSymbol,
+            side,
+            qty: quantity,
+            type: 'market',
+            clientId,
+          };
 
     const attempts = Math.max(1, (this.options.transientRetries ?? 0) + 1);
     let fill: Fill | undefined;

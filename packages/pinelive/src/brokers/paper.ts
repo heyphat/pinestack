@@ -1,7 +1,7 @@
 import { BrokerError } from '../core/broker.js';
 import type { Broker, Capabilities } from '../core/broker.js';
 import type { Account, Fill, Instrument, OrderRequest, Position } from '../core/types.js';
-import { nativeQtyStep, snap } from '../core/units.js';
+import { isStepAligned, nativeQtyStep } from '../core/units.js';
 
 export interface PaperBrokerOptions {
   instruments?: Readonly<Record<string, Instrument>>;
@@ -37,7 +37,23 @@ interface CachedFill {
 }
 
 function orderFingerprint(order: OrderRequest): string {
-  return `${order.symbol}\u0000${order.side}\u0000${order.qty}\u0000${order.type}`;
+  return `${order.symbol}\u0000${order.side}\u0000${order.qty}\u0000${order.type}\u0000${
+    order.type === 'limit' ? order.limitPrice : ''
+  }`;
+}
+
+function isTickAligned(price: number, mintick: number): boolean {
+  if (!Number.isFinite(price) || !Number.isFinite(mintick) || mintick <= 0) return false;
+  const units = price / mintick;
+  const nearestUnits = Math.round(units);
+  // Beyond safe-integer precision JavaScript cannot prove which venue tick was requested.
+  if (!Number.isSafeInteger(nearestUnits)) return false;
+  const nearest = nearestUnits * mintick;
+  const tolerance = Math.min(
+    mintick * 0.01,
+    Math.max(mintick * 1e-9, Number.EPSILON * 16 * Math.max(1, Math.abs(price), Math.abs(nearest))),
+  );
+  return Math.abs(price - nearest) <= tolerance;
 }
 
 export class PaperBroker implements Broker, MarkableBroker {
@@ -77,10 +93,12 @@ export class PaperBroker implements Broker, MarkableBroker {
   capabilities(): Capabilities {
     return {
       positionModel: 'netting',
-      orderTypes: ['market'],
-      supportsNativeFlatten: true,
+      orderTypes: ['market', 'limit'],
+      supportsNativeFlatten: false,
       fractionalQuantity: true,
       transport: 'poll',
+      // Paper fills at the current mark, so no order ever rests to be cancelled.
+      supportsCancel: false,
     };
   }
 
@@ -140,6 +158,19 @@ export class PaperBroker implements Broker, MarkableBroker {
   }
 
   async submit(order: OrderRequest): Promise<Fill> {
+    if (!order || typeof order !== 'object')
+      throw new BrokerError('precondition', 'paper: order must be an object');
+    if (typeof order.symbol !== 'string' || !order.symbol.trim())
+      throw new BrokerError('precondition', 'paper: order symbol is required');
+    if (typeof order.clientId !== 'string' || !order.clientId.trim())
+      throw new BrokerError('precondition', 'paper: order client id is required');
+    if (order.side !== 'buy' && order.side !== 'sell')
+      throw new BrokerError('precondition', 'paper: order side must be "buy" or "sell"');
+    if (order.type !== 'market' && order.type !== 'limit')
+      throw new BrokerError('reject', `paper: ${String(order.type)} orders are not supported`);
+    if (!Number.isFinite(order.qty) || order.qty <= 0)
+      throw new BrokerError('precondition', 'paper: order qty must be positive');
+
     const prior = this.fills.get(order.clientId);
     if (prior) {
       if (prior.fingerprint !== orderFingerprint(order)) {
@@ -150,27 +181,46 @@ export class PaperBroker implements Broker, MarkableBroker {
       }
       return structuredClone(prior.fill);
     }
-    if (order.type !== 'market')
-      throw new BrokerError('reject', 'paper: only market orders are supported');
-    if (!Number.isFinite(order.qty) || order.qty <= 0)
-      throw new BrokerError('precondition', 'paper: order qty must be positive');
     const instrument = await this.instrument(order.symbol);
     const state = this.state(order.symbol);
     if (!state.mark)
       throw new BrokerError('precondition', `paper: ${order.symbol} must be marked before submit`);
+    if (order.type === 'limit') {
+      if (!Number.isFinite(order.limitPrice) || order.limitPrice <= 0)
+        throw new BrokerError('precondition', 'paper: limit price must be positive and finite');
+      if (!isTickAligned(order.limitPrice, instrument.mintick))
+        throw new BrokerError('precondition', 'paper: limit price is not aligned to mintick');
+      const marketable =
+        order.side === 'buy'
+          ? order.limitPrice >= state.mark.price
+          : order.limitPrice <= state.mark.price;
+      if (!marketable)
+        throw new BrokerError(
+          'reject',
+          'paper: resting limit orders are not simulated; limit is not marketable at the mark',
+        );
+    }
     const rejection = this.options.reject?.(order);
     if (rejection) throw new BrokerError('reject', rejection);
 
     const step = nativeQtyStep(instrument);
-    const qty = Math.abs(snap(order.qty, step));
-    if (qty === 0 || qty < (instrument.minOrderQty ?? step)) {
+    if (!isStepAligned(order.qty, step))
+      throw new BrokerError('precondition', 'paper: order quantity is not aligned to its step');
+    const qty = order.qty;
+    if (qty < (instrument.minOrderQty ?? step)) {
       throw new BrokerError(
         'reject',
         `paper: quantity is below the ${instrument.minOrderQty ?? step} minimum`,
       );
     }
     const slippage = (this.options.slippageBps ?? 0) / 10_000;
-    const price = state.mark.price * (order.side === 'buy' ? 1 + slippage : 1 - slippage);
+    const slippedPrice = state.mark.price * (order.side === 'buy' ? 1 + slippage : 1 - slippage);
+    const price =
+      order.type === 'limit'
+        ? order.side === 'buy'
+          ? Math.min(slippedPrice, order.limitPrice)
+          : Math.max(slippedPrice, order.limitPrice)
+        : slippedPrice;
     const signedFill = order.side === 'buy' ? qty : -qty;
     this.applyFill(state, signedFill, price, instrument.pointValue ?? 1);
     const commission = qty * (this.options.commissionPerUnit ?? 0);

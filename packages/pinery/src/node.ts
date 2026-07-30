@@ -29,9 +29,17 @@ import { assertProviderConfig, createMarketDataProvider } from './factory.js';
 import { CsvProvider } from './adapters/csv.js';
 import { ReplayProvider } from './adapters/replay.js';
 import type { TigerMarketDataTransport } from './adapters/tiger.js';
+import { createOfficialTigerMarketDataTransport } from './adapters/tiger-official.js';
 
 export * from './index.js';
 export { CsvProvider, type CsvProviderOptions } from './adapters/csv.js';
+export {
+  OfficialTigerMarketDataTransport,
+  createOfficialTigerMarketDataTransport,
+  resolveTigerProfilePath,
+  type OfficialTigerMarketDataOptions,
+  type OfficialTigerQuoteClient,
+} from './adapters/tiger-official.js';
 
 export interface DiskCacheOptions {
   /** Cache directory. Default `.pinery-cache` under the current working directory. */
@@ -71,8 +79,10 @@ interface ExactHistoryPayload {
 /** Wrap a provider so identical requests are served from disk. */
 export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): HistoryProvider {
   const dir = opts.dir ?? join(process.cwd(), '.pinery-cache');
+  const cacheIdentity = provider.cacheIdentity ?? provider.id;
   const wrapped: HistoryProvider = {
     id: `${provider.id}+cache`,
+    cacheIdentity,
     ...(provider.assetClass ? { assetClass: provider.assetClass } : {}),
 
     async history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
@@ -331,6 +341,8 @@ export interface TigerMarketDataCredentials {
   tigerId?: string;
   privateKey?: string;
   account?: string;
+  license?: string;
+  token?: string;
 }
 
 export interface NodeMarketDataFactoryOptions {
@@ -344,7 +356,7 @@ export type TigerTransportFactory = (
 
 let tigerTransportFactory: TigerTransportFactory | undefined;
 
-/** Optional production integrations register here; pinery does not pretend an unverified SDK is bundled. */
+/** Override the built-in official Tiger OpenAPI market-data transport. */
 export function registerTigerMarketDataTransport(factory: TigerTransportFactory): void {
   tigerTransportFactory = factory;
 }
@@ -370,23 +382,34 @@ export function createNodeMarketDataProvider(
     });
   }
   if (config.provider === 'tiger' && !config.transport) {
-    if (!tigerTransportFactory) {
-      throw new Error(
-        'pinery: no production Tiger market-data transport is registered; install/register a verified transport with credentials or inject one for tests',
-      );
-    }
     const credentials = options.tigerCredentials ?? {
-      tigerId: process.env.TIGER_ID,
-      privateKey: process.env.TIGER_PRIVATE_KEY,
-      account: process.env.TIGER_ACCOUNT,
+      tigerId: process.env.TIGEROPEN_TIGER_ID ?? process.env.TIGER_ID,
+      privateKey: process.env.TIGEROPEN_PRIVATE_KEY ?? process.env.TIGER_PRIVATE_KEY,
+      account: process.env.TIGEROPEN_ACCOUNT ?? process.env.TIGER_ACCOUNT,
+      license: process.env.TIGEROPEN_LICENSE,
+      token: process.env.TIGEROPEN_TOKEN,
     };
+    const credentialSlice: TigerMarketDataCredentials = {
+      tigerId: optionalTigerCredential(credentials.tigerId, 'tigerId'),
+      privateKey: optionalTigerCredential(credentials.privateKey, 'privateKey'),
+      account: optionalTigerCredential(credentials.account, 'account'),
+      license: optionalTigerCredential(credentials.license, 'license'),
+      token: optionalTigerCredential(credentials.token, 'token'),
+    };
+    const factory =
+      tigerTransportFactory ??
+      ((
+        tigerConfig: Extract<ProviderConfig, { provider: 'tiger' }>,
+        value: TigerMarketDataCredentials,
+      ) =>
+        createOfficialTigerMarketDataTransport({
+          ...value,
+          propertiesFilePath: tigerConfig.profile,
+          serverUrl: tigerConfig.baseUrl,
+        }));
     return createMarketDataProvider({
       ...config,
-      transport: tigerTransportFactory(config, {
-        tigerId: optionalTigerCredential(credentials.tigerId, 'tigerId'),
-        privateKey: optionalTigerCredential(credentials.privateKey, 'privateKey'),
-        account: optionalTigerCredential(credentials.account, 'account'),
-      }),
+      transport: factory(config, credentialSlice),
     });
   }
   return createMarketDataProvider(config);

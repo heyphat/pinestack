@@ -74,7 +74,7 @@ test('runner fails closed on binding metadata mismatch before any order', async 
   expect((await broker.getPosition('X')).qty).toBe(0);
 });
 
-test('runner rejects indicators and request.security explicitly', async () => {
+test('runner rejects indicators explicitly', async () => {
   const instrument = { symbol: 'X', minQty: 1, mintick: 0.01 };
   const broker = new PaperBroker({ instruments: { X: instrument } });
   await expect(
@@ -84,8 +84,28 @@ test('runner rejects indicators and request.security explicitly', async () => {
       timeframe: '1m',
     }).init(),
   ).rejects.toBeInstanceOf(ForwardRunnerError);
-  const security = '//@version=6\nstrategy("x")\nx=request.security("Y", "60", close)\nplot(x)';
-  await expect(
-    new ForwardRunner(data(), broker, { source: security, symbol: 'X', timeframe: '1m' }).init(),
-  ).rejects.toThrow('request.security');
+});
+
+test('runner accepts request.security strategies and opens a feed for the dependency', async () => {
+  const instrument = { symbol: 'X', minQty: 1, qtyStep: 1, minOrderQty: 1, mintick: 0.01 };
+  const broker = new PaperBroker({ instruments: { X: instrument } });
+  const source = `//@version=6
+strategy("x", default_qty_type=strategy.fixed, default_qty_value=1)
+y = request.security("Y", "60", close)
+plot(y)`;
+  const source2 = new StaticProvider({ X: bars, Y: bars })
+    .setInstrument('X', { minQty: 1, mintick: 0.01 })
+    .setInstrument('Y', { minQty: 1, mintick: 0.01 });
+  const provider = new ReplayProvider(source2, {
+    cutoverTime: 200,
+    instrument: { minOrderQty: 1 },
+  });
+  const runner = new ForwardRunner(provider, broker, {
+    source,
+    symbol: 'X',
+    timeframe: '1m',
+    warmupBars: 1,
+  });
+  await runner.init();
+  expect(runner.securityFeedSpecs.map((spec) => spec.key)).toEqual(['Y']);
 });

@@ -18,6 +18,17 @@ export interface ForwardServerOptions {
   strategyId?: string;
   executionId?: string;
   reconcileOnStart?: boolean;
+  /** Resolve `request.security` dependencies via secondary provider feeds. Default true. */
+  resolveSecurity?: boolean;
+  /** Bars fetched per secondary feed. Defaults to chart-history bars actually received. */
+  securityWarmupBars?: number;
+  /** Hard total-series ceiling per feed. Exceeding it stops the run. */
+  maxSecurityBars?: number;
+  maxSecurityFeeds?: number;
+  securityConcurrency?: number;
+  securityRequestTimeoutMs?: number;
+  /** Failed refreshes tolerated before stopping. Default 0. */
+  maxSecurityStaleRefreshes?: number;
   mirror?: PositionMirrorOptions;
   signal?: AbortSignal;
   onLog?: (message: string) => void;
@@ -44,6 +55,16 @@ export async function runForwardServer(
     strategyId: options.strategyId,
     executionId: options.executionId,
     reconcileOnStart: options.reconcileOnStart,
+    resolveSecurity: options.resolveSecurity,
+    securityWarmupBars: options.securityWarmupBars,
+    maxSecurityBars: options.maxSecurityBars,
+    maxSecurityFeeds: options.maxSecurityFeeds,
+    securityConcurrency: options.securityConcurrency,
+    securityRequestTimeoutMs: options.securityRequestTimeoutMs,
+    maxSecurityStaleRefreshes: options.maxSecurityStaleRefreshes,
+    onSecurityFetch: (key, bars) => options.onLog?.(`security feed ${key} bars=${bars}`),
+    onSecurityError: (key, error) => options.onLog?.(`security feed ${key} STALE: ${error}`),
+    onSecurityHealth: (record) => options.ledger.append(record),
     mirror: { transientRetries: 2, retryDelayMs: 250, ...options.mirror },
     onBinding: (record) => options.ledger.append(record),
     onStartupRecord: async (record) => {
@@ -52,10 +73,15 @@ export async function runForwardServer(
     },
     onRecord: async (record) => {
       await options.ledger.append(record);
+      const order = record.order
+        ? ` order=${record.order.type}${
+            record.order.type === 'limit' ? `@${record.order.limitPrice}` : ''
+          }`
+        : '';
       const fill = record.fill ? ` fill=${record.fill.filledQty}@${record.fill.price}` : '';
       const error = record.error ? ` ${record.error.code}: ${record.error.message}` : '';
       options.onLog?.(
-        `${record.bar.time} target=${record.target} action=${record.action}${fill}${error}`,
+        `${record.bar.time} target=${record.target} action=${record.action}${order}${fill}${error}`,
       );
     },
   });

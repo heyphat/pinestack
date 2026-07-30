@@ -1,6 +1,10 @@
 import { expect, test } from 'bun:test';
 import { parseRunConfig } from '../src/cli.js';
-import { createNodeTigerBroker, registerTigerTradingTransport } from '../src/node.js';
+import {
+  createNodeTigerBroker,
+  createOfficialTigerTradingTransport,
+  registerTigerTradingTransport,
+} from '../src/node.js';
 
 const baseConfig = {
   strategy: 'strategy.pine',
@@ -21,6 +25,74 @@ test('run config requires boolean reconcileOnStart and exact broker fields', () 
     'config.unexpected is not allowed',
   );
   expect(parseRunConfig({ ...baseConfig, reconcileOnStart: false }).reconcileOnStart).toBe(false);
+});
+
+test('run config validates request.security safety controls', () => {
+  for (const field of [
+    'securityWarmupBars',
+    'maxSecurityBars',
+    'maxSecurityFeeds',
+    'securityConcurrency',
+    'securityRequestTimeoutMs',
+  ] as const) {
+    expect(() => parseRunConfig({ ...baseConfig, [field]: 0 })).toThrow(
+      `config.${field} must be a positive integer`,
+    );
+  }
+  expect(() => parseRunConfig({ ...baseConfig, maxSecurityStaleRefreshes: -1 })).toThrow(
+    'config.maxSecurityStaleRefreshes must be a non-negative integer',
+  );
+  expect(() =>
+    parseRunConfig({ ...baseConfig, securityWarmupBars: 10, maxSecurityBars: 5 }),
+  ).toThrow('securityWarmupBars must not exceed config.maxSecurityBars');
+  expect(
+    parseRunConfig({
+      ...baseConfig,
+      maxSecurityFeeds: 8,
+      securityConcurrency: 2,
+      securityRequestTimeoutMs: 1000,
+      maxSecurityStaleRefreshes: 1,
+    }),
+  ).toMatchObject({
+    maxSecurityFeeds: 8,
+    securityConcurrency: 2,
+    securityRequestTimeoutMs: 1000,
+    maxSecurityStaleRefreshes: 1,
+  });
+});
+
+test('one tigerProfile applies to both Tiger data and broker sections', () => {
+  const tigerData = { provider: 'tiger', assetClass: 'futures' } as const;
+  const applied = parseRunConfig({
+    ...baseConfig,
+    symbol: 'TG:FU:MGC',
+    data: tigerData,
+    broker: { id: 'tiger' },
+    tigerProfile: '/tmp/tiger_openapi_config.properties',
+  });
+  expect(applied.data).toMatchObject({ profile: '/tmp/tiger_openapi_config.properties' });
+  expect(applied.broker).toMatchObject({ profile: '/tmp/tiger_openapi_config.properties' });
+
+  // An explicit section value still wins over the shared default.
+  const explicit = parseRunConfig({
+    ...baseConfig,
+    symbol: 'TG:FU:MGC',
+    data: { ...tigerData, profile: '/data.properties' },
+    broker: { id: 'tiger', profile: '/broker.properties' },
+    tigerProfile: '/shared.properties',
+  });
+  expect(explicit.data).toMatchObject({ profile: '/data.properties' });
+  expect(explicit.broker).toMatchObject({ profile: '/broker.properties' });
+
+  expect(() => parseRunConfig({ ...baseConfig, tigerProfile: 7 })).toThrow(
+    'config.tigerProfile must be a string',
+  );
+});
+
+test('official Tiger trading transport rejects a missing credential profile path', () => {
+  expect(() =>
+    createOfficialTigerTradingTransport({ propertiesFilePath: '/nonexistent/tiger.properties' }),
+  ).toThrow('credential profile not found');
 });
 
 test('Tiger trading registry validates config and receives only credential fields', () => {
@@ -61,6 +133,9 @@ test('Tiger trading registry validates config and receives only credential field
     tigerId: 'id',
     privateKey: 'key',
     account: 'paper',
+    secretKey: 'secret-key',
+    license: 'license',
+    token: 'token',
     PATH: 'secret',
   } as never);
   expect(receivedConfig).toEqual({ id: 'tiger', profile: 'demo', account: 'paper' });
@@ -68,5 +143,8 @@ test('Tiger trading registry validates config and receives only credential field
     tigerId: 'id',
     privateKey: 'key',
     account: 'paper',
+    secretKey: 'secret-key',
+    license: 'license',
+    token: 'token',
   });
 });

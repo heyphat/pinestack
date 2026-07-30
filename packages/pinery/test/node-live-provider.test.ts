@@ -27,6 +27,8 @@ test('Tiger market-data registry receives only provider credential fields', () =
         tigerId: 'id',
         privateKey: 'key',
         account: 'paper',
+        license: 'license',
+        token: 'token',
         PATH: 'secret',
       } as never,
     },
@@ -35,5 +37,7 @@ test('Tiger market-data registry receives only provider credential fields', () =
     tigerId: 'id',
     privateKey: 'key',
     account: 'paper',
+    license: 'license',
+    token: 'token',
   });
 });

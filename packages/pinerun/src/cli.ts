@@ -24,7 +24,7 @@ import {
   type HistorySessionCalendar,
   type UnixSecond,
 } from '@heyphat/pinery';
-import { cached, CsvProvider } from '@heyphat/pinery/node';
+import { cached, createNodeMarketDataProvider, CsvProvider } from '@heyphat/pinery/node';
 import { createMagnifierResolutionScope, scan, type ScanReport } from './index.js';
 import { LocalRunner, parseRankSpec, rankResults, selectPlot, type Runner } from './index.js';
 import { sweep, parseAxes, assertComboBudget, validateAxes, type SweepReport } from './index.js';
@@ -1828,7 +1828,7 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
   const provider = legacy?.provider ?? name;
   if (!isDataProvider(provider)) {
     fail(
-      `unknown provider "${name}" (binance, okx, kraken, alpaca, massive, csv; ` +
+      `unknown provider "${name}" (binance, okx, kraken, alpaca, massive, csv, tiger; ` +
         `legacy: binance-futures, okx-swap)`,
     );
   }
@@ -1855,6 +1855,11 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
   // --data-dir the injected stub turns a stray CSV: address into a flag hint
   // instead of pinery's library-level error.
   const { apiKey, apiSecret } = resolveCredentials(opts);
+  const noCache = opts.has('no-cache');
+  const wrap = noCache
+    ? undefined
+    : (p: HistoryProvider) =>
+        cached(p, { dir: opts.get('cache-dir'), refresh: forceRefresh || opts.has('refresh') });
   return new InstrumentRouter({
     fallbackProvider: provider,
     fallbackAssetClass: requestedClass as AssetClass | undefined,
@@ -1871,11 +1876,11 @@ function buildProvider(opts: Args, forceRefresh = false): HistoryProvider {
                 throw new Error(`csv symbol "${symbol}" needs --data-dir <dir>`);
               },
             },
+      // Router overrides bypass `wrap`, so cache the Tiger facade explicitly; the
+      // futures K-line endpoint is quota-metered.
+      tiger: noCache ? tigerHistory(opts) : wrap!(tigerHistory(opts)),
     },
-    wrap: opts.has('no-cache')
-      ? undefined
-      : (p) =>
-          cached(p, { dir: opts.get('cache-dir'), refresh: forceRefresh || opts.has('refresh') }),
+    wrap,
   });
 }
 
@@ -2040,6 +2045,32 @@ function errorMessage(value: unknown): string {
 }
 
 /**
+ * History-only view of the Node Tiger market-data provider. The router rejects live
+ * providers, and backtests need only history/instrument, so the live surface is not
+ * exposed here. Construction is deferred so runs that never touch a Tiger symbol do
+ * not require credentials.
+ */
+function tigerHistory(opts: Args): HistoryProvider {
+  const profile = opts.get('tiger-profile');
+  const cacheIdentity = profile == null ? undefined : `profile:${profile}`;
+  let inner: ReturnType<typeof createNodeMarketDataProvider> | undefined;
+  const live = () =>
+    (inner ??= createNodeMarketDataProvider({
+      provider: 'tiger',
+      assetClass: 'futures',
+      profile,
+      cacheIdentity,
+    }));
+  return {
+    id: 'tiger',
+    cacheIdentity,
+    assetClass: 'futures',
+    history: (symbol, timeframe, range) => live().history(symbol, timeframe, range),
+    instrument: (symbol) => live().instrument!(symbol),
+  };
+}
+
+/**
  * Resolve provider credentials for the equities adapters (Alpaca / Massive).
  *
  * Env vars are the preferred channel — a key passed as `--api-key`/`--api-secret`
@@ -2192,6 +2223,7 @@ const VALUE_KEYS = new Set([
   'csv-alignment',
   'csv-week-anchor',
   'csv-calendar',
+  'tiger-profile',
   'workers',
   'cache-dir',
   'feed',
@@ -2451,8 +2483,9 @@ INIT EXAMPLE
                           overrides --provider/--asset-class per symbol, so one
                           scan can mix providers:
                           BI:FU:BTCUSDT (binance futures), KR:BTC/USD, AL:AAPL,
-                          CSV:AAPL (local files, needs --data-dir)
-                          (prefixes BI OK KR AL MA CSV; codes EQ CR FU FX)
+                          CSV:AAPL (local files, needs --data-dir),
+                          TG:FU:MGC (tiger futures, needs credentials)
+                          (prefixes BI OK KR AL MA CSV TG; codes EQ CR FU FX)
   --universe <file>     File of symbols (one per line; # comments allowed)
   --tf <1h>             Timeframe: 1m 5m 15m 1h 4h 1d 1w (default 1h)
   --from <date>         Start (ISO date or unix seconds)
@@ -2484,11 +2517,11 @@ INIT EXAMPLE
   --workers <n|local>   Worker threads (default = CPUs; "local" = in-process)
   --backend js|interp   piner backend (default js)
   --provider <name>     Data provider (default binance):
-                          binance | okx | kraken | alpaca | massive | csv
+                          binance | okx | kraken | alpaca | massive | csv | tiger
                           (legacy aliases: binance-futures, okx-swap)
   --asset-class <cls>   Asset class, for providers that serve more than one
-                          (binance/okx: crypto | futures; default: the
-                          provider's default class)
+                          (binance/okx: crypto | futures; tiger: futures;
+                          default: the provider's default class)
   --data-dir <dir>      Directory of local CSV history for --provider csv /
                           CSV: symbols: one <SYMBOL>_<TF>.csv per instrument
                           (e.g. BTCUSDT_1h.csv) with header
@@ -2506,6 +2539,10 @@ INIT EXAMPLE
   --csv-complete-record Assert absent bars inside each exact file's authenticated
                           record span mean no trades. Requires explicit alignment
                           or calendar evidence and <SYMBOL>_<TF>.csv files.
+  --tiger-profile <path> Tiger credential properties file for --provider tiger /
+                          TG: symbols. Defaults to SDK discovery
+                          (./ then ~/.tigeropen/tiger_openapi_config.properties).
+                          Intraday only: 1m 3m 5m 15m 30m 1h 2h 4h 6h
   CREDENTIALS (equities providers — Alpaca / Massive)
     Prefer environment variables — a key on the command line lands in shell
     history and process listings:
@@ -2568,7 +2605,7 @@ EXAMPLE
   --no-chart            Skip the in-terminal price/equity/drawdown charts and
                           the trade P/L histogram (the MONTHLY RETURNS, MONTHLY
                           TRADES, and TOP DRAWDOWNS tables always print)
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --tiger-profile, --csv-alignment, --csv-week-anchor, --csv-calendar,
   --csv-complete-record,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --mintick, --min-qty, --calc-on-order-fills / --no-calc-on-order-fills,
@@ -2603,7 +2640,7 @@ BACKTEST EXAMPLE
   --input-b name=value  Fixed input override for script B (REPEATABLE)
   --label-a / --label-b Column/legend labels (default: the script filenames)
   --no-chart            Skip the equity overlay
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --tiger-profile, --csv-alignment, --csv-week-anchor, --csv-calendar,
   --csv-complete-record,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --bar-magnifier / --no-bar-magnifier, --no-security, --no-cache,
@@ -2642,7 +2679,7 @@ COMPARE EXAMPLES
                           RETURN CORRELATION matrix always print)
   --csv <dir>           portfolio-trades/equity.csv + per-sleeve CSVs
   --plot <dir>          portfolio.html + per-sleeve equity/drawdown charts
-  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --tf, --from, --to, --limit, --backend, --provider, --asset-class, --data-dir, --tiger-profile, --csv-alignment, --csv-week-anchor, --csv-calendar,
   --csv-complete-record,
   --api-key, --api-secret, --feed, --periods-per-year, --risk-free-rate,
   --concurrency, --no-security, --no-cache, --cache-dir, --refresh,
@@ -2689,7 +2726,7 @@ PORTFOLIO EXAMPLE
                           strategy stats, error) — the whole optimization surface,
                           pandas-ready; cheap (no ledgers, unlike --csv)
   --tf, --from, --to, --limit, --rank, --top, --asc, --trades, --no-chart,
-  --concurrency, --workers, --backend, --provider, --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --concurrency, --workers, --backend, --provider, --asset-class, --data-dir, --tiger-profile, --csv-alignment, --csv-week-anchor, --csv-calendar,
   --csv-complete-record, --api-key,
   --api-secret, --feed, --periods-per-year, --risk-free-rate, --mintick, --min-qty,
   --calc-on-order-fills / --no-calc-on-order-fills,
@@ -2731,7 +2768,7 @@ SWEEP EXAMPLES
   --rank <spec>         Metric that picks each window's winner
                           (default strategy.netProfit)
   --tf, --from, --to, --limit, --concurrency, --workers, --backend, --provider,
-  --asset-class, --data-dir, --csv-alignment, --csv-week-anchor, --csv-calendar,
+  --asset-class, --data-dir, --tiger-profile, --csv-alignment, --csv-week-anchor, --csv-calendar,
   --csv-complete-record, --api-key, --api-secret, --feed, --periods-per-year,
   --risk-free-rate, --max-combos, --mintick, --min-qty,
   --calc-on-order-fills / --no-calc-on-order-fills,

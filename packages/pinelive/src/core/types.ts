@@ -4,14 +4,24 @@ export type { Bar } from '@heyphat/pinery';
 export type Side = 'buy' | 'sell';
 export type OrderType = 'market' | 'limit' | 'stop';
 
-export interface OrderRequest {
+interface OrderRequestBase {
   symbol: string;
   side: Side;
   /** Unsigned quantity in strategy-native units. */
   qty: number;
-  type: OrderType;
   clientId: string;
 }
+
+export type OrderRequest = OrderRequestBase &
+  (
+    | { type: 'market'; limitPrice?: never }
+    | {
+        type: 'limit';
+        /** Positive venue price, aligned to the bound instrument's minimum tick. */
+        limitPrice: number;
+      }
+    | { type: 'stop'; limitPrice?: never }
+  );
 
 export interface Fill {
   clientId: string;

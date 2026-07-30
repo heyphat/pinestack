@@ -148,11 +148,45 @@ No change to `pinery` or to any output contract.
 
 ### Added
 
+- **Limit-order execution in pinelive.** `OrderRequest` now requires `limitPrice` for limit orders, and `PositionMirror` accepts an explicit market/limit policy with a side-aware tick offset from each closed-bar price. Market remains the default. Deterministic client ids now frame every identity component by length to prevent sanitizer and delimiter-boundary collisions; limit type/price are included in identity and schema-v2 cycle ledgers. Deploy the new ID format only with no unresolved old-format orders.
+  - `PaperBroker` fills only immediately marketable limits and never violates the requested price or invents a resting order.
+  - `TigerTradingTransport` gains a backward-compatible optional `submitLimit`; the official Tiger SDK adapter submits native futures `LMT` orders. Tiger limit mode requires cancellation support plus `cancelStuckOrders`, polls cancellation to terminal state, and blocks a second correction while any transmitted order remains unresolved. Flattening remains market-only.
+  - CLI config adds `order.type`, `order.limitOffsetTicks`, and Tiger `orderPollIntervalMs`, `maxOrderPolls`, and `cancelStuckOrders` controls.
+
+- **`request.security` in live forward runs.** The pinelive forward runner now
+  resolves static dependencies and runtime inputs fixed for the life of the run,
+  including cross-symbol, same-symbol other-timeframe, plain lower-timeframe, and
+  `request.security_lower_tf` series. Call sites are deduplicated, fetched through
+  the same pinery provider before warmup, and refreshed with explicit overlap and
+  catch-up ranges before every closed chart tick. Self-references reuse the chart's
+  exact resolved instrument.
+  - Safety is fail-closed: resolution, timeout, insufficient warmup, truncated
+    catch-up, history-cap, and refresh failures stop before reconciliation by
+    default. Refresh failures and per-cycle health are ledgered; an explicit
+    `maxSecurityStaleRefreshes` allows bounded tolerance.
+  - Runtime dependencies that change after startup are detected after evaluation
+    and stop before broker reconciliation instead of silently trading on `na`.
+  - Provider work is bounded by feed count, concurrency, request timeout, and a
+    non-truncating history ceiling. Timed-out operations retain their real slots
+    until settlement; shutdown interrupts the provider and then either drains all
+    such operations or reports a bounded cleanup failure. Existing timestamps are
+    revision-aware and missed bars are repaired from an inclusive cursor.
+  - New config/options: `resolveSecurity`, `securityWarmupBars`,
+    `maxSecurityBars`, `maxSecurityFeeds`, `securityConcurrency`,
+    `securityRequestTimeoutMs`, and `maxSecurityStaleRefreshes`.
+  - Shared timeframe helpers live in `@heyphat/pinery`; pinerun and pinelive use
+    the same finest-base planning rule for plain cross-symbol lower timeframes.
+
 - **`@heyphat/pinelive` offline core** — a broker-SDK-free forward runner, Broker
   protocol, position mirror, deterministic CSV replay, idempotent PaperBroker with
   PnL accounting, append-only JSONL ledger, dry-run CLI, adapter conformance tools,
-  and live-vs-backtest target parity utility. Real Tiger/IC Markets transports and
-  credentialed sandbox validation remain intentionally pending.
+  and live-vs-backtest target parity utility. Official Tiger quote/trade adapters
+  have injected offline SDK-facade coverage only; credentialed venue, demo-order,
+  cancellation, and fill validation remain intentionally pending.
+
+### Fixed
+
+- **`feat/pinelive` safety audit remediation.** Fixed all 17 confirmed P1-P3 findings across exact Tiger account/order identity, unresolved-order serialization, runtime order validation, Paper quantity handling, tiny quantity grids, futures roots/expiry, replay catch-up, primary and secondary warmup coverage, shutdown drainage, cache partitioning, strict timeframe identity, finer security-history ranges, truthful capabilities, and injective client ids. The permanent [audit record](./docs/feat-pinelive-audit.md) contains finding-by-finding disposition, offline evidence, readiness limits, and the required normal merge with mainline.
 
 ## [0.6.1] - 2026-07-29
 

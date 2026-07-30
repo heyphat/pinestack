@@ -123,7 +123,7 @@ flowchart TB
   SCAN["scan() orchestrator"]
 
   SCAN -->|"1. fetch history per symbol<br/>(bounded concurrency)"| PINERY
-  PINERY["pinery HistoryProvider<br/>Binance / OKX / Kraken / Alpaca / Massive / CSV files"]
+  PINERY["pinery HistoryProvider<br/>Binance / OKX / Kraken / Alpaca / Massive / CSV / Tiger futures"]
   PINERY <-->|"hit / miss"| DISK[("on-disk cache<br/>.pinery-cache")]
   PINERY -->|"Bar[]"| SCAN
 
@@ -184,6 +184,16 @@ collapsed to a ranked table:
    piner's `Engine` over the bars, and project the outputs into a `RunResult`.
 5. **Rank** — `rankResults` reduces each result to a scalar via the rank spec and
    sorts, producing the `ScanReport` the CLI prints as a table or JSON.
+
+Tiger futures history is available for bare contracts with `--provider tiger` or
+per symbol with an address such as `TG:FU:MGC`. Pass `--tiger-profile <path>` to
+select a Tiger credential properties file; otherwise the SDK performs its normal
+current-directory then `~/.tigeropen/tiger_openapi_config.properties` discovery.
+The provider is constructed lazily, so commands and routed symbols that never use
+Tiger do not load credentials. An explicit profile path participates in cache
+identity. The CLI supports Tiger's intraday futures history cadences (1m through
+6h); it does not add exact-history evidence, so effective Bar Magnifier requests
+still fail closed unless the resolved source satisfies the exact contract.
 
 The two runners implement the **same `Runner` interface**, so the identical `scan`
 runs in-process (`LocalRunner`, e.g. in a browser or a test) or across worker
@@ -1669,58 +1679,84 @@ The pure alignment helpers are exported for building the post-hoc sum yourself
 (the oracle the engine is validated against): `combineEquity(sleeves)`,
 `unionTimes`, `alignEquity`, `returnCorrelation`.
 
-## Cross-symbol & multi-timeframe (`request.security`)
+## Cross-symbol and multi-timeframe data (`request.security`)
 
-piner never fetches — it declares its data dependencies and reads host-injected
-bars. `scan()` resolves that automatically (enabled by default; disable with
-`resolveSecurity: false` / `--no-security`):
+Piner never performs I/O. It declares `request.security` and
+`request.security_lower_tf` dependencies and consumes bars injected by its host.
+Pinerun resolves those dependencies by default; pass `resolveSecurity: false` or
+`--no-security` to disable resolution explicitly. The following planner describes
+ordinary (non-magnifier) resolution; effective Bar Magnifier mode instead uses the
+coverage-aware exact acquisition and proof path documented above.
 
-1. **Discover** — read the script's `request.security[_lower_tf]` dependencies from
-   piner's **compile-time metadata** (`ScriptMetadata.securityDependencies`), with no
-   run. Only when a dependency's symbol/timeframe is _dynamic_ (computed at runtime)
-   does `scan` fall back to a one-off discovery run under a sentinel symbol (the
-   sentinel distinguishes a `syminfo.tickerid` self-reference from a literal that
-   happens to match a scanned symbol). Scripts with no `request.security` — the common
-   case — cost zero discovery work.
-2. **Plan + fetch** — each unique dependency is fetched **once** through the pinery
-   provider (with the disk cache) and shared across every job; only self lower-TF
-   is fetched per scanned symbol.
-3. **Inject + run** — resolved bars ride on each `Job.securityBars`; the parallel
-   run resolves every request in a single pass (no na-then-resolve).
+Ordinary resolution is static-first:
 
-| Request                                                         | Handling                                                                         |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Same-symbol HTF (`request.security(syminfo.tickerid, "1D", …)`) | no fetch — piner resamples each job's own bars                                   |
-| Cross-symbol (`request.security("SPX", "1D", …)`)               | fetch SPX at the chart TF once, shared; piner resamples to the requested HTF     |
-| Cross-symbol `security_lower_tf`                                | fetch the symbol at a finer TF, key `symbol@tf`; piner buckets intrabars per bar |
-| Self `security_lower_tf(syminfo.tickerid, "1", …)`              | fetch each scanned symbol at a finer TF                                          |
+1. **Discover.** Read compile-time `ScriptMetadata.securityDependencies` without
+   executing the strategy. Only dynamic symbol/timeframe expressions require a
+   one-off discovery run under a sentinel symbol, which distinguishes
+   `syminfo.tickerid` self-references from equal-looking literals.
+2. **Plan.** Deduplicate call sites, preserve exact symbol/timeframe keys, and
+   choose the finest required base timeframe for each bare cross-symbol feed.
+   The requested history envelope is expanded for finer feeds so their bars
+   cover the chart range rather than merely matching its bar count.
+3. **Fetch.** Fetch each unique dependency once through pinery (and its
+   identity-aware disk cache), sharing literal cross-symbol data across jobs.
+   Self lower-timeframe dependencies remain per scanned symbol.
+4. **Inject.** Attach the complete `securityBars` map to each job before its
+   single piner execution; there is no `na` discovery run followed by a second
+   trading run.
+
+| Request on a 1h chart                             | Fetch plan                                                                                           |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `security(syminfo.tickerid, "1D", …)`             | Fetch that job symbol at `1d`, inject under `<symbol>@1D`; only chart-TF identity reuses chart bars. |
+| `security("OTHER", "1D", …)`                      | Fetch `OTHER` at the chart/base timeframe once; piner resamples upward.                              |
+| `security("OTHER", "5", …)`                       | Fetch `OTHER` at `5m`; a bare-symbol feed uses the finest timeframe required by its call sites.      |
+| `security_lower_tf("OTHER", "5", …)`              | Fetch `OTHER` at `5m`, inject under the exact lower-timeframe key.                                   |
+| `security_lower_tf(syminfo.tickerid, "5", …)`     | Fetch each job symbol at `5m`, inject under that symbol's exact key.                                 |
+| `security(syminfo.tickerid, timeframe.period, …)` | Reuse the chart series; no secondary fetch.                                                          |
+
+For example, a script requesting `OTHER` at both 5m and 15m on a 1h chart
+fetches one complete 5m base feed; piner derives the requested buckets. A plain
+cross-symbol request below the chart timeframe is therefore **not** fetched at
+1h and cannot lose the needed intrabars. For a limit-only chart load, ordinary
+finer-timeframe dependency fetches receive the loaded chart's concrete time
+envelope instead of the same bar-count limit; explicit ranges pass through
+unchanged. This legacy conversion is never used by exact acquisition.
 
 ```bash
-# Relative strength vs a benchmark — ETHUSDT is fetched once and shared across the scan
+# ETHUSDT is fetched once and shared across the scan.
 pinerun scan examples/rs-vs-eth.pine \
-  --symbols BTCUSDT,SOLUSDT,BNBUSDT --tf 1h --limit 300 --rank "last(rs)"
+  --symbols BTCUSDT,SOLUSDT,BNBUSDT --tf 1h --limit 300 \
+  --rank "last(rs)"
 ```
 
 Outside exact mode, a dependency whose fetch fails or is disabled retains the
-legacy degradation to `na` (HTF) / `[]` (lower-TF), and each run surfaces its
-requests on `RunResult.securityRequests`. When Bar Magnifier is effective,
-preflight uses piner's static metadata and every static dependency must resolve
-completely before execution. Runtime-dynamic symbol/timeframe/lookahead
-identities fail permanently as
+legacy degradation to `na` (regular security) / `[]` (lower-TF), and each run
+surfaces its requests on `RunResult.securityRequests`. Pinelive uses a stricter
+fail-closed policy before broker reconciliation; see the
+[forward guide](../../docs/pinelive.md#requestsecurity-secondary-feeds).
+When Bar Magnifier is effective, preflight uses piner's static metadata and every
+static dependency must resolve completely before execution. Runtime-dynamic
+symbol/timeframe/lookahead identities fail permanently as
 `dynamic-security-unsupported-with-bar-magnifier`; neither discovery probing nor
 `--no-security` may silently degrade an exact run.
 
-> **Time units.** pinery/pinerun carry `Bar.time` in unix **seconds** (ergonomic
-> for CLI dates and cache keys); piner's engine expects **milliseconds** (its
-> daily/weekly/session bucketing uses ms). `executeJob` (and pinery's `toDataFeed`)
-> convert at the engine boundary, so `request.security` HTF bucketing and
-> `time()`/`dayofweek`/session builtins compute correctly.
+> **Dynamic dependencies.** Static metadata is authoritative when possible. A
+> runtime-computed dependency discovered by the probe is included, but a sweep
+> whose dependency itself changes with a swept input cannot be represented by
+> one shared resolution. Sweep/walk-forward reports warn about this case; use
+> `--no-security` or restructure the script rather than assuming all combinations
+> received different feeds.
 
 > Dependency discovery is **static-first**: ordinary mode reads piner's
 > compile-time `securityDependencies` and only runs a discovery pass when a
 > symbol/timeframe is dynamic. `RunResult.securityRequests` still reports what
 > each run declared. Effective Bar Magnifier mode is stricter: it never performs
 > that dynamic probe and accepts only a complete static plan.
+>
+> **Time units.** Pinery and pinerun expose `Bar.time` in Unix seconds. Piner's
+> engine uses milliseconds. `executeJob` and pinery's `toDataFeed` convert at the
+> engine boundary so bucketing, calendar/session builtins, and close-time
+> alignment use the expected units.
 
 ## API summary
 
@@ -1742,8 +1778,8 @@ identities fail permanently as
   `magnifierMetadataKey`, `magnifierAcquisitionKey`, `preflightBarMagnifier`,
   `resolveBarMagnifier`
 - Runners: `Runner`, `RunAllOptions`, `LocalRunner`, `fanOut`
-- Ranking: `Aggregate`, `RankSpec`, `RankedResult`, `RankOptions`, `parseRankSpec`,
-  `evalRank`, `rankResults`, `sortRanked`, `selectPlot`
+- Ranking: `Aggregate`, `RankSpec`, `RankedResult`, `RankOptions`,
+  `parseRankSpec`, `evalRank`, `rankResults`, `sortRanked`, `selectPlot`
 - Scan: `ScanOptions`, `ScanReport`, `scan`
 - Backtest: `BacktestOptions`, `BacktestReport`, `backtest`
 - Portfolio: `PortfolioOptions`, `PortfolioReport`, `SleeveContribution`,
@@ -1776,8 +1812,8 @@ identities fail permanently as
 
 **`@heyphat/pinerun/node`**
 
-- Everything above, plus `WorkerPoolRunner`, `WorkerPoolOptions`
+- Everything above, plus `WorkerPoolRunner` and `WorkerPoolOptions`
 
 ## License
 
-[GNU AGPL-3.0](../../../piner/LICENSE) © Phat Huynh.
+[GNU AGPL-3.0](../../LICENSE) © Phat Huynh.

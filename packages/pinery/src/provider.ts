@@ -232,6 +232,8 @@ export interface InstrumentInfo {
 export interface HistoryProvider {
   /** Stable id used in legacy cache keys and diagnostics (e.g. "binance", "static"). */
   readonly id: string;
+  /** Stable non-secret source namespace used to partition persistent caches. */
+  readonly cacheIdentity?: string;
   readonly assetClass?: AssetClass;
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]>;
   /**
@@ -477,6 +479,15 @@ export function assertResolvedDataInstrument(
     });
   }
   return value;
+}
+
+export function normalizeExpiryDate(value: string | undefined): string | undefined {
+  if (value == null) return undefined;
+  const text = value.trim();
+  if (!text) return undefined;
+  const compact = /^(\d{4})(\d{2})(\d{2})$/.exec(text);
+  if (!compact) return text;
+  return `${compact[1]}-${compact[2]}-${compact[3]}`;
 }
 
 export function normalizeBars(bars: readonly Bar[]): Bar[] {

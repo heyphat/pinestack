@@ -26,10 +26,22 @@ pinerun --help
 
 ## Forward testing
 
-[`pinelive`](./pinelive.md) consumes pinery `MarketDataProvider` closed bars, advances
-piner, and reconciles the resolved exact contract through PaperBroker or an injected
-execution adapter. Broker implementers should also read the
-[adapter contract](./pinelive-adapter-contract.md).
+[`pinelive`](./pinelive.md) consumes pinery `MarketDataProvider` closed bars,
+advances piner, and reconciles one resolved exact contract through PaperBroker or
+a broker adapter.
+
+> **Source-only:** the GitHub release installer provides `pinerun`, not
+> `pinelive`. Pinelive is not published to npm and has no prebuilt release asset.
+> From a checkout, invoke it with
+> `bun packages/pinelive/src/cli.ts run --config <path>`. The
+> [pinelive package README](../packages/pinelive/README.md#paper-quick-start)
+> contains a runnable Paper/CSV example.
+
+Broker implementers should read the
+[adapter contract](./pinelive-adapter-contract.md). The permanent
+[`feat/pinelive` audit and remediation record](./feat-pinelive-audit.md)
+documents confirmed findings, offline validation evidence, Tiger readiness
+limits, and the remaining mainline integration action.
 
 ## Shared flags
 

@@ -19,6 +19,12 @@ interface Args {
   flags: Set<string>;
 }
 
+export interface OrderPolicyConfig {
+  type: 'market' | 'limit';
+  /** Passive ticks from the closed-bar price. Buy subtracts; sell adds. */
+  limitOffsetTicks?: number;
+}
+
 export interface RunConfig {
   configVersion?: 1;
   strategy: string;
@@ -28,10 +34,31 @@ export interface RunConfig {
   inputs?: Readonly<Record<string, unknown>>;
   executionId?: string;
   reconcileOnStart?: boolean;
+  /** Market by default; limit mode derives a tick-aligned price from each closed bar. */
+  order?: OrderPolicyConfig;
+  /** Resolve `request.security` dependencies via secondary provider feeds. Default true. */
+  resolveSecurity?: boolean;
+  /** Secondary-feed bars fetched at startup. Defaults to chart-history bars actually received. */
+  securityWarmupBars?: number;
+  /** Hard total-series ceiling per secondary feed. */
+  maxSecurityBars?: number;
+  maxSecurityFeeds?: number;
+  securityConcurrency?: number;
+  securityRequestTimeoutMs?: number;
+  maxSecurityStaleRefreshes?: number;
   data: ProviderConfig;
+  /** One credential-profile path applied to Tiger data and broker sections that omit their own. */
+  tigerProfile?: string;
   broker:
     | { id: 'paper'; initialBalance?: number; slippageBps?: number; commissionPerUnit?: number }
-    | { id: 'tiger'; profile?: string; account?: string };
+    | {
+        id: 'tiger';
+        profile?: string;
+        account?: string;
+        orderPollIntervalMs?: number;
+        maxOrderPolls?: number;
+        cancelStuckOrders?: boolean;
+      };
   armed?: boolean;
   ledger?: string;
 }
@@ -66,7 +93,16 @@ export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunCon
       'inputs',
       'executionId',
       'reconcileOnStart',
+      'order',
+      'resolveSecurity',
+      'securityWarmupBars',
+      'maxSecurityBars',
+      'maxSecurityFeeds',
+      'securityConcurrency',
+      'securityRequestTimeoutMs',
+      'maxSecurityStaleRefreshes',
       'data',
+      'tigerProfile',
       'broker',
       'armed',
       'ledger',
@@ -83,7 +119,52 @@ export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunCon
     (!Number.isInteger(value.warmupBars) || (value.warmupBars as number) < 0)
   )
     throw new Error('config.warmupBars must be a non-negative integer');
+  let order: OrderPolicyConfig | undefined;
+  if (value.order != null) {
+    if (typeof value.order !== 'object' || Array.isArray(value.order))
+      throw new Error('config.order must be an object');
+    const orderValue = value.order as Record<string, unknown>;
+    assertConfigKeys(orderValue, ['type', 'limitOffsetTicks'], 'config.order');
+    if (orderValue.type !== 'market' && orderValue.type !== 'limit')
+      throw new Error('config.order.type must be "market" or "limit"');
+    if (
+      orderValue.limitOffsetTicks != null &&
+      (!Number.isInteger(orderValue.limitOffsetTicks) ||
+        (orderValue.limitOffsetTicks as number) < 0)
+    )
+      throw new Error('config.order.limitOffsetTicks must be a non-negative integer');
+    if (orderValue.type === 'market' && orderValue.limitOffsetTicks != null)
+      throw new Error('config.order.limitOffsetTicks is only valid for limit orders');
+    order = {
+      type: orderValue.type,
+      limitOffsetTicks: orderValue.limitOffsetTicks as number | undefined,
+    };
+  }
+  for (const field of [
+    'securityWarmupBars',
+    'maxSecurityBars',
+    'maxSecurityFeeds',
+    'securityConcurrency',
+    'securityRequestTimeoutMs',
+  ] as const)
+    if (value[field] != null && (!Number.isInteger(value[field]) || (value[field] as number) < 1))
+      throw new Error(`config.${field} must be a positive integer`);
+  if (
+    value.maxSecurityStaleRefreshes != null &&
+    (!Number.isInteger(value.maxSecurityStaleRefreshes) ||
+      (value.maxSecurityStaleRefreshes as number) < 0)
+  )
+    throw new Error('config.maxSecurityStaleRefreshes must be a non-negative integer');
+  if (
+    value.securityWarmupBars != null &&
+    value.maxSecurityBars != null &&
+    (value.securityWarmupBars as number) > (value.maxSecurityBars as number)
+  )
+    throw new Error('config.securityWarmupBars must not exceed config.maxSecurityBars');
   const data = assertProviderConfig(value.data);
+  if (value.tigerProfile != null && typeof value.tigerProfile !== 'string')
+    throw new Error('config.tigerProfile must be a string');
+  const tigerProfile = value.tigerProfile as string | undefined;
   const brokerValue = value.broker === undefined ? { id: 'paper' } : value.broker;
   if (!brokerValue || typeof brokerValue !== 'object' || Array.isArray(brokerValue))
     throw new Error('config.broker must be an object');
@@ -104,16 +185,32 @@ export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunCon
         throw new Error(`config.broker.${field} must be numeric`);
     }
   } else {
-    assertConfigKeys(broker, ['id', 'profile', 'account'], 'config.broker');
+    assertConfigKeys(
+      broker,
+      ['id', 'profile', 'account', 'orderPollIntervalMs', 'maxOrderPolls', 'cancelStuckOrders'],
+      'config.broker',
+    );
     if (broker.profile != null && typeof broker.profile !== 'string')
       throw new Error('config.broker.profile must be a string');
     if (broker.account != null && typeof broker.account !== 'string')
       throw new Error('config.broker.account must be a string');
+    for (const field of ['orderPollIntervalMs', 'maxOrderPolls'] as const)
+      if (
+        broker[field] != null &&
+        (!Number.isInteger(broker[field]) || (broker[field] as number) < 0)
+      )
+        throw new Error(`config.broker.${field} must be a non-negative integer`);
+    if (broker.cancelStuckOrders != null && typeof broker.cancelStuckOrders !== 'boolean')
+      throw new Error('config.broker.cancelStuckOrders must be boolean');
+    if (order?.type === 'limit' && broker.cancelStuckOrders !== true)
+      throw new Error('Tiger limit orders require config.broker.cancelStuckOrders=true');
   }
   if (value.armed != null && typeof value.armed !== 'boolean')
     throw new Error('config.armed must be boolean');
   if (value.reconcileOnStart != null && typeof value.reconcileOnStart !== 'boolean')
     throw new Error('config.reconcileOnStart must be boolean');
+  if (value.resolveSecurity != null && typeof value.resolveSecurity !== 'boolean')
+    throw new Error('config.resolveSecurity must be boolean');
   if (value.executionId != null && typeof value.executionId !== 'string')
     throw new Error('config.executionId must be a string');
   if (value.ledger != null && typeof value.ledger !== 'string')
@@ -126,8 +223,15 @@ export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunCon
   return {
     ...(value as unknown as RunConfig),
     configVersion: 1,
-    data,
-    broker: broker as unknown as RunConfig['broker'],
+    order,
+    // One profile path covers both sections; an explicit section value still wins.
+    data:
+      tigerProfile != null && data.provider === 'tiger' && data.profile == null
+        ? { ...data, profile: tigerProfile }
+        : data,
+    broker: (tigerProfile != null && broker.id === 'tiger' && broker.profile == null
+      ? { ...broker, profile: tigerProfile }
+      : broker) as unknown as RunConfig['broker'],
   };
 }
 
@@ -143,7 +247,7 @@ function assertConfigKeys(
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const [command, ...rest] = argv;
   if (!command || command === '--help' || command === '-h' || command === 'help') {
-    console.log('pinelive run --config <pinelive.json>');
+    console.log('pinelive run --config <pinelive.json> [--tiger-profile <path>]');
     console.log('pinelive parity <live.jsonl> <expected.jsonl>');
     return;
   }
@@ -157,7 +261,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       readJsonl<ExpectedPositionRecord>(expectedPath),
     ]);
     const live = ledger.filter(
-      (row): row is ForwardRecord => row.recordType !== 'binding' && row.recordType !== 'startup',
+      (row): row is ForwardRecord =>
+        row.recordType !== 'binding' &&
+        row.recordType !== 'startup' &&
+        row.recordType !== 'security',
     );
     const differences = compareLedgerParity(live, expected);
     console.log(JSON.stringify({ matches: differences.length === 0, differences }, null, 2));
@@ -171,23 +278,37 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (!configPath)
     throw new Error('run requires --config <path>; direct --data CSV mode moved to pinery config');
   const config = parseRunConfig(await readConfig(configPath));
+  const tigerProfileOverride =
+    args.values.get('tiger-profile') ?? process.env.TIGEROPEN_CONFIG_PATH;
+  if (tigerProfileOverride != null && config.tigerProfile == null) {
+    if (config.data.provider === 'tiger' && config.data.profile == null)
+      config.data = { ...config.data, profile: tigerProfileOverride };
+    if (config.broker.id === 'tiger' && config.broker.profile == null)
+      config.broker = { ...config.broker, profile: tigerProfileOverride };
+  }
   const runSymbol = assertLiveSymbolMatchesConfig(config.symbol, config.data);
+  const tigerCredentials = {
+    tigerId: process.env.TIGEROPEN_TIGER_ID ?? process.env.TIGER_ID,
+    privateKey: process.env.TIGEROPEN_PRIVATE_KEY ?? process.env.TIGER_PRIVATE_KEY,
+    account: process.env.TIGEROPEN_ACCOUNT ?? process.env.TIGER_ACCOUNT,
+    secretKey: process.env.TIGEROPEN_SECRET_KEY,
+    license: process.env.TIGEROPEN_LICENSE,
+    token: process.env.TIGEROPEN_TOKEN,
+  };
   const data = createNodeMarketDataProvider(config.data, {
     tigerCredentials: {
-      tigerId: process.env.TIGER_ID,
-      privateKey: process.env.TIGER_PRIVATE_KEY,
-      account: process.env.TIGER_ACCOUNT,
+      tigerId: tigerCredentials.tigerId,
+      privateKey: tigerCredentials.privateKey,
+      account: tigerCredentials.account,
+      license: tigerCredentials.license,
+      token: tigerCredentials.token,
     },
   });
   const armed = config.armed ?? false;
 
   let broker;
   if (config.broker.id === 'tiger') {
-    broker = createNodeTigerBroker(config.broker, armed, {
-      tigerId: process.env.TIGER_ID,
-      privateKey: process.env.TIGER_PRIVATE_KEY,
-      account: process.env.TIGER_ACCOUNT,
-    });
+    broker = createNodeTigerBroker(config.broker, armed, tigerCredentials);
   } else {
     broker = new PaperBroker({
       instrumentResolver: async (symbol) => {
@@ -232,6 +353,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       inputs: config.inputs,
       executionId: config.executionId,
       reconcileOnStart: config.reconcileOnStart,
+      resolveSecurity: config.resolveSecurity,
+      securityWarmupBars: config.securityWarmupBars,
+      maxSecurityBars: config.maxSecurityBars,
+      maxSecurityFeeds: config.maxSecurityFeeds,
+      securityConcurrency: config.securityConcurrency,
+      securityRequestTimeoutMs: config.securityRequestTimeoutMs,
+      maxSecurityStaleRefreshes: config.maxSecurityStaleRefreshes,
+      mirror: {
+        orderType: config.order?.type,
+        limitOffsetTicks: config.order?.limitOffsetTicks,
+      },
       signal: controller.signal,
       onLog: (line) => console.log(line),
     });

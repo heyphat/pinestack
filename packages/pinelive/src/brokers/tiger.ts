@@ -1,6 +1,7 @@
 import { BrokerError } from '../core/broker.js';
-import type { Broker, Capabilities } from '../core/broker.js';
+import type { Broker, CancelOutcome, Capabilities } from '../core/broker.js';
 import type { Account, Fill, Instrument, OrderRequest, Position, Side } from '../core/types.js';
+import { isStepAligned } from '../core/units.js';
 
 export interface TigerTradingAccount {
   id: string;
@@ -35,8 +36,12 @@ export interface TigerOrderResult {
   orderId?: string;
   symbol: string;
   side: Side;
-  /** `partially-filled` is still working; the cancelled variant is terminal. */
+  /** Optional for legacy market transports; required when validating a limit order. */
+  type?: 'market' | 'limit';
+  limitPrice?: number;
+  /** `working` and `partially-filled` are non-terminal; the cancelled variant is terminal. */
   status:
+    | 'working'
     | 'filled'
     | 'partially-filled'
     | 'partially-filled-cancelled'
@@ -55,6 +60,8 @@ export interface TigerOrderResult {
 
 /** Execution-only production seam. Implementations hide SDK/account details. */
 export interface TigerTradingTransport {
+  /** Exact transport-resolved account identity, when known from a credential profile. */
+  readonly accountId?: string;
   connect?(signal?: AbortSignal): Promise<void>;
   disconnect?(): Promise<void>;
   account(accountId?: string, signal?: AbortSignal): Promise<TigerTradingAccount>;
@@ -70,6 +77,24 @@ export interface TigerTradingTransport {
     request: { symbol: string; side: Side; qty: number; clientId: string },
     signal?: AbortSignal,
   ): Promise<TigerOrderResult>;
+  /** Optional native limit path; responses and lookups must preserve type and limitPrice. */
+  submitLimit?(
+    accountId: string,
+    request: {
+      symbol: string;
+      side: Side;
+      qty: number;
+      clientId: string;
+      limitPrice: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<TigerOrderResult>;
+  /**
+   * Cancel a still-working order by its broker order id. Cancellation is a request,
+   * not a guarantee: a fill may already be in flight, so callers must re-read state.
+   * Optional so existing/custom transports stay source-compatible.
+   */
+  cancelOrder?(accountId: string, orderId: string, signal?: AbortSignal): Promise<void>;
 }
 
 export interface TigerBrokerOptions {
@@ -82,6 +107,12 @@ export interface TigerBrokerOptions {
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   /** Test/custom persistence seam. The default is collision-resistant across restarts. */
   operationIdFactory?: () => string;
+  /**
+   * Ask the venue to cancel an order that is still working after `maxOrderPolls`,
+   * instead of leaving it live. Off by default: cancelling mutates venue state and
+   * races an in-flight fill, so it is an explicit operator choice.
+   */
+  cancelStuckOrders?: boolean;
 }
 
 interface CachedFill {
@@ -92,8 +123,10 @@ interface CachedFill {
 export class TigerBroker implements Broker {
   readonly id = 'tiger';
   private accountValue?: TigerTradingAccount;
+  private readonly instruments = new Map<string, Instrument>();
   private readonly fills = new Map<string, CachedFill>();
   private readonly pending = new Map<string, string>();
+  private submitTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: TigerBrokerOptions) {
     if (!options.transport) throw new Error('tiger broker: a trading transport is required');
@@ -107,23 +140,34 @@ export class TigerBroker implements Broker {
       (!Number.isInteger(options.maxOrderPolls) || options.maxOrderPolls < 0)
     )
       throw new RangeError('tiger broker: maxOrderPolls must be a non-negative integer');
+    // Only expose cancel when the transport can honour it, so the capability declaration
+    // and the implemented surface cannot drift apart.
+    if (typeof options.transport.cancelOrder === 'function')
+      this.cancel = (clientId, signal) => this.cancelByClientId(clientId, signal);
   }
 
   capabilities(): Capabilities {
     return {
       positionModel: 'netting',
-      orderTypes: ['market'],
-      supportsNativeFlatten: true,
+      orderTypes:
+        typeof this.options.transport.submitLimit === 'function' &&
+        typeof this.options.transport.cancelOrder === 'function' &&
+        this.options.cancelStuckOrders === true
+          ? ['market', 'limit']
+          : ['market'],
+      supportsNativeFlatten: false,
       fractionalQuantity: false,
       transport: 'poll',
+      supportsCancel: typeof this.options.transport.cancelOrder === 'function',
     };
   }
 
   async connect(signal?: AbortSignal): Promise<void> {
     try {
       await this.options.transport.connect?.(signal);
-      const account = await this.options.transport.account(this.options.accountId, signal);
-      if (this.options.accountId && account.id !== this.options.accountId)
+      const expectedAccountId = this.options.accountId ?? this.options.transport.accountId;
+      const account = await this.options.transport.account(expectedAccountId, signal);
+      if (expectedAccountId && account.id !== expectedAccountId)
         throw new BrokerError('precondition', 'tiger: configured trading account was not returned');
       this.accountValue = account;
     } catch (error) {
@@ -140,6 +184,8 @@ export class TigerBroker implements Broker {
   }
 
   async instrument(symbol: string, signal?: AbortSignal): Promise<Instrument> {
+    const cached = this.instruments.get(symbol);
+    if (cached) return { ...cached };
     try {
       const value = await this.options.transport.instrument(symbol, signal);
       if (value.symbol !== symbol)
@@ -147,7 +193,7 @@ export class TigerBroker implements Broker {
           'precondition',
           'tiger: transport returned a different execution contract',
         );
-      return {
+      const instrument: Instrument = {
         symbol: value.symbol,
         brokerSymbol: value.symbol,
         dataSymbol: value.symbol,
@@ -161,6 +207,8 @@ export class TigerBroker implements Broker {
         exchange: value.exchange,
         expiry: value.expiry,
       };
+      this.instruments.set(symbol, instrument);
+      return { ...instrument };
     } catch (error) {
       throw classifyTigerBrokerError(error, 'instrument');
     }
@@ -191,10 +239,27 @@ export class TigerBroker implements Broker {
   async submit(order: OrderRequest, signal?: AbortSignal): Promise<Fill> {
     this.ensureArmed('submit');
     this.throwIfAborted(signal);
-    if (order.type !== 'market')
-      throw new BrokerError('reject', 'tiger: only market orders are supported');
-    if (!Number.isFinite(order.qty) || order.qty <= 0)
-      throw new BrokerError('precondition', 'tiger: order quantity must be positive');
+    validateOrderRequest(order);
+    return this.withSubmitLock(() => this.submitLocked(order, signal), signal);
+  }
+
+  private async submitLocked(order: OrderRequest, signal?: AbortSignal): Promise<Fill> {
+    this.throwIfAborted(signal);
+    if (order.type === 'limit') {
+      if (typeof this.options.transport.submitLimit !== 'function')
+        throw new BrokerError('reject', 'tiger: transport does not support limit orders');
+      if (!this.options.cancelStuckOrders || !this.options.transport.cancelOrder)
+        throw new BrokerError(
+          'precondition',
+          'tiger: limit orders require cancelStuckOrders and transport cancellation support',
+        );
+    }
+    const instrument = await this.instrument(order.symbol, signal);
+    const qtyStep = instrument.qtyStep ?? instrument.minQty;
+    if (!isStepAligned(order.qty, qtyStep) || order.qty < (instrument.minOrderQty ?? qtyStep))
+      throw new BrokerError('precondition', 'tiger: order quantity is off-step or below minimum');
+    if (order.type === 'limit' && !isStepAligned(order.limitPrice, instrument.mintick))
+      throw new BrokerError('precondition', 'tiger: limit price is not aligned to mintick');
     const fingerprint = orderFingerprint(order);
     const cached = this.fills.get(order.clientId);
     if (cached) {
@@ -205,32 +270,54 @@ export class TigerBroker implements Broker {
     const pendingFingerprint = this.pending.get(order.clientId);
     if (pendingFingerprint && pendingFingerprint !== fingerprint)
       throw new BrokerError('precondition', 'tiger: pending client id has a different order');
+    if (!pendingFingerprint && this.pending.size > 0)
+      throw new BrokerError(
+        'timeout',
+        'tiger: another submitted order is still unresolved; refusing a second live correction',
+        { retryable: true },
+      );
     const account = await this.ensureAccount(signal);
     this.throwIfAborted(signal);
     let result: TigerOrderResult | undefined;
     try {
       result = await this.options.transport.findOrderByClientId(account.id, order.clientId, signal);
       this.throwIfAborted(signal);
-      if (result) validateOrderIdentity(result, order);
+      if (result) {
+        validateOrderIdentity(result, order);
+        if (!isProvenTerminal(result.status)) this.pending.set(order.clientId, fingerprint);
+      }
       if (!result && pendingFingerprint) {
         throw new BrokerError('timeout', 'tiger: prior order outcome is still unknown', {
           retryable: true,
         });
       }
       if (!result) {
-        // Once transmission starts, absence from an eventually-consistent lookup is not
-        // proof of non-acceptance. Retries query this id but never retransmit it.
+        // Reserve the logical order before transmission. The submit lock makes this check/set
+        // atomic across client ids; the marker survives ambiguous and malformed responses.
         this.pending.set(order.clientId, fingerprint);
-        result = await this.options.transport.submitMarket(
-          account.id,
-          {
-            symbol: order.symbol,
-            side: order.side,
-            qty: order.qty,
-            clientId: order.clientId,
-          },
-          signal,
-        );
+        result =
+          order.type === 'limit'
+            ? await this.options.transport.submitLimit!(
+                account.id,
+                {
+                  symbol: order.symbol,
+                  side: order.side,
+                  qty: order.qty,
+                  clientId: order.clientId,
+                  limitPrice: order.limitPrice,
+                },
+                signal,
+              )
+            : await this.options.transport.submitMarket(
+                account.id,
+                {
+                  symbol: order.symbol,
+                  side: order.side,
+                  qty: order.qty,
+                  clientId: order.clientId,
+                },
+                signal,
+              );
         validateOrderIdentity(result, order);
       }
       result = await this.awaitTerminal(account.id, result, order, signal);
@@ -246,6 +333,7 @@ export class TigerBroker implements Broker {
         );
         if (recovered) {
           validateOrderIdentity(recovered, order);
+          if (!isProvenTerminal(recovered.status)) this.pending.set(order.clientId, fingerprint);
           result = await this.awaitTerminal(account.id, recovered, order, signal);
         }
       } catch (recoveryError) {
@@ -254,10 +342,27 @@ export class TigerBroker implements Broker {
       }
       if (!result) throw classified;
     }
+    // Only a proven terminal venue status releases the unresolved-order guard. Unknown or
+    // still-working outcomes retain it so a later bar cannot create a second live correction.
+    if (isProvenTerminal(result.status)) this.pending.delete(order.clientId);
     const fill = terminalFill(result, order);
-    this.pending.delete(order.clientId);
     this.fills.set(order.clientId, { fingerprint, fill });
     return structuredClone(fill);
+  }
+
+  private async withSubmitLock<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.submitTail;
+    let release!: () => void;
+    this.submitTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      this.throwIfAborted(signal);
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   async flatten(symbol: string, signal?: AbortSignal): Promise<void> {
@@ -284,6 +389,71 @@ export class TigerBroker implements Broker {
       throw new BrokerError('precondition', 'tiger: flatten did not reach zero exposure');
   }
 
+  /**
+   * Protocol-level cancellation, addressed by pinelive's client id. Present only when the
+   * transport can cancel, so `capabilities().supportsCancel` and this method never disagree.
+   * The venue read after the cancel decides the outcome, so a fill that beat the request is
+   * reported as filled rather than raised as an error.
+   */
+  cancel?: (clientId: string, signal?: AbortSignal) => Promise<CancelOutcome>;
+
+  private async cancelByClientId(clientId: string, signal?: AbortSignal): Promise<CancelOutcome> {
+    this.ensureArmed('cancel');
+    this.throwIfAborted(signal);
+    const cancelOrder = this.options.transport.cancelOrder!;
+    const account = await this.ensureAccount(signal);
+    try {
+      const existing = await this.options.transport.findOrderByClientId(
+        account.id,
+        clientId,
+        signal,
+      );
+      if (!existing) {
+        if (this.pending.has(clientId))
+          throw new BrokerError(
+            'timeout',
+            'tiger: pending order is not yet visible; cancel outcome is unknown',
+            { retryable: true },
+          );
+        return { clientId, status: 'not-found', filledQty: 0 };
+      }
+      if (
+        existing.orderId &&
+        (existing.status === 'working' ||
+          existing.status === 'partially-filled' ||
+          existing.status === 'unknown')
+      ) {
+        this.throwIfAborted(signal);
+        try {
+          await cancelOrder.call(this.options.transport, account.id, existing.orderId, signal);
+        } catch (error) {
+          const classified = classifyTigerBrokerError(error, 'cancel');
+          // A refused cancel usually means the order already settled; the re-read decides.
+          if (!classified.retryable && classified.code !== 'reject') throw classified;
+        }
+      }
+      const settled =
+        (await this.options.transport.findOrderByClientId(account.id, clientId, signal)) ??
+        existing;
+      if (settled.status === 'working' || settled.status === 'partially-filled')
+        throw new BrokerError('timeout', 'tiger: order is still working after cancel', {
+          retryable: true,
+        });
+      if (settled.status === 'unknown')
+        throw new BrokerError('timeout', 'tiger: cancel outcome is still unknown', {
+          retryable: true,
+        });
+      this.pending.delete(clientId);
+      return {
+        clientId,
+        status: settled.status === 'filled' ? 'filled' : 'cancelled',
+        filledQty: settled.filledQty ?? 0,
+      };
+    } catch (error) {
+      throw classifyTigerBrokerError(error, 'cancel');
+    }
+  }
+
   private async awaitTerminal(
     accountId: string,
     initial: TigerOrderResult,
@@ -291,11 +461,18 @@ export class TigerBroker implements Broker {
     signal?: AbortSignal,
   ): Promise<TigerOrderResult> {
     let result = initial;
-    for (let poll = 0; result.status === 'partially-filled'; poll++) {
-      if (poll >= (this.options.maxOrderPolls ?? 20))
-        throw new BrokerError('timeout', 'tiger: partially filled order is still working', {
+    for (
+      let poll = 0;
+      result.status === 'working' || result.status === 'partially-filled';
+      poll++
+    ) {
+      if (poll >= (this.options.maxOrderPolls ?? 20)) {
+        const settled = await this.cancelStuck(accountId, result, order, signal);
+        if (settled) return settled;
+        throw new BrokerError('timeout', 'tiger: order is still working', {
           retryable: true,
         });
+      }
       await this.sleep(this.options.orderPollIntervalMs ?? 250, signal);
       this.throwIfAborted(signal);
       const next = await this.options.transport.findOrderByClientId(
@@ -308,6 +485,49 @@ export class TigerBroker implements Broker {
       result = next;
     }
     return result;
+  }
+
+  /**
+   * Request cancellation of an order still working after the poll budget, then re-read it.
+   * A cancel can lose the race against a fill, so the re-read decides the outcome and the
+   * caller keeps the same client id either way. Returns a terminal result, or undefined
+   * when the order is still not terminal and the caller should surface a timeout.
+   */
+  private async cancelStuck(
+    accountId: string,
+    working: TigerOrderResult,
+    order: OrderRequest,
+    signal?: AbortSignal,
+  ): Promise<TigerOrderResult | undefined> {
+    if (!this.options.cancelStuckOrders) return undefined;
+    const cancel = this.options.transport.cancelOrder;
+    if (!cancel || !working.orderId) return undefined;
+    this.ensureArmed('cancel');
+    this.throwIfAborted(signal);
+    try {
+      await cancel.call(this.options.transport, accountId, working.orderId, signal);
+    } catch (error) {
+      // A rejected cancel usually means the order already reached a terminal state;
+      // the re-read below is authoritative either way.
+      const classified = classifyTigerBrokerError(error, 'cancel');
+      if (!classified.retryable && classified.code !== 'reject') throw classified;
+    }
+    for (let poll = 0; poll <= (this.options.maxOrderPolls ?? 20); poll++) {
+      const settled = await this.options.transport.findOrderByClientId(
+        accountId,
+        order.clientId,
+        signal,
+      );
+      if (settled) {
+        validateOrderIdentity(settled, order);
+        if (settled.status !== 'working' && settled.status !== 'partially-filled') return settled;
+      }
+      if (poll < (this.options.maxOrderPolls ?? 20)) {
+        await this.sleep(this.options.orderPollIntervalMs ?? 250, signal);
+        this.throwIfAborted(signal);
+      }
+    }
+    return undefined;
   }
 
   private async ensureAccount(signal?: AbortSignal): Promise<TigerTradingAccount> {
@@ -332,13 +552,22 @@ export class TigerBroker implements Broker {
   }
 }
 
+function isProvenTerminal(status: TigerOrderResult['status']): boolean {
+  return (
+    status === 'filled' ||
+    status === 'partially-filled-cancelled' ||
+    status === 'rejected' ||
+    status === 'cancelled'
+  );
+}
+
 function terminalFill(result: TigerOrderResult, order: OrderRequest): Fill {
   if (result.status === 'rejected' || result.status === 'cancelled')
     throw new BrokerError('reject', `tiger: order ${result.status}`, { retryable: false });
   if (result.status === 'unknown')
     throw new BrokerError('timeout', 'tiger: order outcome is unknown', { retryable: true });
-  if (result.status === 'partially-filled')
-    throw new BrokerError('timeout', 'tiger: partially filled order is still working', {
+  if (result.status === 'working' || result.status === 'partially-filled')
+    throw new BrokerError('timeout', 'tiger: order is still working', {
       retryable: true,
     });
   if (
@@ -349,6 +578,12 @@ function terminalFill(result: TigerOrderResult, order: OrderRequest): Fill {
     result.price! <= 0
   )
     throw new BrokerError('precondition', 'tiger: terminal order response has invalid fill data');
+  if (order.type === 'limit') {
+    const worse =
+      order.side === 'buy' ? result.price! > order.limitPrice : result.price! < order.limitPrice;
+    if (worse)
+      throw new BrokerError('precondition', 'tiger: limit fill price is worse than requested');
+  }
   if (result.status === 'filled' && result.filledQty !== order.qty)
     throw new BrokerError(
       'precondition',
@@ -371,13 +606,33 @@ function terminalFill(result: TigerOrderResult, order: OrderRequest): Fill {
   };
 }
 
-function orderFingerprint(order: Pick<OrderRequest, 'symbol' | 'side' | 'qty' | 'type'>): string {
-  return `${order.symbol}\0${order.side}\0${order.qty}\0${order.type}`;
+function orderFingerprint(order: OrderRequest): string {
+  return `${order.symbol}\0${order.side}\0${order.qty}\0${order.type}\0${
+    order.type === 'limit' ? order.limitPrice : ''
+  }`;
+}
+
+function validateOrderRequest(order: OrderRequest): void {
+  if (!order || typeof order !== 'object')
+    throw new BrokerError('precondition', 'tiger: order must be an object');
+  if (typeof order.symbol !== 'string' || !order.symbol.trim())
+    throw new BrokerError('precondition', 'tiger: order symbol is required');
+  if (typeof order.clientId !== 'string' || !order.clientId.trim())
+    throw new BrokerError('precondition', 'tiger: order client id is required');
+  if (order.side !== 'buy' && order.side !== 'sell')
+    throw new BrokerError('precondition', 'tiger: order side must be "buy" or "sell"');
+  if (order.type !== 'market' && order.type !== 'limit')
+    throw new BrokerError('reject', `tiger: ${String(order.type)} orders are not supported`);
+  if (!Number.isFinite(order.qty) || order.qty <= 0)
+    throw new BrokerError('precondition', 'tiger: order quantity must be positive');
+  if (order.type === 'limit' && (!Number.isFinite(order.limitPrice) || order.limitPrice <= 0))
+    throw new BrokerError('precondition', 'tiger: limit price must be positive and finite');
 }
 
 function validateOrderIdentity(result: TigerOrderResult, order: OrderRequest): void {
   if (
     ![
+      'working',
       'filled',
       'partially-filled',
       'partially-filled-cancelled',
@@ -391,7 +646,9 @@ function validateOrderIdentity(result: TigerOrderResult, order: OrderRequest): v
     result.clientId !== order.clientId ||
     result.symbol !== order.symbol ||
     result.side !== order.side ||
-    result.requestedQty !== order.qty
+    result.requestedQty !== order.qty ||
+    (result.type != null && result.type !== order.type) ||
+    (order.type === 'limit' && (result.type !== 'limit' || result.limitPrice !== order.limitPrice))
   ) {
     throw new BrokerError('precondition', 'tiger: order response identity does not match request');
   }

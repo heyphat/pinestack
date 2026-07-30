@@ -22,6 +22,7 @@ import {
   ExactHistoryError,
   acquireExactHistory,
   assertCalendarPeriodCoverage,
+  barCloseTime,
   calendarSessionPeriods,
   canonicalTimeframeSecondsExact,
   halfOpenIntervalSec,
@@ -29,8 +30,9 @@ import {
   isUtcWeekTimeframe,
   parseCanonicalTimeframeExact,
   pineTimeframeToCanonicalExact,
-  pinerTimeframeToCanonical,
   resolveHistorySource,
+  resolveLowerFetchTf,
+  resolveSameSymbolFetchTf,
   snapshotHistorySessionCalendar,
   timeframeSeconds,
   unixSecond,
@@ -61,6 +63,12 @@ import type {
 import { canonicalDigest, marketDataDigest, registerOwnedImmutableBars } from './digest.js';
 import { BarMagnifierError } from './failure.js';
 import { compilePinerSource } from './piner-capabilities.js';
+
+/**
+ * Timeframe resolution is owned by pinery so pinerun's scans and pinelive's forward
+ * runner plan byte-identical fetches from the same dependency metadata.
+ */
+export { resolveLowerFetchTf, resolveSameSymbolFetchTf };
 
 /** Sentinel symbol used for the discovery run (disambiguates self-refs from literals). */
 export const PROBE_SYMBOL = '__pinerun_probe__';
@@ -110,7 +118,7 @@ export async function discoverSecurityRequests(
 }
 
 export interface ClassifiedRequests {
-  /** Cross-symbol plain requests, deduped by symbol for legacy chart-TF fetching. */
+  /** Legacy list of symbols used by plain cross-symbol requests. */
   crossHtf: string[];
   /** Concrete cross-symbol plain request identities retained for exact planning. A null raw TF
    * means the statically proven chart timeframe (`timeframe.period` / empty timeframe). */
@@ -171,40 +179,6 @@ export function classifyRequests(
     selfLtfRawTfs: [...selfLtf],
     selfPlainRawTfs: [...selfPlain],
   };
-}
-
-/**
- * Resolve a `request.security_lower_tf` timeframe to the canonical TF to fetch: the
- * finer TF strictly below the chart TF; clamps sub-minute to `1m`; returns null when
- * the chart is already at the finest TF (request degrades to []).
- */
-export function resolveLowerFetchTf(rawPinerTf: string, chartTf: Timeframe): Timeframe | null {
-  const canon = pinerTimeframeToCanonical(rawPinerTf) ?? '1m';
-  const chartSec = timeframeSeconds(chartTf);
-  let sec: number;
-  try {
-    sec = timeframeSeconds(canon);
-  } catch {
-    return chartSec > 60 ? '1m' : null;
-  }
-  if (sec < chartSec) return canon;
-  return chartSec > 60 ? '1m' : null; // coarser/equal request → finest available, if any
-}
-
-/**
- * Resolve a PLAIN self `request.security` timeframe to the canonical TF to fetch, or null when it
- * is the chart's own TF (piner passes it through) or unknown. Unlike `resolveLowerFetchTf` this
- * returns the EXACT requested TF (finer OR higher) with no clamping — we fetch the real series so
- * piner resolves against it instead of resampling the chart's bars.
- */
-export function resolveSameSymbolFetchTf(rawPinerTf: string, chartTf: Timeframe): Timeframe | null {
-  const canon = pinerTimeframeToCanonical(rawPinerTf);
-  if (!canon) return null;
-  try {
-    return timeframeSeconds(canon) !== timeframeSeconds(chartTf) ? canon : null;
-  } catch {
-    return null;
-  }
 }
 
 export interface ResolveSecurityOptions {
@@ -627,6 +601,56 @@ function exactSameSymbolTimeframeDiffers(rawPinerTf: string, chartTf: Timeframe)
   }
 }
 
+interface LegacyCrossPlainFetch {
+  readonly symbol: string;
+  readonly fetchTf: Timeframe;
+}
+
+/**
+ * Derive the lossy bare-symbol feed plan used only by ordinary provider.history
+ * resolution. ClassifiedRequests retains every raw timeframe/lookahead identity
+ * for exact planning and proof reconstruction.
+ */
+function planLegacyCrossPlainFetches(
+  classified: ClassifiedRequests,
+  chartTf: Timeframe,
+): LegacyCrossPlainFetch[] {
+  const fetches = new Map<string, Timeframe>();
+  for (const symbol of classified.crossHtf) fetches.set(symbol, chartTf);
+  for (const { symbol, rawTf } of classified.crossPlain ?? []) {
+    addLegacyCrossPlainFetch(fetches, symbol, rawTf, chartTf);
+  }
+  return [...fetches].map(([symbol, fetchTf]) => ({ symbol, fetchTf }));
+}
+
+function addLegacyCrossPlainFetch(
+  fetches: Map<string, Timeframe>,
+  symbol: string,
+  rawTf: string | null,
+  chartTf: Timeframe,
+): void {
+  let fetchTf = chartTf;
+  const requestedTf = rawTf === null ? null : resolveSameSymbolFetchTf(rawTf, chartTf);
+  if (requestedTf !== null) {
+    try {
+      if (timeframeSeconds(requestedTf) <= timeframeSeconds(chartTf)) fetchTf = requestedTf;
+    } catch {
+      // Unknown ordinary identities retain the legacy chart-timeframe fallback.
+    }
+  }
+
+  const current = fetches.get(symbol);
+  if (current === undefined) {
+    fetches.set(symbol, fetchTf);
+    return;
+  }
+  try {
+    if (timeframeSeconds(fetchTf) < timeframeSeconds(current)) fetches.set(symbol, fetchTf);
+  } catch {
+    // A valid existing fallback is safer than throwing from tolerant ordinary planning.
+  }
+}
+
 /**
  * Discover + fetch + inject in place: mutates each job's `securityBars`. `chartTf`
  * is the canonical pinery timeframe of the scan; `pinerTf` is its piner label
@@ -706,40 +730,37 @@ export async function resolveSecurity(
     return { discovered: false };
   }
 
+  const legacyCrossPlain = planLegacyCrossPlainFetches(cls, chartTf);
+  const chartEnvelope = limitOnlyChartEnvelope(opts.range, jobs, chartTf);
+  const dependencyRange = (fetchTf: Timeframe): HistoryRange | undefined =>
+    timeframeSeconds(fetchTf) < timeframeSeconds(chartTf) ? chartEnvelope : opts.range;
+
   // ── shared cross-symbol bars (fetched once, injected into every job) ──
   const shared: Record<string, Bar[]> = {};
-  await mapLimit(cls.crossHtf, opts.concurrency, async (symbol) => {
+  await mapLimit(legacyCrossPlain, opts.concurrency, async ({ symbol, fetchTf }) => {
     try {
-      const bars = await provider.history(symbol, chartTf, opts.range);
+      const bars = await provider.history(symbol, fetchTf, dependencyRange(fetchTf));
       if (bars.length) {
         shared[symbol] = bars;
         opts.onFetch?.(symbol, bars.length);
-      } else if (opts.barMagnifierRequested) {
-        throw staticSecurityUnavailable(symbol);
       }
     } catch (err) {
-      // Legacy scans degrade visibly; exact magnifier mode must resolve the
-      // complete static plan before execution and therefore fails here.
+      // Ordinary scans degrade visibly; exact mode returned before this history() branch.
       opts.onError?.(symbol, errorMessage(err));
-      if (opts.barMagnifierRequested) throw err;
     }
   });
   await mapLimit(cls.crossLtf, opts.concurrency, async ({ symbol, rawTf }) => {
     const fetchTf = resolveLowerFetchTf(rawTf, chartTf);
     if (!fetchTf) return;
+    const label = `${symbol}@${rawTf}`;
     try {
-      const bars = await provider.history(symbol, fetchTf, opts.range);
-      const label = `${symbol}@${rawTf}`;
+      const bars = await provider.history(symbol, fetchTf, dependencyRange(fetchTf));
       if (bars.length) {
         shared[label] = bars;
         opts.onFetch?.(label, bars.length);
-      } else if (opts.barMagnifierRequested) {
-        throw staticSecurityUnavailable(label);
       }
     } catch (err) {
-      const label = `${symbol}@${rawTf}`;
       opts.onError?.(label, errorMessage(err));
-      if (opts.barMagnifierRequested) throw err;
     }
   });
 
@@ -761,14 +782,10 @@ export async function resolveSecurity(
         let bars = selfCache.get(cacheKey);
         if (!bars) {
           try {
-            bars = await provider.history(job.symbol, fetchTf, opts.range);
-            if (bars.length === 0 && opts.barMagnifierRequested) {
-              throw staticSecurityUnavailable(`${job.symbol}@${rawTf}`);
-            }
+            bars = await provider.history(job.symbol, fetchTf, dependencyRange(fetchTf));
           } catch (err) {
             opts.onError?.(`${job.symbol}@${rawTf}`, errorMessage(err));
-            if (opts.barMagnifierRequested) throw err;
-            bars = []; // legacy mode degrades, but says so
+            bars = []; // ordinary mode degrades, but says so
           }
           selfCache.set(cacheKey, bars);
         }
@@ -1971,6 +1988,26 @@ function securityPrefixAuthorityFailure(message: string): BarMagnifierError {
   });
 }
 
+/** Convert a pure bar-count request to the chart's loaded time span for finer legacy feeds. */
+function limitOnlyChartEnvelope(
+  range: HistoryRange | undefined,
+  jobs: readonly Job[],
+  chartTf: Timeframe,
+): HistoryRange | undefined {
+  if (range?.limit == null || range.from != null || range.to != null) return range;
+  let from = Number.POSITIVE_INFINITY;
+  let to = Number.NEGATIVE_INFINITY;
+  for (const job of jobs) {
+    for (const bar of job.bars) {
+      const open = Math.floor(bar.time >= 1e12 ? bar.time / 1_000 : bar.time);
+      if (!Number.isFinite(open)) continue;
+      from = Math.min(from, open);
+      to = Math.max(to, barCloseTime(open, chartTf) - 1);
+    }
+  }
+  return Number.isFinite(from) && Number.isFinite(to) ? { from, to } : range;
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -2405,15 +2442,6 @@ function dynamicSecurityFailure(details: unknown): BarMagnifierError {
       'Bar Magnifier exact mode requires every request.security/security_lower_tf ' +
       'symbol, timeframe, and lookahead identity to be statically resolvable',
     details,
-  });
-}
-
-function staticSecurityUnavailable(label: string): BarMagnifierError {
-  return new BarMagnifierError({
-    kind: 'provider-limited',
-    code: 'static-security-data-unavailable-with-bar-magnifier',
-    message: `Bar Magnifier exact mode could not resolve static security data for ${label}`,
-    details: { label },
   });
 }
 

@@ -171,5 +171,30 @@ export async function runBrokerConformance(
     });
   }
 
+  // Capability honesty: every broker must declare the optional protocol surface it
+  // actually implements, so callers can rely on the declaration instead of probing.
+  const declared = await makeHarness();
+  const capabilities = declared.broker.capabilities();
+  if (capabilities.supportsCancel !== (typeof declared.broker.cancel === 'function')) {
+    failures.push({
+      scenario: 'capability declaration',
+      message: `supportsCancel=${capabilities.supportsCancel} disagrees with cancel ${
+        typeof declared.broker.cancel === 'function' ? 'being' : 'not being'
+      } implemented`,
+    });
+  }
+  if (capabilities.orderTypes.length === 0) {
+    failures.push({
+      scenario: 'capability declaration',
+      message: 'a broker must declare at least one supported order type',
+    });
+  }
+  if (!capabilities.orderTypes.includes('market')) {
+    failures.push({
+      scenario: 'capability declaration',
+      message: 'position mirroring requires market order support',
+    });
+  }
+
   return failures;
 }

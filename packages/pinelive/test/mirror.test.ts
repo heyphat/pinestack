@@ -23,7 +23,9 @@ test('mirror opens, caps and uses restart-stable ids', async () => {
   expect(outcome.action).toBe('order');
   if (outcome.action === 'order') {
     expect(outcome.order.qty).toBe(2);
-    expect(outcome.order.clientId).toBe('default:s:ROOT:X:binding-test:1h:1:0:5:2:reconcile');
+    expect(outcome.order.clientId).toBe(
+      '7:default|1:s|4:ROOT|1:X|12:binding-test|2:1h|1:1|1:0|1:5|1:2|9:reconcile',
+    );
   }
   expect((await broker.getPosition('X')).qty).toBe(2);
 });
@@ -63,8 +65,8 @@ test('mirror retries transient submissions with the same client id', async () =>
   }).reconcile(1, context());
   expect(outcome.action).toBe('order');
   expect(clientIds).toEqual([
-    'default:s:ROOT:X:binding-test:1h:1:0:1:1:reconcile',
-    'default:s:ROOT:X:binding-test:1h:1:0:1:1:reconcile',
+    '7:default|1:s|4:ROOT|1:X|12:binding-test|2:1h|1:1|1:0|1:1|1:1|9:reconcile',
+    '7:default|1:s|4:ROOT|1:X|12:binding-test|2:1h|1:1|1:0|1:1|1:1|9:reconcile',
   ]);
 });
 

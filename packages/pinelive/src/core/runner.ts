@@ -1,6 +1,7 @@
 import { ArrayFeed, compile, CompileError, Engine } from '@heyphat/piner';
 import type { CompiledScript } from '@heyphat/piner';
 import {
+  barCloseTime,
   toPinerTimeframe,
   type MarketDataProvider,
   type ResolvedDataInstrument,
@@ -8,9 +9,25 @@ import {
 import { isMarkableBroker } from '../brokers/paper.js';
 import type { Broker } from './broker.js';
 import { createRunInstrumentBinding, type RunInstrumentBinding } from './binding.js';
-import type { BindingRecord, ForwardRecord, StartupRecord } from './ledger.js';
+import type {
+  BindingRecord,
+  ForwardRecord,
+  SecurityFeedHealthRecord,
+  StartupRecord,
+} from './ledger.js';
 import { PositionMirror } from './mirror.js';
 import type { PositionMirrorOptions, ReconcileOutcome } from './mirror.js';
+import {
+  DEFAULT_SECURITY_REQUEST_TIMEOUT_MS,
+  discoverSecurityRequests,
+  findUncoveredSecurityFeeds,
+  planSecurityFromRequests,
+  planSecurityFromStatic,
+  SecurityFeedError,
+  SecurityFeedManager,
+  type SecurityFeedHealth,
+  type SecurityFeedSpec,
+} from './security.js';
 import { toPinerBar } from './time.js';
 import type { Bar, Instrument } from './types.js';
 
@@ -30,6 +47,35 @@ export interface ForwardRunnerOptions {
   executionId?: string;
   /** Explicit startup drift correction. Disabled by default and ledgered separately. */
   reconcileOnStart?: boolean;
+  /**
+   * Resolve `request.security` dependencies by opening secondary provider feeds. Default
+   * true. Set false to run without them — every request then degrades to `na`/`[]`, which
+   * changes what the strategy trades, so the runner refuses unless you also accept that by
+   * leaving the strategy free of security dependencies.
+   */
+  resolveSecurity?: boolean;
+  /**
+   * Bars fetched per secondary feed at startup. Defaults to the number of chart-history bars
+   * actually received; each feed gets at least this many bars of its OWN timeframe so
+   * higher-timeframe indicators warm up.
+   */
+  securityWarmupBars?: number;
+  /** Hard total-series ceiling per feed. Exceeding it stops rather than truncating history. */
+  maxSecurityBars?: number;
+  /** Maximum dependency feeds opened by one strategy. Default 32. */
+  maxSecurityFeeds?: number;
+  /** Maximum concurrent secondary-provider requests. Default 4. */
+  securityConcurrency?: number;
+  /** Timeout per secondary-provider request in milliseconds. Default 30000. */
+  securityRequestTimeoutMs?: number;
+  /** Failed refreshes tolerated before stopping reconciliation. Default 0. */
+  maxSecurityStaleRefreshes?: number;
+  /** A secondary feed was fetched at startup. */
+  onSecurityFetch?: (key: string, bars: number) => void | Promise<void>;
+  /** A secondary refresh failed. The default policy stops on the first failure. */
+  onSecurityError?: (key: string, error: string) => void | Promise<void>;
+  /** Durable health event emitted before stale-feed policy is applied. */
+  onSecurityHealth?: (record: SecurityFeedHealthRecord) => void | Promise<void>;
   mirror?: PositionMirrorOptions;
   onBinding?: (record: BindingRecord) => void | Promise<void>;
   onStartupRecord?: (record: StartupRecord) => void | Promise<void>;
@@ -59,8 +105,10 @@ export class ForwardRunner {
   private instrument?: Instrument;
   private resolved?: ResolvedDataInstrument;
   private runBinding?: RunInstrumentBinding;
+  private securityFeeds?: SecurityFeedManager;
   private abort = new AbortController();
   private initialized = false;
+  private running = false;
   private sequence = 0;
   private lastBarTime = -Infinity;
   private readonly runId: string;
@@ -77,6 +125,64 @@ export class ForwardRunner {
 
   get binding(): RunInstrumentBinding | undefined {
     return this.runBinding;
+  }
+
+  /** Resolved `request.security` feeds, once `init()` has run. Empty when there are none. */
+  get securityFeedSpecs(): readonly SecurityFeedSpec[] {
+    return this.securityFeeds?.specs ?? [];
+  }
+
+  /**
+   * Plan the secondary feeds. Static-first from compile metadata; a dependency whose symbol
+   * or timeframe is computed at runtime forces one throwaway discovery run under a sentinel
+   * symbol, which is how the self-vs-literal distinction is recovered.
+   */
+  private async planSecurityFeeds(
+    deps: CompiledScript['metadata']['securityDependencies'],
+    pinerHistory: readonly Bar[],
+    pinerTimeframe: string,
+  ): Promise<SecurityFeedSpec[]> {
+    const chartSymbol = this.runBinding!.strategySymbol;
+    const staticFeeds = planSecurityFromStatic(deps, this.options.timeframe, chartSymbol);
+    if (staticFeeds) return staticFeeds;
+    let requests;
+    try {
+      requests = await discoverSecurityRequests(this.compiled!, pinerHistory, {
+        timeframe: pinerTimeframe,
+        inputs: this.options.inputs,
+        backend: this.options.backend,
+        mintick: this.runBinding!.mintick,
+      });
+    } catch (error) {
+      throw new ForwardRunnerError(
+        `request.security has runtime-computed arguments and the discovery run failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        { cause: error },
+      );
+    }
+    return planSecurityFromRequests(requests, this.options.timeframe, chartSymbol);
+  }
+
+  /**
+   * Dynamic call sites are discovered once for startup, then monitored forever. A new symbol,
+   * timeframe-qualified key, or finer bare-symbol requirement stops the run before broker
+   * reconciliation instead of letting piner silently evaluate it as na/[].
+   */
+  private assertSecurityDependenciesCovered(): void {
+    if (!this.engine || !this.runBinding) return;
+    const uncovered = findUncoveredSecurityFeeds(
+      this.engine.outputs.securityRequests,
+      this.securityFeedSpecs,
+      this.options.timeframe,
+      this.runBinding.strategySymbol,
+    );
+    if (uncovered.length > 0)
+      throw new ForwardRunnerError(
+        `request.security declared a dependency after initialization (${uncovered
+          .map((feed) => `${feed.key}@${feed.fetchTf}`)
+          .join(', ')}); the run stopped before reconciliation because that series was not warmed`,
+      );
   }
 
   async init(): Promise<void> {
@@ -99,9 +205,11 @@ export class ForwardRunner {
       );
     if (!this.compiled.metadata.isStrategy)
       throw new ForwardRunnerError('Pine source must declare a strategy(), not an indicator()');
-    if (this.compiled.metadata.securityDependencies.length > 0)
+    const securityDeps = this.compiled.metadata.securityDependencies;
+    if (securityDeps.length > 0 && this.options.resolveSecurity === false)
       throw new ForwardRunnerError(
-        'request.security strategies are not supported by the single-provider forward runner',
+        'this strategy uses request.security but resolveSecurity is disabled; those requests ' +
+          'would degrade to na and the strategy would trade differently than it backtested',
       );
 
     this.resolved = await this.data.resolve(this.options.symbol, {
@@ -129,24 +237,78 @@ export class ForwardRunner {
     });
     this.ensureActive();
 
+    const requestedWarmupBars = this.options.warmupBars ?? 200;
     const history = await this.data.historyResolved(
       this.resolved,
       this.options.timeframe,
-      { limit: this.options.warmupBars ?? 200 },
+      { limit: requestedWarmupBars },
       this.abort.signal,
     );
     this.ensureActive();
+    if (history.length < requestedWarmupBars)
+      throw new ForwardRunnerError(
+        `primary warmup returned ${history.length} bars but ${requestedWarmupBars} were requested`,
+      );
+    const pinerHistory = history.map(toPinerBar);
+    const pinerTimeframe = toPinerTimeframe(this.options.timeframe);
+
+    // request.security: plan the secondary feeds, then fetch them BEFORE the historical run
+    // so the warmup pass sees the same series the backtest did.
+    if (securityDeps.length > 0) {
+      const feeds = await this.planSecurityFeeds(securityDeps, pinerHistory, pinerTimeframe);
+      this.ensureActive();
+      if (feeds.length > 0) {
+        const newestChartBar = history.at(-1);
+        if (!newestChartBar)
+          throw new ForwardRunnerError(
+            'request.security cannot warm secondary feeds without chart history',
+          );
+        const manager = new SecurityFeedManager(this.data, feeds, {
+          chartTf: this.options.timeframe,
+          chartInstrument: this.resolved,
+          chartWarmupEnd: barCloseTime(newestChartBar.time, this.options.timeframe),
+          // Default to the history actually received, not the requested chart limit.
+          warmupBars: this.options.securityWarmupBars ?? history.length,
+          maxBars: this.options.maxSecurityBars,
+          maxFeeds: this.options.maxSecurityFeeds,
+          concurrency: this.options.securityConcurrency,
+          requestTimeoutMs: this.options.securityRequestTimeoutMs,
+          maxStaleRefreshes: this.options.maxSecurityStaleRefreshes,
+          signal: this.abort.signal,
+          onFetch: this.options.onSecurityFetch,
+          onError: async (key, error, health) => {
+            await this.options.onSecurityError?.(key, error);
+            await this.options.onSecurityHealth?.(this.securityHealthRecord(key, error, health));
+          },
+        });
+        this.securityFeeds = manager;
+        try {
+          await manager.warmup();
+        } catch (error) {
+          // Fail closed: a live run must never start on a silently-na security series.
+          throw error instanceof SecurityFeedError
+            ? new ForwardRunnerError(error.message, { cause: error })
+            : error;
+        }
+        this.ensureActive();
+      }
+    }
+
     const strategyOptions = { minQty: this.runBinding.qtyStep } as StrategyOptionsWithMinQty;
-    this.engine = new Engine(this.compiled, new ArrayFeed(history.map(toPinerBar)), {
+    this.engine = new Engine(this.compiled, new ArrayFeed(pinerHistory), {
       backend: this.options.backend ?? 'js',
       inputs: this.options.inputs,
       strategy: strategyOptions,
     });
+    // Inject before run(): piner reads ctx.securityBars while replaying history, and the
+    // arrays are mutated in place from here on, so no re-injection is needed per bar.
+    this.securityFeeds?.inject(this.engine);
     await this.engine.run({
       symbol: this.runBinding.strategySymbol,
-      timeframe: toPinerTimeframe(this.options.timeframe),
+      timeframe: pinerTimeframe,
       mintick: this.runBinding.mintick,
     });
+    this.assertSecurityDependenciesCovered();
     this.ensureActive();
     this.mirror = new PositionMirror(this.broker, this.instrument, this.options.mirror);
     this.initialized = true;
@@ -167,20 +329,33 @@ export class ForwardRunner {
   }
 
   async start(): Promise<void> {
-    await this.init();
-    for await (const bar of this.data.closedBars(this.resolved!, this.options.timeframe, {
-      after: Number.isFinite(this.lastBarTime) ? this.lastBarTime : undefined,
-      signal: this.abort.signal,
-    })) {
-      if (this.abort.signal.aborted) break;
-      if (!Number.isFinite(bar.time))
-        throw new ForwardRunnerError('provider emitted a bar with invalid time');
-      if (bar.time <= this.lastBarTime) continue;
-      this.engine!.tick(toPinerBar(bar), true);
-      this.lastBarTime = bar.time;
-      const { record } = await this.reconcile(bar, 'cycle');
-      await this.options.onRecord?.(record);
-      this.ensureActive();
+    if (this.running) throw new ForwardRunnerError('forward runner is already running');
+    this.running = true;
+    try {
+      await this.init();
+      for await (const bar of this.data.closedBars(this.resolved!, this.options.timeframe, {
+        after: Number.isFinite(this.lastBarTime) ? this.lastBarTime : undefined,
+        signal: this.abort.signal,
+      })) {
+        if (this.abort.signal.aborted) break;
+        if (!Number.isFinite(bar.time))
+          throw new ForwardRunnerError('provider emitted a bar with invalid time');
+        if (bar.time <= this.lastBarTime) continue;
+        if (this.securityFeeds) {
+          await this.securityFeeds.refresh(bar.time);
+          this.ensureActive();
+        }
+        this.engine!.tick(toPinerBar(bar), true);
+        // Dynamic request arguments/call sites are checked after evaluation but before any
+        // target can reach the broker.
+        this.assertSecurityDependenciesCovered();
+        this.lastBarTime = bar.time;
+        const { record } = await this.reconcile(bar, 'cycle');
+        await this.options.onRecord?.(record);
+        this.ensureActive();
+      }
+    } finally {
+      this.running = false;
     }
   }
 
@@ -190,7 +365,51 @@ export class ForwardRunner {
 
   async stop(): Promise<void> {
     this.cancel();
-    await this.data.disconnect?.();
+    const timeoutMs = this.options.securityRequestTimeoutMs ?? DEFAULT_SECURITY_REQUEST_TIMEOUT_MS;
+    const errors: unknown[] = [];
+    const active = new Set<string>();
+    const run = (
+      name: string,
+      operation: () => void | Promise<void> | undefined,
+    ): Promise<void> => {
+      active.add(name);
+      return Promise.resolve()
+        .then(operation)
+        .catch((error: unknown) => {
+          errors.push(error);
+        })
+        .finally(() => {
+          active.delete(name);
+        });
+    };
+
+    // Invoke disconnect before drain in microtask order so providers can interrupt their
+    // transports, but start both under one deadline so a hanging disconnect cannot bypass the
+    // manager's bounded failure path.
+    const operations = [
+      run('provider disconnect', () => this.data.disconnect?.()),
+      run('security feed drain', () => this.securityFeeds?.drain()),
+    ];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const completed = await Promise.race([
+      Promise.all(operations).then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (!completed) {
+      errors.push(
+        new ForwardRunnerError(
+          `forward runner shutdown timed out after ${timeoutMs}ms; unsettled: ${[...active].join(
+            ', ',
+          )}`,
+        ),
+      );
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1)
+      throw new AggregateError(errors, 'forward runner provider shutdown failed');
   }
 
   async disconnect(): Promise<void> {
@@ -213,6 +432,7 @@ export class ForwardRunner {
       executionSymbol: binding.executionSymbol,
       bindingId: binding.id,
       barTime: bar.time,
+      referencePrice: bar.close,
       strategyId: this.strategyId,
       executionId: this.options.executionId,
       timeframe: this.options.timeframe,
@@ -253,6 +473,12 @@ export class ForwardRunner {
           : outcome.action === 'reject'
             ? outcome.order?.clientId
             : undefined,
+      order:
+        outcome.action === 'order'
+          ? { ...outcome.order }
+          : outcome.action === 'reject' && outcome.order
+            ? { ...outcome.order }
+            : undefined,
       fill: outcome.action === 'order' ? outcome.fill : undefined,
       error:
         outcome.action === 'reject'
@@ -260,6 +486,24 @@ export class ForwardRunner {
           : outcome.action === 'order'
             ? outcome.positionError
             : undefined,
+      ...(this.securityFeeds ? { securityFeeds: this.securityFeeds.describe() } : {}),
+      recordedAt: new Date().toISOString(),
+    };
+  }
+
+  private securityHealthRecord(
+    key: string,
+    error: string,
+    feeds: readonly SecurityFeedHealth[],
+  ): SecurityFeedHealthRecord {
+    return {
+      schemaVersion: 2,
+      recordType: 'security',
+      runId: this.runId,
+      strategyId: this.strategyId,
+      key,
+      error,
+      feeds: feeds.map((feed) => ({ ...feed })),
       recordedAt: new Date().toISOString(),
     };
   }

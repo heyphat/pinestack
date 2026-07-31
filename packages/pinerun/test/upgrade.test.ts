@@ -55,3 +55,31 @@ test('checksumFor tolerates binary-mode markers and does not prefix-match', () =
   // "pinerun-linux" must not match the "pinerun-linux-x64" line
   expect(checksumFor(sums, 'pinerun-linux')).toBeNull();
 });
+
+test('upgradeAssetName names the pinetop asset too — one release, two binaries', () => {
+  // `pinetop upgrade` reuses this whole module; only the asset prefix differs.
+  expect(upgradeAssetName('darwin', 'arm64', 'pinetop')).toBe('pinetop-darwin-arm64');
+  expect(upgradeAssetName('linux', 'x64', 'pinetop')).toBe('pinetop-linux-x64');
+  expect(upgradeAssetName('win32', 'x64', 'pinetop')).toBe('pinetop-windows-x64.exe');
+  // Default stays pinerun, so existing callers are unaffected.
+  expect(upgradeAssetName('linux', 'x64')).toBe('pinerun-linux-x64');
+});
+
+test('the platform guard applies to every binary, not just pinerun', () => {
+  expect(upgradeAssetName('win32', 'arm64', 'pinetop')).toBeNull();
+  expect(upgradeAssetName('freebsd', 'x64', 'pinetop')).toBeNull();
+});
+
+test('checksumFor picks the right line out of a two-binary manifest', () => {
+  // The release ships ONE checksums.txt covering both binaries; each upgrade
+  // path has to find its own asset in it and not a prefix-sharing neighbour.
+  const manifest = [
+    `${'a'.repeat(64)}  pinerun-linux-x64`,
+    `${'b'.repeat(64)}  pinerun-darwin-arm64`,
+    `${'c'.repeat(64)}  pinetop-linux-x64`,
+    `${'d'.repeat(64)}  pinetop-darwin-arm64`,
+  ].join('\n');
+  expect(checksumFor(manifest, 'pinetop-linux-x64')).toBe('c'.repeat(64));
+  expect(checksumFor(manifest, 'pinerun-linux-x64')).toBe('a'.repeat(64));
+  expect(checksumFor(manifest, 'pinetop-windows-x64.exe')).toBeNull();
+});

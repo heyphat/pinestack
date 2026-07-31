@@ -178,3 +178,15 @@ export {
   preflightBarMagnifier,
   resolveBarMagnifier,
 } from './magnifier.js';
+
+// Self-update, shared by every binary this repo publishes: `pinetop upgrade`
+// runs the same download → sha256-verify → atomic-swap path as `pinerun upgrade`
+// rather than a second copy of it.
+export type { UpgradableBinary, UpgradeOptions } from './upgrade.js';
+export {
+  checksumFor,
+  compareVersions,
+  runUpgrade,
+  tagFromLatestLocation,
+  upgradeAssetName,
+} from './upgrade.js';

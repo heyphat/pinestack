@@ -1,14 +1,19 @@
 /**
- * `pinerun upgrade` — self-update the compiled binary in place from GitHub
- * Releases. The latest release is resolved via the `releases/latest` redirect
- * (no API rate limit), the platform asset is downloaded next to the current
- * executable, sha256-verified against the release's checksums.txt, and then
- * atomically renamed over the running binary — the running process keeps its
- * inode on POSIX; on Windows a running .exe can't be overwritten, so the old
+ * `<binary> upgrade` — self-update a compiled pinestack binary in place from
+ * GitHub Releases. The latest release is resolved via the `releases/latest`
+ * redirect (no API rate limit), the platform asset is downloaded next to the
+ * current executable, sha256-verified against the release's checksums.txt, and
+ * then atomically renamed over the running binary — the running process keeps
+ * its inode on POSIX; on Windows a running .exe can't be overwritten, so the old
  * file is moved aside first and cleaned up best-effort.
  *
  * Only the compiled binary self-updates: from a source checkout `process.execPath`
  * is the bun executable itself, which must never be overwritten.
+ *
+ * Shared by every binary in the family (`pinerun`, `pinetop`) via the `binary`
+ * option. It is deliberately one implementation: checksum verification and an
+ * atomic swap over a running executable are the parts that must not be
+ * reimplemented per-tool and drift.
  */
 import { chmodSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -20,10 +25,18 @@ const RELEASES = `https://github.com/${REPO}/releases`;
 /** Running inside a `bun build --compile` binary? (mirrors pool.ts) */
 const COMPILED = import.meta.url.includes('/$bunfs/') || import.meta.url.includes('~BUN');
 
-/** The release asset name for this platform, or null when no prebuilt exists. */
+/** Binaries this release publishes, and which can therefore self-update. */
+export type UpgradableBinary = 'pinerun' | 'pinetop';
+
+/**
+ * The release asset name for this platform, or null when no prebuilt exists.
+ * `binary` selects which tool's asset — the release ships one per binary per
+ * target, all under the same `checksums.txt`.
+ */
 export function upgradeAssetName(
   platform: NodeJS.Platform = process.platform,
   arch: NodeJS.Architecture = process.arch,
+  binary: UpgradableBinary = 'pinerun',
 ): string | null {
   const os =
     platform === 'darwin'
@@ -36,7 +49,7 @@ export function upgradeAssetName(
   const cpu = arch === 'x64' ? 'x64' : arch === 'arm64' ? 'arm64' : null;
   if (!os || !cpu) return null;
   if (os === 'windows' && cpu !== 'x64') return null; // only windows-x64 is published
-  return `pinerun-${os}-${cpu}${os === 'windows' ? '.exe' : ''}`;
+  return `${binary}-${os}-${cpu}${os === 'windows' ? '.exe' : ''}`;
 }
 
 /** Numeric semver compare, `v` prefix tolerated: sign of a − b. */
@@ -89,15 +102,18 @@ export interface UpgradeOptions {
   check: boolean;
   /** The running CLI's version (from the build define / package.json). */
   currentVersion?: string;
+  /** Which binary is updating itself. Default `pinerun`. */
+  binary?: UpgradableBinary;
 }
 
 export async function runUpgrade(opts: UpgradeOptions): Promise<void> {
+  const binary = opts.binary ?? 'pinerun';
   const fail = (msg: string): void => {
     console.error(`upgrade: ${msg}`);
     process.exitCode = 1;
   };
 
-  const asset = upgradeAssetName();
+  const asset = upgradeAssetName(process.platform, process.arch, binary);
   if (!asset) {
     return fail(
       `no prebuilt binary for ${process.platform}/${process.arch} — build from source: bun run build:bin --install`,
@@ -128,7 +144,7 @@ export async function runUpgrade(opts: UpgradeOptions): Promise<void> {
     }
   }
   if (opts.check) {
-    console.log(`\n  update available — run: pinerun upgrade`);
+    console.log(`\n  update available — run: ${binary} upgrade`);
     return;
   }
 
@@ -196,5 +212,5 @@ export async function runUpgrade(opts: UpgradeOptions): Promise<void> {
   }
 
   console.log(`\n✓ upgraded ${current ?? '?'} → ${latest}  (${target})`);
-  console.log('  verify: pinerun --version');
+  console.log(`  verify: ${binary} --version`);
 }

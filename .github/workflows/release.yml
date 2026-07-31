@@ -1,10 +1,14 @@
 name: Release
 
-# On a version tag (v*), cross-compile the pinerun CLI for every target and
-# attach the self-contained binaries to a GitHub Release. `bun build --compile`
-# cross-compiles all targets from a single Linux runner, so there is no build
-# matrix. The binaries bake in the Bun runtime + the piner engine + pinery, so
-# users install with a single curl (see scripts/install.sh) — no npm involved.
+# On a version tag (v*), cross-compile every pinestack binary — the `pinerun`
+# CLI and the `pinetop` TUI — for every target and attach the self-contained
+# binaries to a GitHub Release. `bun build --compile` cross-compiles all targets
+# from a single Linux runner, so there is no build matrix. The binaries bake in
+# the Bun runtime + the piner engine + pinery, so users install with a single
+# curl (see scripts/install.sh) — no npm involved.
+#
+# Both binaries share ONE checksums.txt: `pinetop upgrade` and `pinerun upgrade`
+# both look their own asset up in it, so it must list every published asset.
 
 on:
   push:
@@ -37,17 +41,42 @@ jobs:
       - name: Test
         run: bun test
 
-      - name: Build all target binaries
-        run: bun run build:bin all
+      - name: Build all pinerun target binaries
+        run: bun scripts/build-bin.ts all --product pinerun
+
+      - name: Build all pinetop target binaries
+        run: bun scripts/build-bin.ts all --product pinetop
+
+      - name: Verify both binaries self-report this tag
+        # The runner is linux-x64, so the cross-built asset for that target is
+        # directly executable — no need to rebuild a host copy. Catches a missed
+        # version bump before anything is published, which is the one release
+        # mistake that cannot be fixed by re-tagging.
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          for bin in pinerun pinetop; do
+            got=$("./dist/$bin-linux-x64" --version | head -1)
+            echo "$got"
+            case "$got" in
+              "$bin $tag"*) ;;
+              *) echo "::error::$bin reports '$got' but the tag is v$tag — version bump missed?" >&2; exit 1 ;;
+            esac
+          done
+          # The TUI models the CLI's flags by hand; this is where drift surfaces.
+          ./dist/pinetop-linux-x64 --check-flags --pinerun ./dist/pinerun-linux-x64
 
       - name: Checksums
         working-directory: dist
-        run: sha256sum pinerun-* > checksums.txt
+        # One manifest covering both binaries — `<bin> upgrade` resolves its own
+        # asset from this file, so an asset missing here cannot self-update.
+        run: sha256sum pinerun-* pinetop-* > checksums.txt
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/pinerun-*
+            dist/pinetop-*
             dist/checksums.txt
           generate_release_notes: true

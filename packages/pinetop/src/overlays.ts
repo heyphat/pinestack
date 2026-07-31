@@ -1,0 +1,462 @@
+/**
+ * Overlays: help, the run dialog, the command palette, the filter line, and the
+ * Ask drawer.
+ *
+ * All of them paint over the frame rather than displacing it (§4.5.a for the
+ * drawer specifically, and the same reasoning for the rest): width is the scarce
+ * resource on this surface, and a panel that permanently costs columns changes
+ * what the page can show even when it is closed.
+ */
+
+import { commandLine, displayValue, isSet, validate, withOverrides } from './flags/model.js';
+import { schemaFor, PAGE_PURPOSE, PAGES, PAGE_TITLES, type CommandId } from './flags/schema.js';
+import { BINDINGS } from './keymap.js';
+import { displayWidth, drawPane, truncate, type Rect, type Screen } from './render/screen.js';
+import { drawLeader } from './render/table.js';
+import { STYLE, type Style } from './render/theme.js';
+import type { AppState } from './state.js';
+import { overridesFor } from './state.js';
+import { visibleFlags } from './pages/config-pane.js';
+
+/** Centre a box of the given size in the screen. */
+function centred(screen: Screen, w: number, h: number): Rect {
+  const width = Math.min(w, screen.cols - 4);
+  const height = Math.min(h, screen.rows - 4);
+  return {
+    x: Math.max(0, Math.floor((screen.cols - width) / 2)),
+    y: Math.max(0, Math.floor((screen.rows - height) / 2)),
+    w: width,
+    h: height,
+  };
+}
+
+/** Blank the box first so the page underneath does not bleed through. */
+function clear(screen: Screen, rect: Rect): void {
+  screen.fill(rect, ' ', STYLE.none);
+}
+
+const GROUP_TITLES: Record<string, string> = {
+  navigate: 'NAVIGATE',
+  select: 'SELECT',
+  act: 'ACT',
+  overlay: 'OVERLAY',
+};
+
+/** §7 P0's exit criterion: `?` documents the real keymap. It is generated. */
+export function drawHelp(screen: Screen, state: AppState): void {
+  const rect = centred(screen, 76, 28);
+  clear(screen, rect);
+  // The legend answers "what am I running" — both halves of it, since every
+  // number on screen came out of that pinerun, so a stale one explains a stale
+  // number. The keymap fills the body, which is why this cannot live there.
+  const versions = state.versions;
+  const legend =
+    versions == null
+      ? `pinetop · ${PAGE_TITLES[state.page]}`
+      : versions.pinerun != null
+        ? `${versions.pinetop} · driving ${versions.pinerun}`
+        : `${versions.pinetop} · pinerun not found`;
+  const inner = drawPane(screen, rect, { title: 'KEYS', focused: true, legend });
+
+  let y = inner.y;
+  for (const group of ['navigate', 'select', 'act', 'overlay']) {
+    if (y >= inner.y + inner.h - 1) break;
+    screen.text(inner.x, y, GROUP_TITLES[group]!, STYLE.title, inner);
+    y += 1;
+    for (const binding of BINDINGS) {
+      if (binding.group !== group) continue;
+      if (y >= inner.y + inner.h - 1) break;
+      screen.text(inner.x + 2, y, binding.display.padEnd(12), STYLE.accent, inner);
+      screen.text(
+        inner.x + 15,
+        y,
+        truncate(binding.description, Math.max(0, inner.w - 16)),
+        STYLE.none,
+        inner,
+      );
+      y += 1;
+    }
+    y += 1;
+  }
+
+  const note =
+    '⌘K is listed in the design as the palette key; a terminal cannot see it — ctrl-p is the binding.';
+  if (y < inner.y + inner.h) {
+    screen.text(inner.x, inner.y + inner.h - 1, truncate(note, inner.w), STYLE.muted, inner);
+  }
+}
+
+/**
+ * The first-launch overlay.
+ *
+ * `pinetop` with no arguments has to be a usable starting point, not a screen
+ * that assumes you already know the keymap — so on a project with no saved
+ * state it names the three things to do and gets out of the way on any key.
+ * Once `.pinetop/flags.json` exists this is never shown again.
+ */
+export function drawWelcome(screen: Screen, state: AppState): void {
+  const command = state.page === 'trades' ? 'backtest' : state.page;
+  const model = state.flags[command];
+  const scriptSet = model.scripts[0] != null;
+  const targetFlag = command === 'scan' || command === 'portfolio' ? '--symbols' : '--symbol';
+  const targetSet = isSet(model.values[targetFlag.slice(2)]);
+
+  const rect = centred(screen, 68, 17);
+  clear(screen, rect);
+  const inner = drawPane(screen, rect, { title: 'PINETOP', focused: true });
+  if (inner.h <= 0) return;
+
+  const done = (ok: boolean): string => (ok ? '✓' : '·');
+  const lines: [string, Style][] = [
+    ['A terminal UI over pinerun. Everything is configured here —', STYLE.none],
+    ['you never have to retype the command.', STYLE.none],
+    ['', STYLE.none],
+    [
+      `${done(scriptSet)} 1. pick a strategy    tab to STRATEGIES, ↵ to load`,
+      scriptSet ? STYLE.positive : STYLE.none,
+    ],
+    [
+      `${done(targetSet)} 2. set ${targetFlag.padEnd(14)} tab to CONFIG, j/k to the row, ↵ to edit`,
+      targetSet ? STYLE.positive : STYLE.none,
+    ],
+    ['· 3. run                r, then ↵ on RUN', STYLE.none],
+    ['', STYLE.none],
+    ['1–7 switch command pages · ? shows every key', STYLE.muted],
+    ['Flags are saved per project, so next time this is already set.', STYLE.muted],
+  ];
+
+  let y = inner.y;
+  for (const [text, style] of lines) {
+    if (y >= inner.y + inner.h - 1) break;
+    screen.text(inner.x, y, truncate(text, inner.w), style, inner);
+    y += 1;
+  }
+  screen.text(inner.x, inner.y + inner.h - 1, 'any key to begin', STYLE.accent, inner);
+}
+
+/** The pages, as the palette lists them, plus the verbs that are not pages. */
+export interface PaletteItem {
+  label: string;
+  hint: string;
+  run: (state: AppState) => string | undefined;
+}
+
+export function paletteItems(): PaletteItem[] {
+  const items: PaletteItem[] = PAGES.map((page) => ({
+    label: `go ${page}`,
+    hint: PAGE_PURPOSE[page],
+    run: (state) => {
+      state.page = page;
+      return undefined;
+    },
+  }));
+
+  items.push(
+    {
+      label: 'ask pinetop',
+      hint: 'open the AI prompt drawer',
+      run: (state) => {
+        state.ask.open = true;
+        return undefined;
+      },
+    },
+    {
+      label: 'revert pending edits',
+      hint: 'discard AI/user overrides for this script',
+      run: (state) => {
+        const page = state.page;
+        if (page === 'trades') return 'no config on this page';
+        const key = state.flags[page].scripts[0] ?? '';
+        if (key === '') return 'no script loaded';
+        delete state.overrides[key];
+        return 'reverted pending edits';
+      },
+    },
+    {
+      label: 'clear filter',
+      hint: 'drop the fill filter',
+      run: (state) => {
+        state.tradeFilter = '';
+        state.logScope = null;
+        return 'filter cleared';
+      },
+    },
+    {
+      // Discoverable without knowing the key, since these flags are the ones a
+      // user would otherwise have to go back to the shell for.
+      label: 'show all flags',
+      hint: 'reveal --data-dir, --mintick, the magnifier overrides, …',
+      run: (state) => {
+        state.showAdvanced = !state.showAdvanced;
+        return state.showAdvanced ? 'showing every flag' : 'advanced flags hidden';
+      },
+    },
+  );
+  return items;
+}
+
+export function filterPalette(items: readonly PaletteItem[], query: string): PaletteItem[] {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return [...items];
+  return items.filter((item) => `${item.label} ${item.hint}`.toLowerCase().includes(needle));
+}
+
+export function drawPalette(screen: Screen, state: AppState): void {
+  const rect = centred(screen, 68, 18);
+  clear(screen, rect);
+  const items = filterPalette(paletteItems(), state.overlay.buffer);
+  const inner = drawPane(screen, rect, { title: 'COMMAND', focused: true });
+
+  screen.text(inner.x, inner.y, ':', STYLE.accent, inner);
+  screen.text(inner.x + 2, inner.y, state.overlay.buffer, STYLE.none, inner);
+  screen.text(inner.x + 2 + displayWidth(state.overlay.buffer), inner.y, '█', STYLE.accent, inner);
+
+  const cursor = Math.min(Math.max(0, state.overlay.cursor), Math.max(0, items.length - 1));
+  for (let i = 0; i < items.length && i < inner.h - 2; i++) {
+    const item = items[i]!;
+    const y = inner.y + 2 + i;
+    const selected = i === cursor;
+    if (selected) screen.text(inner.x, y, ' '.repeat(inner.w), STYLE.selected);
+    screen.text(
+      inner.x,
+      y,
+      truncate(item.label, 24).padEnd(25),
+      selected ? STYLE.selected : STYLE.none,
+      inner,
+    );
+    screen.text(
+      inner.x + 25,
+      y,
+      truncate(item.hint, Math.max(0, inner.w - 25)),
+      selected ? STYLE.selected : STYLE.muted,
+      inner,
+    );
+  }
+  if (items.length === 0) screen.text(inner.x, inner.y + 2, 'no match', STYLE.muted, inner);
+}
+
+/**
+ * The run dialog.
+ *
+ * §10.2 asked whether flags should be edited in place or in a dialog. Both, as
+ * it turns out: the config pane edits in place for the one-flag tweak, and this
+ * dialog exists for the "set up a run from nothing" case, where seeing every
+ * field and the composed line together is worth the modal. They share one
+ * text-input mode, so a value typed here behaves exactly as it does there.
+ *
+ * The last row is RUN, so the dialog can be finished with `↵` rather than a
+ * second `r` — and nothing runs until one of those (§4.6).
+ */
+export function drawRunDialog(screen: Screen, state: AppState, command: CommandId): void {
+  const schema = schemaFor(command);
+  const flags = visibleFlags(state, command);
+  const fieldRows = schema.scripts + flags.length;
+  const total = fieldRows + 1; // + RUN
+  const rect = centred(screen, 74, Math.min(screen.rows - 4, total + 10));
+  clear(screen, rect);
+
+  const model = withOverrides(state.flags[command], overridesFor(state, command));
+  const problems = validate(model);
+  const edit =
+    state.edit?.command === command && state.edit.origin === 'dialog' ? state.edit : null;
+
+  const inner = drawPane(screen, rect, {
+    title: `RUN ${command.toUpperCase()}`,
+    focused: true,
+    legend: problems.length === 0 ? 'ready · ↵ on RUN' : `${problems.length} to fix`,
+  });
+
+  const cursor = Math.min(Math.max(0, state.overlay.cursor), Math.max(0, total - 1));
+  const listRows = Math.max(0, inner.h - 4);
+  const from = Math.max(
+    0,
+    Math.min(cursor - Math.floor(listRows / 2), Math.max(0, total - listRows)),
+  );
+
+  for (let i = from; i < Math.min(total, from + listRows); i++) {
+    const y = inner.y + (i - from);
+    const selected = i === cursor;
+    const editing = edit != null && edit.index === i;
+
+    if (i === fieldRows) {
+      // The RUN row: styled as the action it is, and dimmed while blocked.
+      const label = problems.length === 0 ? ' RUN ▸ ' : ' RUN ▸ (blocked) ';
+      screen.text(
+        inner.x,
+        y,
+        label,
+        problems.length > 0 ? STYLE.muted : selected ? STYLE.selected : STYLE.accentBold,
+        inner,
+      );
+      continue;
+    }
+
+    if (i < schema.scripts) {
+      const label = schema.scripts === 2 ? (i === 0 ? 'script A' : 'script B') : 'script';
+      const value = editing ? `${edit.buffer}█` : (model.scripts[i] ?? '—');
+      drawLeader(screen, inner, y, label, value, {
+        labelStyle: selected ? STYLE.accentBold : STYLE.none,
+        valueStyle: editing ? STYLE.accent : model.scripts[i] == null ? STYLE.muted : STYLE.none,
+      });
+      continue;
+    }
+
+    const spec = flags[i - schema.scripts]!;
+    const raw = model.values[spec.name];
+    const value = editing ? `${edit.buffer}█` : displayValue(spec, raw);
+    drawLeader(screen, inner, y, spec.label ?? `--${spec.name}`, value, {
+      labelStyle: selected ? STYLE.accentBold : STYLE.none,
+      valueStyle: editing ? STYLE.accent : isSet(raw) ? STYLE.none : STYLE.muted,
+    });
+  }
+
+  // The help for the selected flag, then the composed line, then the problems.
+  const helpY = inner.y + inner.h - 3;
+  const selectedSpec =
+    cursor >= schema.scripts && cursor < fieldRows ? flags[cursor - schema.scripts] : undefined;
+  const help =
+    edit != null
+      ? 'type a value · ↵ accept · esc cancel · ctrl-u clear'
+      : cursor === fieldRows
+        ? 'j/k move · ↵ run · esc cancel'
+        : (selectedSpec?.help ?? 'j/k move · ↵ edit · r run · esc cancel');
+  screen.text(inner.x, helpY, truncate(help, inner.w), STYLE.muted, inner);
+
+  screen.text(inner.x, helpY + 1, truncate(`$ ${commandLine(model)}`, inner.w), STYLE.none, inner);
+
+  screen.text(
+    inner.x,
+    helpY + 2,
+    truncate(problems.length === 0 ? 'ready to run' : problems[0]!, inner.w),
+    problems.length === 0 ? STYLE.positive : STYLE.error,
+    inner,
+  );
+}
+
+export function drawFilter(screen: Screen, state: AppState): void {
+  const y = screen.rows - 3;
+  screen.text(1, y, ' '.repeat(Math.max(0, screen.cols - 2)), STYLE.none);
+  screen.text(1, y, '/', STYLE.accent);
+  screen.text(2, y, state.overlay.buffer, STYLE.none);
+  screen.text(2 + displayWidth(state.overlay.buffer), y, '█', STYLE.accent);
+  const hint = '↵ apply · esc clear';
+  screen.text(screen.cols - 1 - hint.length, y, hint, STYLE.muted);
+}
+
+/** Rows the Ask drawer needs, so the frame can reserve them (§4.5.a). */
+export function askHeight(state: AppState): number {
+  if (!state.ask.open) return 0;
+  const proposal = state.ask.pending;
+  const base = 6;
+  return proposal == null ? base : base + 3 + proposal.edits.length;
+}
+
+/**
+ * The Ask drawer: a prompt line, the last answer, and — when one came back — the
+ * pending proposal as a reviewable diff. Nothing here is applied without a
+ * keypress (§4.5.c): `↵` applies, `ctrl-x` rejects.
+ */
+export function drawAsk(
+  screen: Screen,
+  state: AppState,
+  providerLabel: string,
+  remote: boolean,
+): void {
+  const height = askHeight(state);
+  if (height === 0) return;
+
+  const rect: Rect = { x: 0, y: screen.rows - 2 - height, w: screen.cols, h: height };
+  clear(screen, rect);
+  const inner = drawPane(screen, rect, {
+    title: '◆ ASK PINETOP',
+    focused: true,
+    // §9 — if the model runs remotely, the UI says so before first use.
+    legend: remote ? `${providerLabel} · sends derived metrics only` : providerLabel,
+  });
+  if (inner.h <= 0) return;
+
+  let y = inner.y;
+
+  const last = state.ask.transcript.at(-1);
+  if (state.ask.busy) {
+    screen.text(inner.x, y, 'thinking…', STYLE.muted, inner);
+    y += 1;
+  } else if (state.ask.error != null) {
+    screen.text(inner.x, y, truncate(state.ask.error, inner.w), STYLE.error, inner);
+    y += 1;
+  } else if (last != null) {
+    // The answer wraps across the drawer's rows rather than being cut at one.
+    const words = last.answer.split(/\s+/);
+    let line = '';
+    const maxLines = state.ask.pending == null ? inner.h - 2 : 2;
+    let drawn = 0;
+    for (const word of words) {
+      if (displayWidth(line) + word.length + 1 > inner.w) {
+        screen.text(inner.x, y, line, STYLE.none, inner);
+        y += 1;
+        drawn += 1;
+        line = '';
+        if (drawn >= maxLines) break;
+      }
+      line = line === '' ? word : `${line} ${word}`;
+    }
+    if (line !== '' && drawn < maxLines) {
+      screen.text(inner.x, y, line, STYLE.none, inner);
+      y += 1;
+    }
+  }
+
+  const proposal = state.ask.pending;
+  if (proposal != null) {
+    y += 1;
+    screen.text(inner.x, y, truncate(proposal.effect, inner.w), STYLE.pending, inner);
+    y += 1;
+    if (proposal.note !== '') {
+      screen.text(inner.x, y, truncate(proposal.note, inner.w), STYLE.muted, inner);
+      y += 1;
+    }
+    for (const edit of proposal.edits) {
+      if (y >= inner.y + inner.h - 1) break;
+      screen.text(inner.x, y, '● ', STYLE.pending, inner);
+      screen.text(inner.x + 2, y, truncate(edit.display, inner.w - 24), STYLE.none, inner);
+      screen.text(
+        inner.x + inner.w - 22,
+        y,
+        truncate(`--input ${edit.input}=${edit.to}`, 22),
+        STYLE.muted,
+        inner,
+      );
+      y += 1;
+    }
+    screen.text(
+      inner.x,
+      inner.y + inner.h - 1,
+      '↵ apply · ctrl-x reject — nothing changes until you press one',
+      STYLE.pending,
+      inner,
+    );
+    return;
+  }
+
+  if (state.ask.action != null) {
+    screen.text(
+      inner.x,
+      inner.y + inner.h - 1,
+      truncate(`suggested: ${state.ask.action.label}  (press ${state.ask.action.key})`, inner.w),
+      STYLE.accent,
+      inner,
+    );
+    return;
+  }
+
+  const promptY = inner.y + inner.h - 1;
+  screen.text(inner.x, promptY, '›', STYLE.accent, inner);
+  screen.text(inner.x + 2, promptY, truncate(state.ask.input, inner.w - 4), STYLE.none, inner);
+  screen.text(
+    inner.x + 2 + displayWidth(truncate(state.ask.input, inner.w - 4)),
+    promptY,
+    '█',
+    STYLE.accent,
+    inner,
+  );
+}

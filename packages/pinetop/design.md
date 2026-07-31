@@ -1,0 +1,439 @@
+# pinetop — Design Document
+
+**Name:** `pinetop` — confirmed
+**Author:** Design · **Status:** Built — see §7 and [README](./README.md)
+**Created:** 2026-07-31 · **Last Updated:** 2026-07-31 (v1.2)
+**Prototype:** `Tessera Backtester TUI.dc.html` (file name pending rename) (interactive, keyboard-driven)
+**Upstream:** `pinestack/packages/pinerun`, `pinestack/docs/*.md`
+
+---
+
+## 1. Overview
+
+`pinetop` is a terminal UI over the `pinerun` CLI. It keeps a strategy's report
+resident on screen and makes the command's own flags the thing you edit, so the
+**edit → rerun → reread** loop happens in place instead of through repeated shell
+invocations and scrollback archaeology.
+
+It adds no analytics of its own. Every number it shows comes from `pinerun --json`;
+piner remains the sole authority for fills, timestamps, and metrics.
+
+This document records the design decisions behind the prototype and the constraints an
+implementation must honour. It is written for an engineer or coding agent building the
+real binary.
+
+---
+
+## 2. Context & Problem Statement
+
+`pinerun` is a well-formed one-shot CLI: each command reads flags, runs, prints a report,
+exits. `backtest` prints a tearsheet, `sweep` a ranked table plus heatmap, `walkforward`
+a per-window verdict, `scan` a ranked universe, `portfolio` sleeves against one pot,
+`compare` two runs side by side.
+
+Three frictions come from the one-shot shape, and only from it:
+
+1. **The flags are invisible while you read the output.** You reason about a drawdown,
+   decide the stop is wrong, and must reconstruct the whole invocation to change one value.
+2. **Comparison is manual.** The previous run is in scrollback, or gone. Judging
+   "did that help?" means holding two tearsheets in your head.
+3. **The commands are a workflow, but the CLI can't say so.** `sweep` produces a winner
+   that `walkforward` exists to distrust; `backtest` is the deep-dive on a combo `sweep`
+   found. Nothing in the terminal carries you along that path.
+
+**Confirmed premise:** users run these commands repeatedly against the same script during
+a research session. Sessions are iterative, not single-shot CI invocation — which is what
+makes the loop, and therefore this tool, worth building.
+
+---
+
+## 3. Goals and Non-Goals
+
+### Goals
+
+- **G1** — Present each `pinerun` command as a live page: its real flags, its real output.
+- **G2** — Make the command visible and editable at all times; the composed invocation is
+  always shown verbatim and is always copy-pasteable.
+- **G3** — Preserve the workflow between commands (sweep → walkforward → backtest) as
+  navigation, not documentation.
+- **G4** — Answer questions about a run in plain language, and return any recommended
+  change as a **reviewable parameter diff**, never a silent edit.
+- **G5** — Behave like a terminal program: fixed character grid, keyboard-first,
+  no mouse requirement, no scrollbars.
+
+### Non-Goals
+
+- **NG1** — Not a new engine. No metric, fill, or equity value is computed in `pinetop`.
+- **NG2** — Not a broker or live-trading surface. `pinelive` stays a separate program:
+  streaming state has no run boundary and no final number, so it does not fit the
+  report-page shape this app is built around. No LIVE page, now or later.
+- **NG3** — Not a web app. No browser, no server, no remote state.
+- **NG4** — Not a Pine editor. Scripts are edited in the user's editor; `pinetop` reloads them.
+- **NG5** — No scrolling viewport. Content that exceeds the terminal truncates (§4.4).
+
+---
+
+## 4. Proposed Solution
+
+### 4.1 Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ pinetop (TUI process)                                    │
+│                                                          │
+│  Router ── one page per pinerun command                  │
+│    │                                                     │
+│    ├─ FlagModel      the command's flags as typed state  │
+│    ├─ ViewModel      report JSON → renderable rows       │
+│    ├─ Renderer       panes, tables, braille plots        │
+│    └─ AskLayer       question → answer + proposal        │
+│                                                          │
+└───────────────┬──────────────────────────────────────────┘
+                │ spawn, argv from FlagModel
+                ▼
+        pinerun <command> … --json
+                │ structured report on stdout
+                ▼
+        piner (engine, authoritative)
+```
+
+**Decision 4.1.a — Shell out to `pinerun`, do not link the engine.**
+`pinetop` builds argv from its FlagModel, spawns `pinerun … --json`, and renders the
+parsed report. The alternative — importing piner directly — was rejected: it would make
+`pinetop` a second execution path that can silently disagree with the CLI. Shelling out
+guarantees the screen and the printed command produce identical numbers, which is the
+premise the whole UI rests on. Cost is process spawn latency, which is immaterial next to
+run time.
+
+**Decision 4.1.b — The composed argv is the source of truth for the UI.**
+Every page renders its flags from one FlagModel and composes the displayed `$ pinerun …`
+line from that same model. There is no second copy of the invocation. If the line on
+screen would not run, that is a bug.
+
+### 4.2 Navigation model
+
+One tab per command, numbered, in workflow order:
+
+| # | Page | Command | Purpose (docs' own verb) |
+|---|---|---|---|
+| 1 | BACKTEST | `pinerun backtest` | Analyze — one strategy, one symbol, full tearsheet |
+| 2 | SWEEP | `pinerun sweep` | Optimize — one script's input grid |
+| 3 | WALKFORWARD | `pinerun walkforward` | Validate — does the swept edge survive OOS |
+| 4 | SCAN | `pinerun scan` | Screen — one script across N symbols |
+| 5 | PORTFOLIO | `pinerun portfolio` | Combine — N symbols, one pot |
+| 6 | COMPARE | `pinerun compare` | Compare — two strategies, same bars |
+| 7 | TRADES | (ledger of the current run) | The fills and the engine log |
+
+**Decision 4.2.a — Tabs are commands, not topics.** An earlier prototype had topical tabs
+(BACKTEST / TRADES / OPTIMIZE / LOGS). It broke down as soon as more commands arrived:
+users think in commands because that is what they type. Number keys `1`–`7` map to the
+same ordinal the tab shows.
+
+**Decision 4.2.b — TRADES is the exception and is justified.** It is not a command; it is
+the ledger plus engine log for whichever run is loaded. It exists because `--trades`
+output is consumed differently from a tearsheet — you scan rows, then interrogate one.
+
+**Decision 4.2.c — Within a page, `tab` cycles a focus ring of panes.** The focused pane
+is marked two ways: accent border and a `◆` before its title. `j`/`k` moves selection
+within the focused pane.
+
+#### Keybindings (normative)
+
+| Key | Action |
+|---|---|
+| `1`–`7` | Switch command page |
+| `tab` / `shift-tab` | Next / previous pane in the focus ring |
+| `j` / `k`, `↓` / `↑` | Move selection |
+| `g` / `G` | First / last row |
+| `↵` | Load selection / confirm dialog / apply pending AI proposal |
+| `r` | Run dialog for the current page's command |
+| `s` | Sweep dialog |
+| `w` | Walkforward page |
+| `/` | Filter fills |
+| `a` | Ask (AI prompt drawer) |
+| `:` or `⌘K` / `ctrl-p` | Command palette |
+| `?` | Keybinding overlay |
+| `esc` | Dismiss overlay · clear filter · unscope log |
+| `ctrl-x` | Reject pending AI proposal |
+
+### 4.3 Rendering contract
+
+This section is the one an implementer must not improvise. The prototype hit each of
+these as a real defect.
+
+**Decision 4.3.a — Fixed character grid, no reflow, no scroll.**
+A terminal truncates lines; it does not wrap tables or grow scrollbars. Every table row is
+`white-space: nowrap` + clipped at the pane edge, so rows keep a uniform single-line
+rhythm. Content wider than the frame is cut, not scrolled. In a real TTY this is free; in
+the HTML prototype it must be enforced explicitly.
+
+**Decision 4.3.b — Charts are braille (U+2800–U+28FF), not block fills.**
+Braille gives 2×4 sub-cell resolution, so an 84-column pane carries 168 samples. Three
+stacked panels — PRICE (with trade markers), EQUITY (with a dashed initial-capital
+baseline), DRAWDOWN (filled region) — matching `pinerun`'s own chart trio.
+
+**Decision 4.3.c — One font for the whole character stream.**
+Empty cells must emit **U+2800 (blank braille)**, never U+0020. A space and a braille glyph
+resolve from different fonts at different advance widths (measured: 7.80px vs 8.887px at
+13px JetBrains Mono), which shears every row by a different amount and destroys the plot.
+For the same reason, marker glyphs (`▲▼●○`) must **not** be substituted into the stream —
+they come from a third font. Render them on an overlay positioned at `col × cellWidth`,
+where the cell width is **measured at runtime**, not assumed. (A native TTY implementation
+is exempt: the terminal owns the cell grid. This constraint binds any GUI/web renderer.)
+
+**Decision 4.3.d — Color is stroke, never fill.**
+Equity and price render as a one-cell-per-column stroked line (`─ ╱ ╲ │`), not a filled
+area. A filled area from a zero baseline is also actively misleading: equity spanning
+1.00→1.24 fills 90–100% of every column and conveys nothing. Scale to the data's min–max.
+
+**Decision 4.3.e — Drawdown hangs downward.** 0% at the top, magnitude increasing as the
+line descends. An axis whose labels grow negative while its bars grow upward is a
+correctness bug, not a style choice.
+
+### 4.4 Layout system
+
+- A page is a grid of **bordered panes**. Each pane has an inset title straddling its top
+  border (left) and an optional status legend (right).
+- Pane titles are `white-space: nowrap` and must **never** be clipped: a pane that needs
+  internal clipping puts `overflow: hidden` on an **inner wrapper**, not on the pane
+  itself, or it slices its own title in half.
+- Every page declares a `min-width` wide enough for its widest table's fixed tracks. Sizing
+  a column so the payoff column falls off the right edge is the failure mode to watch:
+  EFF and OOS EQUITY on WALKFORWARD, the EQUITY sparkline on SWEEP.
+- The config pane is always the left column; the primary result is the wide middle; a
+  summary/verdict pane is the right rail; full-width tables sit beneath.
+
+### 4.5 The AI layer
+
+**Decision 4.5.a — A prompt line, not a chat sidebar.**
+Ask is a drawer over the bottom of the frame, opened with `a`, driven by the same
+keyboard. A persistent chat panel would cost permanent width on a surface where width is
+the scarce resource, and would imply conversation is the primary mode. It is not; reading
+the report is.
+
+**Decision 4.5.b — Answers and changes are separate objects.**
+The model answers in prose grounded in the loaded run (it cites folds, exit reasons, cost
+drag — real fields from the report JSON). If a change is warranted it is returned
+*additionally*, as a structured proposal:
+
+```jsonc
+{
+  "answer": "…prose grounded in the run…",
+  "proposal": {                        // optional
+    "effect": "est. Sharpe 1.42 → 1.51 · max DD −17.2% → −12.8%",
+    "note":   "Tighter stop plus a hard time exit; entry logic untouched.",
+    "edits": [                         // one per changed input
+      { "input": "stopAtr",  "from": "2.4", "to": "1.8", "display": "2.4 ATR → 1.8 ATR" },
+      { "input": "maxHoldH", "from": "36",  "to": "18",  "display": "36 h → 18 h" }
+    ]
+  },
+  "action": { "label": "open parameter sweep", "key": "s" }  // optional, when no edit is warranted
+}
+```
+
+**Decision 4.5.c — Nothing is applied without a keypress.** `↵` applies, `ctrl-x` rejects.
+Applied edits land in the config pane marked with a gold dot and the old value struck
+through, plus a "not yet re-run" banner and a revert. The app must never silently diverge
+from the script on disk — for a backtester, an unexplained parameter change invalidates
+every number on screen.
+
+**Decision 4.5.d — The model may decline to propose.** Asked "is this overfit?", the
+correct response cites PBO and deflated Sharpe and recommends a re-sweep with combinatorial
+purged CV — proposing a parameter edit on that evidence would be malpractice. Encode
+"return an action instead of an edit" as a first-class outcome.
+
+**Decision 4.5.e — `edits[].input` must be a real Pine `input()` title, and `to` a bare
+value.** `--input` is validated against the script's input titles before anything runs;
+`--input maxhold=36h` fails. The UI carries a machine pair (`maxHoldH`, `36`) alongside
+every display string (`max hold`, `36 h`), and the display string never reaches argv.
+
+### 4.6 State model
+
+```
+AppState
+├─ page: 1..7
+├─ focus: pane id within page
+├─ flags:     { [command]: FlagModel }        // per-command, persisted per project
+├─ overrides: { [scriptId]: { [inputTitle]: {from, to} } }   // AI/user edits, not yet run
+├─ run:       { id, status: idle|running|failed, progress, report }
+└─ ask:       { transcript[], pending: Proposal|null }
+```
+
+- **Overrides are keyed by script**, so switching strategies does not leak edits between them.
+- **`run.report` is the parsed `--json` payload.** View models derive from it; nothing else
+  is a source of numbers.
+- Config edits do not auto-run. Running is always explicit (`r` / `↵` in the dialog),
+  because a sweep can cost minutes and a keystroke should not spend them.
+
+### 4.7 Visual language
+
+The prototype is rendered in the **Classical** palette (warm near-white ground `#f3f2f2`,
+ink `#201f1d`, a single gold accent `#a06f24`/`#7d5411`) with JetBrains Mono. Two
+deliberate deviations from that design system are recorded here so they are not "fixed"
+later:
+
+1. **Monospace body type** instead of the system's serif — a terminal requires a fixed
+   advance width.
+2. **One brick tone (`#8a4038`) for negative values** — the system is a mono palette with
+   no negative role, and losses must not read as accent.
+
+`pinerun` itself grades TTY output red → yellow → plain → green → bright-green by value
+quintile. A native implementation should use the terminal's own ANSI palette (that is what
+the CLI does, and it respects the user's theme); the gold/brick mapping applies to the
+GUI rendering only. Green/red is not available in Classical, and positives already read as
+accent throughout the app.
+
+---
+
+## 5. Alternatives Considered
+
+| Alternative | Pros | Cons | Why not chosen |
+|---|---|---|---|
+| Web dashboard over a local server | Rich charts, familiar stack | Second install, second auth story, leaves the terminal | Users are already in a terminal running a CLI; a browser tab breaks the loop it means to close |
+| Link piner directly instead of spawning `pinerun` | No spawn cost, richer streaming | A second execution path that can disagree with the CLI | Divergence between UI and CLI numbers is fatal to trust (§4.1.a) |
+| Topical tabs (Backtest / Trades / Optimize / Logs) | Fewer tabs early | Breaks as commands are added; not how users think | Commands are the mental model (§4.2.a) |
+| Persistent AI chat sidebar | Conversation always visible | Permanently costs width; implies chat is the primary mode | Prompt drawer on demand (§4.5.a) |
+| AI applies changes directly | Fewer keystrokes | Silent divergence from the script on disk | Review-then-apply (§4.5.c) |
+| Filled-area block charts (`▁▂▃█`) | Simple to render | Reads as a slab at realistic equity ranges; fights the palette | Stroked braille line (§4.3.b/d) |
+| Scrollable panes | Nothing is ever hidden | Not terminal behaviour; breaks the fixed grid | Truncate like a TTY (§4.3.a) |
+| `--input` overrides listed in the config pane | Shows strategy params next to flags | `universe`, `bar`, and unmapped rows are not `--input` params; duplicates `--symbol`/`--tf` | Removed; the pane lists only real flags |
+
+---
+
+## 6. Trade-offs and Risks
+
+| Trade-off / Risk | Impact | Mitigation |
+|---|---|---|
+| No scrolling means content can be unreachable at small terminal sizes | User cannot see a column | Declare per-page `min-width`; below it, degrade by dropping the right rail before truncating tables. Warn once at startup if `COLS` is below the page minimum |
+| Shelling out serializes the whole report per run | Memory and latency on huge sweeps | Use `--points-csv` / streaming progress for large grids; render the ranked top from `--top` rather than all points |
+| AI answers are only as grounded as the JSON handed to them | Confident wrong answers | Send report fields, never raw bars; require every claim to cite a field; show the model exactly what the user sees |
+| Estimated effect on a proposal ("Sharpe 1.42 → 1.51") is a prediction | User may read it as measured | Label as `est.`; the dirty banner forces a re-run before any number updates |
+| Flag surface is large and grows with pinerun | Config panes drift from the CLI | Generate FlagModels from `pinerun <cmd> --help` / a shared schema rather than hand-listing (§10.2) |
+| Braille requires a font with U+2800 coverage | Broken plots on some terminals | Detect at startup; fall back to ASCII line charts |
+
+---
+
+## 7. Implementation Plan
+
+| Phase | Scope | Exit criteria |
+|---|---|---|
+| **P0 — Shell** | Frame, tab router, pane/border primitives, focus ring, keymap, help overlay | `1`–`7` navigate; `?` documents the real keymap |
+| **P1 — Backtest** | FlagModel + argv composition, spawn `pinerun backtest --json`, tearsheet panes, monthly tables, braille trio | Numbers on screen match `pinerun backtest` in a plain shell, byte for byte |
+| **P2 — Sweep + Walkforward** | Axis editor with `--input` grammar validation, ranked table, heatmap with quintile shading, window table, WFE verdict | `--max-combos` guard enforced before spawn, as the CLI does |
+| **P3 — Scan, Portfolio, Compare** | Universe input, fetch-error collection, sleeve table + correlation matrix, A/B table + overlay | Per-symbol fetch failures render without aborting the page |
+| **P4 — Trades + log** | Ledger, filter, per-fill log scoping | Selecting a fill scopes the log; `esc` restores |
+| **P5 — Ask** | Prompt drawer, grounding payload, proposal protocol, apply/reject/revert | No path exists that mutates config without a keypress |
+| **P6 — Persistence** | Per-project flag state, run history, `walkforward` hand-off from a swept winner | Reopening resumes the last session's flags |
+
+**Status: P0–P6 are built** (`packages/pinetop/`), verified against real `pinerun`
+runs for all six commands. Three things the build added that this plan did not
+anticipate, each because the alternative was a screen that lied:
+
+- **`.` reveals the advanced flags, and a flag another flag makes mandatory
+  reveals itself.** `--provider` was visible while `--data-dir` — which
+  `--provider csv` requires — was not, so choosing csv left the config unrunnable
+  with no visible cause.
+- **The monthly grids swap with `j`/`k` below 202 columns.** Both are 99 characters
+  wide, so side-by-side clipped `DEC` and `YEAR` off *both* — and §4.4 names the
+  payoff column as the thing that must not fall off.
+- **The walkforward OOS column is a signed `oosProfitPercent` bar, not an equity
+  sparkline.** The `--json` payload strips each window's `RunResult` for size, so
+  there is no curve on the wire; the bar answers the same question from a field
+  that is actually present.
+
+---
+
+## 8. Observability & Monitoring
+
+- Mirror `pinerun`'s own engine log in the TRADES page: resolve, fetch/cache, warmup,
+  fills, artifact writes, with levels (`INFO` / `WARN` / `ERR`).
+- Surface `fetchErrors` per symbol rather than swallowing them — `scan` and `portfolio`
+  both report and continue, and the UI must show that distinction.
+- Record every spawned invocation with its exit code and duration in a session log, so a
+  user can reproduce any on-screen result outside the app.
+- Show run cost where it exists: elapsed ms, runs ranked, worker count — the CLI's own
+  footer values.
+
+---
+
+## 9. Security & Privacy Considerations
+
+- **Credentials never enter the UI.** Provider keys stay in environment variables /
+  the existing credential path; they are never displayed, never persisted by `pinetop`,
+  and must be redacted from the echoed command line and the session log.
+- **The AI layer is opt-in and sends derived metrics only** — never OHLCV bars, never
+  script source, never credentials. The payload is the report summary plus the flags.
+  If the model runs remotely, this must be stated in the UI before first use.
+- **`--csv` / `--plot` write to user-specified paths.** Show the resolved absolute path
+  before writing; never write outside the given directory.
+
+---
+
+## 10. Open Questions
+
+1. **FlagModel generation.** ~~Hand-written flag lists will drift. Can `pinerun` expose a
+   machine-readable flag schema, or must we parse `--help`?~~
+   **Resolved (as built):** hand-written, with drift made loud instead of prevented.
+   The schema mirrors the *structure* of `HELP_SECTIONS` rather than flattening it —
+   shared groups are the CLI's own "(as scan)" clause, so a flag added there is added
+   once — and `pinetop --check-flags` diffs every command's schema against
+   `pinerun <cmd> --help`, exiting non-zero on drift. It is in the release checklist
+   and the PR template. Parsing `--help` at runtime was rejected: it would make
+   startup depend on the CLI's prose formatting. A machine-readable schema exported
+   from `pinerun` would still be strictly better and remains worth doing.
+2. **Editing flags in place vs. a dialog.** ~~Today `r`/`s` open a dialog. Inline editing in
+   the config pane is faster but needs a text-input mode and an escape story.~~
+   **Resolved (as built): both, over one text-input mode.** `↵` on a config row edits
+   it in place; `r` still opens the dialog for building a run from nothing, where
+   seeing every field and the composed line together earns the modal. They share one
+   `EditState` and one row-index space, so a value typed in either behaves
+   identically and a shared edit cannot land on the wrong flag. The escape story is
+   uniform: while a field is open `↵` commits, `esc` abandons, `ctrl-u` clears, and
+   nothing else is reachable — so a half-typed value can never be read as a keymap
+   action or start a run. The dialog's last row is `RUN ▸`, so an already-valid
+   config is `r` `↵`.
+3. **Run history depth.** Still open. `AppState.history` accumulates the session's runs
+   and the session log records every invocation, but nothing yet lets COMPARE take two
+   *runs* rather than two scripts, and nothing evicts.
+4. **`--watch` and the TUI.** Still open, and now leaning: `--watch` is refused before
+   spawn (it redraws a terminal and is incompatible with `--json`), so pinetop owns any
+   refresh loop by default. Whether it should have one at all is undecided.
+
+---
+
+## 11. References
+
+- `pinestack/docs/backtest.md`, `sweep.md`, `walkforward.md`, `scan.md`, `portfolio.md`, `compare.md`
+- `pinestack/docs/common-options.md` — shared flags, ranking spec, swept-input grammar
+- `pinestack/packages/pinerun/src/cli.ts` — table headers and footers the UI mirrors
+- `pinestack/packages/pinerun/src/export.ts` — `sweepHeatmap`, quintile shading
+- Prototype: `Tessera Backtester TUI.dc.html`
+
+---
+
+## 12. Document Summary
+
+| Aspect | Details | Notes |
+|---|---|---|
+| **Problem** | `pinerun`'s one-shot reports hide the flags you need to change and lose the previous run | Friction is in the loop, not the engine |
+| **Proposed Solution** | A keyboard-driven TUI: one page per command, flags live, output resident, AI proposals as reviewable diffs | Shells out to `pinerun --json` |
+| **Key Trade-off** | Spawn the CLI rather than link the engine | Accepts latency to guarantee UI and CLI never disagree |
+| **Second Trade-off** | No scrolling — content truncates at the frame | Terminal-honest; forces per-page `min-width` discipline |
+| **Impact** | New binary in the pinestack family; no change to `pinerun` or piner | Additive |
+| **Hard Constraints** | Uniform font stream (U+2800 blanks, overlay markers, measured cell width); pane titles never clipped; stroked charts scaled to min–max | Each was a real defect in the prototype |
+| **AI Contract** | `{answer, proposal?: {effect, note, edits[]}, action?}`; `edits[].input` is a Pine `input()` title, `to` is a bare value | Never applied without a keypress |
+| **Estimated Effort** | 7 phases, P0–P6 | P1 is the vertical slice that proves the architecture |
+| **Status** | Built — P0–P6 in `packages/pinetop/` | Not yet a release artifact; built from a checkout |
+| **Owner (DRI)** | [TODO] | Single accountable person, not a team |
+| **Open Questions** | 2 of 4 remain (§10.3 run-history depth, §10.4 `--watch`) | Flag-schema drift is now caught by `--check-flags` rather than prevented |
+| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built | 2026-07-31 |
+
+---
+
+### TODOs for the requester
+
+- `[TODO]` Name a DRI (single accountable owner) and a target date for §12.
+
+Resolved 2026-07-31: name is `pinetop`; no LIVE page (§3 NG2), so the seven tab ordinals
+in §4.2 are final; the §2 iterative-session premise is confirmed. §10.1 and §10.2 are
+resolved as built; §10.3 and §10.4 remain open.

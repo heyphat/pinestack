@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/pinery" },
-    { "path": "./packages/pinerun" }
+    { "path": "./packages/pinerun" },
+    { "path": "./packages/pinetop" }
   ]
 }

@@ -2,4 +2,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 .pinery-cache/
+.pinetop/
 bun.lock
+# Hand-maintained design documents: prettier repads every markdown table,
+# which buries real edits under formatting noise.
+packages/*/design.md

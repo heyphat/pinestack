@@ -22,6 +22,8 @@ pinerun --help
 | [`walkforward`](./walkforward.md) | Validate a swept edge out of sample (anti-overfitting).           |
 | [`upgrade`](./upgrade.md)         | Update pinerun to the latest release, in place.                   |
 
+`pinetop` has the same `upgrade` verb for itself (`pinetop upgrade [--check]`).
+
 ## Shared flags
 
 Data-source, credential, cache, execution, metrics, ranking, and input-grammar
@@ -55,6 +57,23 @@ pinerun walkforward strategy.pine --symbol BTCUSDT --tf 1h --limit 2000 \
   --input fast=5:20:5 --input slow=30:100:10 --windows 5              # 4. validate OOS
 pinerun scan strategy.pine --symbols BTCUSDT,ETHUSDT,SOLUSDT --tf 1h --limit 500   # 5. screen a universe
 ```
+
+## Running that flow interactively
+
+Those five steps are one loop you walk repeatedly against the same script, and
+the CLI makes you retype the invocation each turn. `pinetop` is a terminal UI over
+these same commands — one page per command, the flags editable beside the report,
+`w` on a swept winner carrying the grid into `walkforward`:
+
+```bash
+pinetop
+```
+
+It adds no flags and no analytics of its own: every page composes a real
+invocation, spawns `pinerun … --json`, and renders that payload, so anything you
+see is reproducible with the command it prints at the bottom of the frame. It
+installs from the same `curl | sh` as the CLI and self-updates with
+`pinetop upgrade`. See [`packages/pinetop/README.md`](../packages/pinetop#readme).
 
 > The full narrative guide — architecture, concepts, programmatic API — lives in
 > [`packages/pinerun/README.md`](../packages/pinerun/README.md). These pages are

@@ -3,7 +3,8 @@
 ## What & why
 
 <!-- What does this change, and why? Which package(s) does it touch —
-     @heyphat/pinery (data) or @heyphat/pinerun (orchestration)?
+     @heyphat/pinery (data), @heyphat/pinerun (orchestration), or
+     @heyphat/pinetop (the TUI)?
      Engine/language changes belong in piner, not here. -->
 
 ## Checklist
@@ -15,3 +16,8 @@
 - [ ] `bun run format` applied
 - [ ] API credentials are read from env vars only — none hardcoded or logged
 - [ ] Commit messages follow Conventional Commits
+
+<!-- If you added, renamed, or removed a pinerun flag, or changed a --json shape: -->
+
+- [ ] `bun packages/pinetop/src/cli.ts --check-flags` still agrees (the TUI models
+      pinerun's flags by hand, and parses its `--json` payloads)

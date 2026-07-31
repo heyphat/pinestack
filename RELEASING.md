@@ -1,14 +1,14 @@
 # Releasing pinestack
 
-The A-to-Z runbook for cutting a new pinestack release — prebuilt `pinerun`
-binaries attached to a GitHub Release. There is **no npm publish**: the packages
-run from TypeScript source in this workspace, and the binary is the product.
+The A-to-Z runbook for cutting a new pinestack release — prebuilt `pinerun` and
+`pinetop` binaries attached to a GitHub Release. There is **no npm publish**: the packages
+run from TypeScript source in this workspace, and the binaries are the product.
 
 ## Release model
 
 Releases are **tag-driven**. Pushing a `v*` tag to GitHub is the single trigger:
 it runs `.github/workflows/release.yml`, which typechecks, tests, cross-compiles
-the `pinerun` binary for every target, and **creates the GitHub Release itself**
+both binaries for every target, and **creates the GitHub Release itself**
 (binaries + `checksums.txt` + auto-generated notes). Unlike piner, there is no
 manual `gh release create` step. Everything else — version bump, changelog — is
 done by hand, in a set order, _before_ the tag is pushed.
@@ -28,7 +28,7 @@ bump package versions + changelog  ──▶  chore(release) commit on main
 tag vX.Y.Z on main  ──push──▶  release.yml  ──▶  GitHub Release w/ binaries
         │
         ▼
-verify: gh release view · curl installer · pinerun --version
+verify: gh release view · curl installer · pinerun/pinetop --version
 ```
 
 The `curl | sh` installer (`scripts/install.sh`) serves users from
@@ -38,7 +38,7 @@ get the new version.
 ## Prerequisites (one-time)
 
 - **Bun** locally, at the exact version pinned in `.github/workflows/release.yml`
-  (`bun-version:`) — the compiled `pinerun` binaries are the product, and bun's
+  (`bun-version:`) — the compiled binaries are the product, and bun's
   compiler output changes between versions. Check with `bun --version`; bump the
   pin (both workflows, piner's workflows, and this line) deliberately.
   **Reproducibility caveat (measured on v0.5.0):** even at the same pinned Bun,
@@ -65,14 +65,19 @@ Semantic Versioning, pre-1.0:
 
 Judge "breaking" from the **user's** view of the product: the `pinerun` CLI
 surface first (commands, flags, output contracts like `--json` shapes and CSV
-columns), then the programmatic API of `@heyphat/pinerun` / `@heyphat/pinery`.
+columns), then `pinetop`'s keymap and pages, then the programmatic API of
+`@heyphat/pinerun` / `@heyphat/pinery` / `@heyphat/pinetop`.
 
-The two workspace packages are versioned **in lockstep** with the release tag:
-`packages/pinerun/package.json` and `packages/pinery/package.json` both carry
-`X.Y.Z`, even when only one changed. `packages/pinerun/package.json` is the
-single source of truth that gets **baked into the binary** — `build-bin.ts`
-injects it (plus the git commit) so `pinerun --version` self-reports. Forget the
-bump and the shipped binaries report the previous version.
+Note that a `--json` shape is now a **contract between two shipped binaries**, not
+just an output format: `pinetop` parses those payloads. Changing one is breaking
+even if no user script reads it.
+
+The three workspace packages are versioned **in lockstep** with the release tag:
+`packages/pinerun/package.json`, `packages/pinery/package.json` and
+`packages/pinetop/package.json` all carry `X.Y.Z`, even when only one changed.
+Each binary bakes in **its own** manifest version — `build-bin.ts` injects it
+(plus the git commit) so `pinerun --version` and `pinetop --version` self-report.
+Forget a bump and that binary reports the previous version.
 
 The changelog is written **from the Conventional Commit history** (`feat:`,
 `fix:`, `feat(...)!:` for breaking). Keep commits conventional so the log maps
@@ -106,10 +111,12 @@ fine, as long as it lands on `main` before the tag.
 
 ### 2. Bump the versions
 
-Edit `version` in **both** package manifests to the release version:
+Edit `version` in **all three** package manifests to the release version:
 
 ```jsonc
 // packages/pinerun/package.json  ← stamps `pinerun --version`
+"version": "0.2.0",
+// packages/pinetop/package.json  ← stamps `pinetop --version`
 "version": "0.2.0",
 // packages/pinery/package.json  ← kept in lockstep
 "version": "0.2.0",
@@ -135,16 +142,31 @@ against.)
 
 ```bash
 bun install
-bun run typecheck            # tsc -b across both packages
+bun run typecheck            # tsc -b across every package
 bun test                     # full suite
-bun run build:bin            # host binary → dist/pinerun
-./dist/pinerun --version     # must print "pinerun X.Y.Z (<sha>)" — the NEW version
+
+bun run build:bin                              # host binary → dist/pinerun
+./dist/pinerun --version                       # "pinerun X.Y.Z (<sha>)" — the NEW version
+
+cd packages/pinetop && bun run build:bin && cd -   # → dist/pinetop
+./dist/pinetop --version                       # line 1: "pinetop X.Y.Z (<sha>)" — the NEW version
+                                               # line 2: the pinerun it found on PATH
+./dist/pinetop --check-flags                   # schema still agrees with pinerun --help
 ```
 
-The `--version` check is the guard against a forgotten bump: the binary reports
-whatever `packages/pinerun/package.json` said at compile time. Run a quick smoke
-too (`./dist/pinerun scan examples/rsi.pine --symbols BTCUSDT --tf 1h --limit 50
---rank "last(rsi)"`).
+The `--version` checks are the guard against a forgotten bump: each binary
+reports whatever its own manifest said at compile time, so check both. Run a quick
+smoke too (`./dist/pinerun scan examples/rsi.pine --symbols BTCUSDT --tf 1h
+--limit 50 --rank "last(rsi)"`).
+
+`pinetop --version` prints **two** lines — its own, then the `pinerun` it spawns.
+Only the first is the release assertion (`./dist/pinetop --version | head -1`);
+the second reports whatever is on your PATH, which during release prep is usually
+the _previous_ version and is not a failure.
+
+`--check-flags` belongs in this list because `pinetop` models pinerun's flags by
+hand: if the release added or renamed a CLI flag, this is what catches the TUI
+not knowing about it. It exits non-zero on drift.
 
 CI does not gate on formatting, but keep the files you touched clean:
 `bunx prettier --check <files>`.
@@ -156,7 +178,8 @@ CI does not gate on formatting, but keep the files you touched clean:
 
 ```bash
 git checkout -b chore/release-X.Y.Z
-git add packages/pinerun/package.json packages/pinery/package.json CHANGELOG.md
+git add packages/pinerun/package.json packages/pinetop/package.json \
+        packages/pinery/package.json CHANGELOG.md
 git commit -m "chore(release): X.Y.Z"
 git push -u origin chore/release-X.Y.Z
 gh pr create --fill      # merge once CI is green
@@ -182,25 +205,48 @@ gh run watch                       # or: gh run list --workflow=release.yml
 ```
 
 The job runs: checkout → setup Bun → `bun install --frozen-lockfile` →
-`bun run typecheck` → `bun test` → `bun run build:bin all` → `sha256sum` →
-create the GitHub Release with every binary attached. Then confirm:
+`bun run typecheck` → `bun test` → build all targets for `pinerun`, then for
+`pinetop` → **verify** each linux-x64 asset self-reports the tag and
+`--check-flags` agrees → `sha256sum` over both → create the GitHub Release with
+every binary attached. Then confirm:
 
 ```bash
-gh release view vX.Y.Z             # 5 binaries + checksums.txt attached
+gh release view vX.Y.Z             # 10 binaries + checksums.txt attached
 ```
 
-Expected assets: `pinerun-linux-x64`, `pinerun-linux-arm64`,
-`pinerun-darwin-x64`, `pinerun-darwin-arm64`, `pinerun-windows-x64.exe`,
-`checksums.txt`.
+Expected assets — 5 targets × 2 binaries, plus one shared manifest:
+
+```
+pinerun-linux-x64     pinetop-linux-x64
+pinerun-linux-arm64   pinetop-linux-arm64
+pinerun-darwin-x64    pinetop-darwin-x64
+pinerun-darwin-arm64  pinetop-darwin-arm64
+pinerun-windows-x64.exe   pinetop-windows-x64.exe
+checksums.txt
+```
+
+`checksums.txt` must list **all ten**: `pinerun upgrade` and `pinetop upgrade`
+each resolve their own asset from it, so an asset missing there cannot
+self-update even though it downloaded fine.
 
 ### 8. Verify the installer path end-to-end
 
-The installer follows `releases/latest`, which now points at the new release:
+The installer follows `releases/latest`, which now points at the new release. It
+installs both binaries, so check both:
 
 ```bash
-export PINERUN_INSTALL_DIR=$(mktemp -d)
+export PINESTACK_INSTALL_DIR=$(mktemp -d)
 curl -fsSL https://raw.githubusercontent.com/heyphat/pinestack/main/scripts/install.sh | sh
-"$PINERUN_INSTALL_DIR/pinerun" --version       # → pinerun X.Y.Z (<sha>)
+"$PINESTACK_INSTALL_DIR/pinerun" --version            # → pinerun X.Y.Z (<sha>)
+"$PINESTACK_INSTALL_DIR/pinetop" --version | head -1  # → pinetop X.Y.Z (<sha>)
+```
+
+Then confirm self-update resolves the new release from an older binary — this is
+the one path CI cannot exercise, because it needs a _published_ release to look
+at:
+
+```bash
+"$PINESTACK_INSTALL_DIR/pinetop" upgrade --check   # → already up to date
 ```
 
 (Or simply re-run the one-liner from the README on any machine.)
@@ -219,16 +265,28 @@ gh release edit vX.Y.Z --notes "<paste the CHANGELOG section>"
 `.github/workflows/release.yml`, triggered on `push` of tags matching `v*`,
 single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 
-| Step      | Command / action                                                   |
-| --------- | ------------------------------------------------------------------ |
-| Checkout  | `actions/checkout@v4`                                              |
-| Bun       | `oven-sh/setup-bun@v2` (pinned `bun-version`)                      |
-| Install   | `bun install --frozen-lockfile`                                    |
-| Typecheck | `bun run typecheck`                                                |
-| Test      | `bun test`                                                         |
-| Build     | `bun run build:bin all` (5 targets, version + sha baked in)        |
-| Checksums | `sha256sum pinerun-* > checksums.txt`                              |
-| Release   | `softprops/action-gh-release@v2` — uploads assets, generates notes |
+| Step      | Command / action                                                       |
+| --------- | ---------------------------------------------------------------------- |
+| Checkout  | `actions/checkout@v4`                                                  |
+| Bun       | `oven-sh/setup-bun@v2` (pinned `bun-version`)                          |
+| Install   | `bun install --frozen-lockfile`                                        |
+| Typecheck | `bun run typecheck`                                                    |
+| Test      | `bun test`                                                             |
+| Build     | `build-bin.ts all --product pinerun`, then `--product pinetop`         |
+| Verify    | run each linux-x64 asset: `--version` matches the tag; `--check-flags` |
+| Checksums | `sha256sum pinerun-* pinetop-* > checksums.txt`                        |
+| Release   | `softprops/action-gh-release@v2` — uploads assets, generates notes     |
+
+> Both binaries ship, so a release carries **10 assets** (2 binaries × 5 targets)
+> plus one `checksums.txt` covering all of them. That single manifest matters:
+> both `pinerun upgrade` and `pinetop upgrade` resolve their own asset from it, so
+> an asset missing from `checksums.txt` cannot self-update.
+>
+> The workflow also **executes** the freshly built linux-x64 assets to assert each
+> reports the tag being released, and runs `pinetop --check-flags` against the
+> matching `pinerun`. A missed version bump is the one release mistake re-tagging
+> cannot fix — the assets are already published — so it fails before the release
+> step rather than after.
 
 ## Fixing a botched release
 
@@ -273,13 +331,16 @@ single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 [ ] piner dependency current (publish + bump @heyphat/piner first if needed)
 [ ] main is green (CI passing)
 [ ] release changes merged to main
-[ ] version bumped in BOTH packages/pinerun + packages/pinery package.json
+[ ] version bumped in ALL THREE packages/pinerun + pinetop + pinery package.json
 [ ] CHANGELOG.md section + compare link added
 [ ] bun run typecheck / bun test pass
 [ ] bun run build:bin && ./dist/pinerun --version reports the NEW version
+[ ] (pinetop) cd packages/pinetop && bun run build:bin; ./dist/pinetop --version
+[ ] (pinetop) ./dist/pinetop --check-flags agrees with this release's CLI flags
 [ ] chore(release): X.Y.Z committed on main
 [ ] git tag vX.Y.Z on main, pushed
-[ ] release.yml green; gh release view shows 5 binaries + checksums.txt
-[ ] curl installer → pinerun --version reports X.Y.Z
+[ ] release.yml green; gh release view shows 10 binaries + checksums.txt
+[ ] curl installer → pinerun --version AND pinetop --version report X.Y.Z
+[ ] pinetop upgrade --check on the previous release offers the new one
 [ ] (optional) release notes replaced with the CHANGELOG section
 ```

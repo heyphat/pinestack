@@ -1,0 +1,48 @@
+{
+  "name": "@heyphat/pinetop",
+  "version": "0.7.0",
+  "description": "Terminal UI over the pinerun CLI: one page per command, flags live and editable, the report resident on screen.",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "author": "Phat Huynh (heyphat)",
+  "homepage": "https://github.com/heyphat/pinestack/tree/main/packages/pinetop#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heyphat/pinestack.git",
+    "directory": "packages/pinetop"
+  },
+  "bugs": {
+    "url": "https://github.com/heyphat/pinestack/issues"
+  },
+  "keywords": [
+    "pine-script",
+    "piner",
+    "pinerun",
+    "backtest",
+    "tui",
+    "terminal",
+    "trading",
+    "quant"
+  ],
+  "bin": {
+    "pinetop": "./src/cli.ts"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@heyphat/pinerun": "workspace:*"
+  },
+  "peerDependencies": {
+    "@heyphat/piner": ">=0.10.0"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "scripts": {
+    "build:bin": "bun ../../scripts/build-bin.ts"
+  }
+}

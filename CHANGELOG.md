@@ -4,10 +4,69 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The `pinerun` CLI is distributed as a prebuilt, self-contained binary (see the
-README). The workspace packages run from TypeScript source and version in
-lockstep with the release tag; publishing the library to npm remains a possible
-follow-up.
+The `pinerun` CLI and the `pinetop` TUI are distributed as prebuilt,
+self-contained binaries (see the README). The workspace packages run from
+TypeScript source and version in lockstep with the release tag; publishing the
+libraries to npm remains a possible follow-up.
+
+## [0.7.0] - 2026-07-31
+
+### Added
+
+- **`pinetop` — a terminal UI over the `pinerun` CLI.** A new workspace package
+  (`@heyphat/pinetop`) that keeps a strategy's report resident on screen and makes
+  the command's own flags the thing you edit, so the edit → rerun → reread loop
+  happens in place instead of through repeated shell invocations and scrollback.
+  It adds no analytics: every number comes from `pinerun --json`, and the braille
+  charts and monthly grids are the CLI's own renderers, imported — so the screen
+  and the printed command cannot disagree.
+  - Seven pages in workflow order, `1`–`7`: BACKTEST, SWEEP, WALKFORWARD, SCAN,
+    PORTFOLIO, COMPARE, and TRADES (the ledger + engine log for the loaded run).
+  - Flags are editable in place: `tab` to the config pane, `↵` to edit a row,
+    `.` to reveal the advanced ones. `r` then `↵` runs. Nothing runs, and nothing
+    changes the config, without a keypress.
+  - Flags a choice makes mandatory surface with it — `--provider csv` reveals
+    `--data-dir` and the `--csv-*` assertions, and a csv run without a directory
+    is refused before the spawn rather than failing on its first fetch.
+  - The BACKTEST rail mirrors the CLI tearsheet's three sections (RETURNS, RISK,
+    TRADES) row for row, with the CLI's labels and formatters; the monthly grids
+    carry its green/red grading.
+  - Workflow hand-offs: `w` carries a sweep grid into WALKFORWARD, `↵` on a
+    ranked combo, a scanned symbol, or a portfolio sleeve deep-dives it in
+    BACKTEST.
+  - An opt-in Ask drawer (`a`) answers questions grounded in the loaded report and
+    returns any recommended change as a reviewable parameter diff — `↵` applies,
+    `ctrl-x` rejects, and an applied edit raises a "not yet re-run" banner until
+    you re-run. It sends derived metrics only: never OHLCV bars, never script
+    source, never credentials.
+  - Per-project state in `.pinetop/`: saved flags, so reopening resumes where you
+    were, plus a session log of every invocation with its exit code and duration.
+  - `pinetop --check-flags` diffs its flag schema against `pinerun <cmd> --help`
+    and exits non-zero on drift.
+  - `pinetop --version` (also `-v` / `version`, matching the CLI) reports both its
+    own version + commit **and** the `pinerun` it spawns — every number on screen
+    came out of that binary, so a stale one on PATH explains a stale number. The
+    same pair heads the `?` overlay.
+  - `pinetop upgrade` (`--check` to just look) self-updates the installed binary
+    in place, resolving the latest release, verifying the download's sha256
+    against the release's `checksums.txt`, and swapping the executable
+    atomically — the same implementation `pinerun upgrade` uses, asked to operate
+    on the `pinetop` asset.
+
+  See [`packages/pinetop/README.md`](./packages/pinetop#readme).
+
+### Changed
+
+- **Releases now ship both binaries.** A release carries 10 assets (`pinerun-*`
+  and `pinetop-*`, 5 targets each) under one `checksums.txt`, and the workflow
+  executes the built linux-x64 assets to assert each self-reports the tag before
+  publishing. `scripts/build-bin.ts` grew `--product pinerun|pinetop` (defaulting
+  to whichever package you run it from); existing `bun run build:bin` invocations
+  are unaffected.
+- **The installer installs `pinerun` and `pinetop`.** `PINESTACK_BINS` selects
+  (default `"pinerun pinetop"`), alongside `PINESTACK_VERSION` and
+  `PINESTACK_INSTALL_DIR`. The older `PINERUN_VERSION` / `PINERUN_INSTALL_DIR`
+  names keep working.
 
 ## [0.6.1] - 2026-07-29
 
@@ -294,6 +353,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.7.0]: https://github.com/heyphat/pinestack/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/heyphat/pinestack/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/heyphat/pinestack/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/heyphat/pinestack/compare/v0.4.0...v0.5.0

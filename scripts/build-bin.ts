@@ -1,16 +1,19 @@
 #!/usr/bin/env bun
 /**
- * Build pinerun as a standalone, dependency-free executable (Bun runtime + all
- * deps + the worker entrypoint baked in — users just download and run).
+ * Build a pinestack binary as a standalone, dependency-free executable (Bun
+ * runtime + all deps baked in — users just download and run).
  *
- *   bun run build:bin                 build for THIS machine   → dist/pinerun
- *   bun run build:bin linux-x64       build one target         → dist/pinerun-linux-x64
- *   bun run build:bin all             build every target       → dist/pinerun-<target>[.exe]
+ *   bun run build:bin                 build for THIS machine   → dist/<product>
+ *   bun run build:bin linux-x64       build one target         → dist/<product>-linux-x64
+ *   bun run build:bin all             build every target       → dist/<product>-<target>[.exe]
  *   bun run build:bin --list          show supported targets
  *
+ *   --product <name>   which binary: pinerun | pinetop. Defaults to the package
+ *                      you run this from, so `bun run build:bin` inside
+ *                      packages/pinetop builds pinetop.
  *   --install[=<dir>]  after a host build, copy the binary onto your PATH so you
- *                      can run `pinerun` from anywhere. Defaults to $PINERUN_INSTALL_DIR,
- *                      then ~/.local/bin. Only valid for host builds.
+ *                      can run it from anywhere. Defaults to the product's
+ *                      <PRODUCT>_INSTALL_DIR, then ~/.local/bin. Host builds only.
  *
  * Targets accept an optional variant suffix (musl / baseline / modern), e.g.
  * `linux-x64-musl` for Alpine or `linux-x64-baseline` for pre-2013 CPUs.
@@ -27,11 +30,82 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const ROOT = join(import.meta.dir, '..');
-const CLI = join(ROOT, 'packages/pinerun/src/cli.ts');
-// The worker pool spawns this module at runtime; it MUST be a second compile
-// entrypoint or `pinerun sweep/scan` dies with ModuleNotFound (see pool.ts).
-const WORKER = join(ROOT, 'packages/pinerun/src/worker-entry.ts');
 const OUT_DIR = join(ROOT, 'dist');
+
+/**
+ * What this script can build. Adding a binary to the family is a row here, not
+ * a fork of the script.
+ *
+ * `entrypoints` is the compile list: extra entries exist for modules that are
+ * spawned at runtime rather than imported, which the bundler cannot discover on
+ * its own. `defines` name the identifiers the CLI `declare`s so a compiled
+ * binary can self-report a version it has no package.json to read.
+ */
+interface Product {
+  /** Binary name, and the package directory under packages/. */
+  readonly name: string;
+  readonly entrypoints: readonly string[];
+  readonly versionDefine: string;
+  readonly revisionDefine: string;
+  /** Env var that overrides the --install directory. */
+  readonly installEnv: string;
+  /** Only pinerun bundles the engine, so only pinerun can swap it for a checkout. */
+  readonly supportsLocalPiner: boolean;
+}
+
+const PRODUCTS: Record<string, Product> = {
+  pinerun: {
+    name: 'pinerun',
+    entrypoints: [
+      join(ROOT, 'packages/pinerun/src/cli.ts'),
+      // The worker pool spawns this module at runtime; it MUST be a second
+      // compile entrypoint or `pinerun sweep/scan` dies with ModuleNotFound
+      // (see pool.ts).
+      join(ROOT, 'packages/pinerun/src/worker-entry.ts'),
+    ],
+    versionDefine: 'PINERUN_VERSION',
+    revisionDefine: 'PINERUN_REVISION',
+    installEnv: 'PINERUN_INSTALL_DIR',
+    supportsLocalPiner: true,
+  },
+  pinetop: {
+    name: 'pinetop',
+    // No worker: pinetop spawns the `pinerun` binary, not a bundled module
+    // (design §4.1.a), so there is nothing extra for the bundler to miss.
+    entrypoints: [join(ROOT, 'packages/pinetop/src/cli.ts')],
+    versionDefine: 'PINETOP_VERSION',
+    revisionDefine: 'PINETOP_REVISION',
+    installEnv: 'PINETOP_INSTALL_DIR',
+    supportsLocalPiner: false,
+  },
+};
+
+/**
+ * Which product to build.
+ *
+ * `bun run build:bin` inside a package runs with that package as the cwd, so the
+ * package's own name is the answer and neither package.json needs to repeat it.
+ * `--product <name>` overrides, and running from the repo root builds pinerun —
+ * the behaviour this script had before it knew about more than one binary.
+ */
+function resolveProduct(explicit?: string): Product {
+  if (explicit != null) {
+    const chosen = PRODUCTS[explicit];
+    if (!chosen)
+      fail(`unknown --product "${explicit}" — known: ${Object.keys(PRODUCTS).join(', ')}`);
+    return chosen!;
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+      name?: string;
+    };
+    const bare = (pkg.name ?? '').replace(/^@[^/]+\//, '');
+    if (PRODUCTS[bare]) return PRODUCTS[bare]!;
+  } catch {
+    // Not run from inside a package — fall through to the default.
+  }
+  return PRODUCTS['pinerun']!;
+}
 
 // `--local` bundles against the sibling ../piner source checkout instead of the
 // installed (registry) @heyphat/piner — for engine changes that aren't published
@@ -39,14 +113,14 @@ const OUT_DIR = join(ROOT, 'dist');
 const PINER_DIR = join(ROOT, '..', 'piner');
 const PINERUN_TSCONFIG = join(ROOT, 'packages/pinerun/tsconfig.json');
 
-// Baked into the binary so `pinerun --version` self-reports (see cli.ts's
-// PINERUN_VERSION / PINERUN_REVISION declares). Version comes from the package
-// manifest — the single source of truth — and the revision from git (best effort).
-const PKG_VERSION = (
-  JSON.parse(readFileSync(join(ROOT, 'packages/pinerun/package.json'), 'utf8')) as {
-    version: string;
-  }
-).version;
+/** The product's own manifest version — the single source of truth for a release. */
+function packageVersion(product: Product): string {
+  return (
+    JSON.parse(readFileSync(join(ROOT, 'packages', product.name, 'package.json'), 'utf8')) as {
+      version: string;
+    }
+  ).version;
+}
 
 function gitRevision(): string | null {
   try {
@@ -87,18 +161,29 @@ function parseTarget(raw: string): { base: string; full: string } {
   return { base: base!, full: `bun-${t}` };
 }
 
-async function build(target: { base: string; full: string }, forHost: boolean): Promise<string> {
+async function build(
+  product: Product,
+  target: { base: string; full: string },
+  forHost: boolean,
+): Promise<string> {
   const ext = target.base.startsWith('windows') ? '.exe' : '';
   // Host builds get the bare name (drop-in for local use); cross builds are suffixed.
   const outfile = join(
     OUT_DIR,
-    forHost ? `pinerun${ext}` : `pinerun-${target.full.slice(4)}${ext}`,
+    forHost ? `${product.name}${ext}` : `${product.name}-${target.full.slice(4)}${ext}`,
   );
-  const args = ['build', '--compile', `--target=${target.full}`, CLI, WORKER, '--outfile', outfile];
+  const args = [
+    'build',
+    '--compile',
+    `--target=${target.full}`,
+    ...product.entrypoints,
+    '--outfile',
+    outfile,
+  ];
   // --define values are JS expressions, hence JSON.stringify to quote them.
-  args.push('--define', `PINERUN_VERSION=${JSON.stringify(PKG_VERSION)}`);
-  if (REVISION) args.push('--define', `PINERUN_REVISION=${JSON.stringify(REVISION)}`);
-  console.log(`\n→ ${target.full}`);
+  args.push('--define', `${product.versionDefine}=${JSON.stringify(packageVersion(product))}`);
+  if (REVISION) args.push('--define', `${product.revisionDefine}=${JSON.stringify(REVISION)}`);
+  console.log(`\n→ ${product.name} ${target.full}`);
   const proc = Bun.spawn(['bun', ...args], { stdout: 'inherit', stderr: 'inherit' });
   if ((await proc.exited) !== 0) fail(`build failed for ${target.full}`);
   const size = Bun.file(outfile).size;
@@ -107,16 +192,17 @@ async function build(target: { base: string; full: string }, forHost: boolean): 
 }
 
 /** Resolve where `--install` should drop the binary. */
-function installDir(explicit?: string): string {
+function installDir(product: Product, explicit?: string): string {
   if (explicit) return explicit;
-  if (process.env.PINERUN_INSTALL_DIR) return process.env.PINERUN_INSTALL_DIR;
+  const fromEnv = process.env[product.installEnv];
+  if (fromEnv) return fromEnv;
   return join(homedir(), '.local', 'bin');
 }
 
 /** Copy the freshly built host binary onto the user's PATH. */
-function install(srcfile: string, dir: string): void {
+function install(product: Product, srcfile: string, dir: string): void {
   const ext = srcfile.endsWith('.exe') ? '.exe' : '';
-  const dest = join(dir, `pinerun${ext}`);
+  const dest = join(dir, `${product.name}${ext}`);
   mkdirSync(dir, { recursive: true });
   copyFileSync(srcfile, dest);
   if (!ext) chmodSync(dest, 0o755); // Bun.build's exec bit isn't preserved by copyFileSync
@@ -125,7 +211,7 @@ function install(srcfile: string, dir: string): void {
     console.log(`  ⚠ ${dir} is not on your PATH. Add it, e.g.:`);
     console.log(`      export PATH="${dir}:$PATH"`);
   } else {
-    console.log('  Run it from anywhere: pinerun --help');
+    console.log(`  Run it from anywhere: ${product.name} --help`);
   }
 }
 
@@ -202,39 +288,55 @@ const argv = process.argv.slice(2);
 let installFlag = false;
 let installTarget: string | undefined;
 let localFlag = false;
+let productName: string | undefined;
 const positional: string[] = [];
-for (const a of argv) {
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i]!;
   if (a === '--install') installFlag = true;
   else if (a.startsWith('--install=')) {
     installFlag = true;
     installTarget = a.slice('--install='.length);
   } else if (a === '--local') localFlag = true;
+  else if (a === '--product') productName = argv[++i];
+  else if (a.startsWith('--product=')) productName = a.slice('--product='.length);
   else positional.push(a);
 }
 
+const product = resolveProduct(productName);
 const arg = positional[0];
 if (arg === '--help' || arg === '-h') {
-  console.log('usage: bun run build:bin [<target> | all | --list] [--local] [--install[=<dir>]]');
+  console.log(
+    'usage: bun run build:bin [<target> | all | --list] [--product <name>] [--local] [--install[=<dir>]]',
+  );
   console.log('       (no target = this machine; --install copies a host build onto your PATH)');
+  console.log(
+    `       --product: which binary to build — ${Object.keys(PRODUCTS).join(' | ')}` +
+      ' (default: the package you run this from)',
+  );
   console.log(
     '       --local: bundle the sibling ../piner checkout instead of the registry version',
   );
 } else if (arg === '--list') {
   console.log(TARGETS.join('\n'));
 } else {
-  if (localFlag) await useLocalPiner();
+  if (localFlag) {
+    if (!product.supportsLocalPiner) {
+      fail(`--local does not apply to ${product.name} — it does not bundle the engine`);
+    }
+    await useLocalPiner();
+  }
   if (arg === 'all') {
     if (installFlag) fail('--install only applies to host builds, not `all`');
-    for (const t of TARGETS) await build(parseTarget(t), false);
+    for (const t of TARGETS) await build(product, parseTarget(t), false);
     console.log('\nAll targets built.');
   } else {
     const forHost = arg == null;
     if (installFlag && !forHost) fail('--install only applies to the host build (omit the target)');
-    const outfile = await build(parseTarget(arg ?? hostTarget()), forHost);
+    const outfile = await build(product, parseTarget(arg ?? hostTarget()), forHost);
     if (forHost) {
-      if (installFlag) install(outfile, installDir(installTarget));
+      if (installFlag) install(product, outfile, installDir(product, installTarget));
       else {
-        console.log('\nRun it: ./dist/pinerun --help');
+        console.log(`\nRun it: ./dist/${product.name} --help`);
         console.log(`Or add dist to your PATH:  export PATH="${OUT_DIR}:$PATH"`);
         console.log('Or install it onto your PATH:  bun run build:bin --install');
       }

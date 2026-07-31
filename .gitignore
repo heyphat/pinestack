@@ -1,15 +1,55 @@
+# NOTE: git has no trailing comments — `#` only starts a comment at the start of
+# a line. `coverage/  # why` is a literal pattern, not a rule plus a note. Keep
+# every comment on its own line.
+
+# Dependencies
 node_modules/
+
+# Build output. `dist/` and `out/` are unanchored, so they match at any depth —
+# packages/*/dist/ is covered without listing each package.
 dist/
+out/
 *.tsbuildinfo
-.DS_Store
+
+# Secrets. The data adapters read provider keys from the environment
+# (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, MASSIVE_API_KEY, …); a committed
+# .env is exactly the credential leak SECURITY.md scopes. Example files are
+# opted back in so a template can still be shared.
+.env
+.env.*
+!.env.example
+!.env.sample
+
 # pinery on-disk history cache (local dev)
 .pinery-cache/
-out/
+
+# pinetop per-project state: saved flag state + the session log of every
+# invocation. Local to a checkout, like the cache above.
+.pinetop/
+
+# Other local caches. `coverage/` keeps its trailing slash so it matches only
+# the `bun test --coverage` directory — packages/pinery/src/coverage.ts is real,
+# tracked source and a bare `coverage` rule would swallow it.
+.cache/
+coverage/
+
+# Editor and OS noise. `*.sw[a-p]` also covers vim's dot-prefixed form
+# (.file.ts.swp); `._*` is macOS AppleDouble sidecars.
+.DS_Store
+._*
 .vscode
+.idea/
 .kiro
+*.sw[a-p]
+*~
+
+# Agent tooling. `.claude/worktrees/` holds entire duplicate checkouts and must
+# never be committed; settings.local.json is personal. Shared project config
+# (.claude/settings.json, skills, agents) stays trackable on purpose.
+.claude/worktrees/
+.claude/settings.local.json
+
 # internal design/planning docs — not part of the public release
 # (promote individual files back into git when ready to publish them)
 dev-docs/
-
-out
 semantic-review

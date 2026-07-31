@@ -66,7 +66,7 @@ Prefer to build them yourself? See [Getting started](#getting-started) below, th
 | [`@heyphat/pinery`](./packages/pinery)     | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache. | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                                     |
 | [`@heyphat/pinerun`](./packages/pinerun)   | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI)                  |
 | [`@heyphat/pinetop`](./packages/pinetop)   | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command plus a vim editor for the `.pine`, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload.   | `@heyphat/pinetop`, `pinetop` (TUI)                                                          |
-| [`@heyphat/pinelive`](./packages/pinelive) | **Forward-execution layer.** SDK-free Broker protocol, position mirror, closed-bar runner, CSV replay, PaperBroker, JSONL ledger, and adapter conformance utilities.                                                | `@heyphat/pinelive`, `@heyphat/pinelive/node`, `@heyphat/pinelive/testing`, source-only CLI  |
+| [`@heyphat/pinelive`](./packages/pinelive) | **Forward-execution layer.** Closed-bar runner, exact broker position mirror, PaperBroker, Tiger execution adapters, JSONL ledger, parity, and broker conformance utilities.                                        | `@heyphat/pinelive`, `@heyphat/pinelive/node`, `@heyphat/pinelive/testing`, source-only CLI  |
 
 ```
 piner            (engine — separate repo, pure, browser-safe)
@@ -102,78 +102,13 @@ pinestack/
 ├── tsconfig.json             solution file: references every package (tsc -b)
 ├── scripts/
 │   └── install.sh            release installer (pinerun + pinetop)
-├── examples/
-│   ├── *.pine                   indicator and strategy examples
-│   └── data/                    checked-in CSV replay fixtures + instruments.csv
-├── docs/                        command, portfolio, and forward-testing guides
+├── examples/                 .pine strategies + checked-in CSV replay fixtures
+├── docs/                     command, portfolio, and forward-testing guides
 └── packages/
-    ├── pinery/               @heyphat/pinery  — data layer
-    │   ├── src/
-    │   │   ├── index.ts          browser-safe barrel
-    │   │   ├── provider.ts       HistoryProvider contract, toDataFeed, applyRange
-    │   │   ├── timeframe.ts       canonical timeframe parsing + piner mapping
-    │   │   ├── http.ts            shared retrying JSON GET
-    │   │   ├── symbols.ts         crypto pair normalization (OKX/Kraken)
-    │   │   ├── node.ts            @heyphat/pinery/node — on-disk cache
-    │   │   └── adapters/
-    │   │       ├── binance.ts     Binance spot + USDⓈ-M futures klines
-    │   │       ├── okx.ts         OKX spot + swap candles
-    │   │       ├── kraken.ts      Kraken spot OHLC
-    │   │       ├── alpaca.ts      Alpaca US-equities bars (key + secret)
-    │   │       ├── massive.ts     Massive US-equities aggregates (api key)
-    │   │       ├── static.ts      in-memory provider + barsFromCsv
-    │   │       └── csv.ts         local CSV-file provider (Node-only, /node entry)
-    │   └── README.md
-    ├── pinerun/              @heyphat/pinerun — orchestration layer
-    │   ├── src/
-    │   │   ├── index.ts          browser-safe barrel
-    │   │   ├── job.ts            Job model
-    │   │   ├── result.ts         RunResult contract
-    │   │   ├── hash.ts           jobHash — determinism key
-    │   │   ├── execute.ts        executeJob — the pure run primitive
-    │   │   ├── runner.ts         Runner interface, fanOut, LocalRunner
-    │   │   ├── rank.ts           extractor/ranker grammar
-    │   │   ├── scan.ts           the scan fan-out
-    │   │   ├── params.ts         sweep axis grammar (cartesian input expansion)
-    │   │   ├── sweep.ts          the parameter-sweep fan-out
-    │   │   ├── backtest.ts       single-strategy deep run (tearsheet data)
-    │   │   ├── walkforward.ts    out-of-sample / walk-forward validation
-    │   │   ├── chart.ts          braille price/equity/drawdown builders
-    │   │   ├── tearsheet.ts      monthly grids, top drawdowns, histogram
-    │   │   ├── export.ts         CSV + equity/drawdown plot builders
-    │   │   ├── scaffold.ts       `init` starter-strategy source builders
-    │   │   ├── pool.ts           WorkerPoolRunner (node:worker_threads)
-    │   │   ├── worker-entry.ts   worker thread entry
-    │   │   ├── node.ts           @heyphat/pinerun/node barrel
-    │   │   └── cli.ts            the `pinerun` CLI
-    │   ├── test/
-    │   └── README.md
-    ├── pinelive/             @heyphat/pinelive — forward-execution layer
-    │   ├── src/core/            binding, broker, mirror, runner, security, ledger
-    │   ├── src/brokers/         Paper and Tiger execution adapters
-    │   ├── src/cli.ts           source-checkout run/parity CLI
-    │   └── test/                offline runner, broker, and SDK-facade coverage
-    └── pinetop/              @heyphat/pinetop — interactive layer (TUI)
-        ├── src/
-        │   ├── index.ts          public barrel
-        │   ├── cli.ts            the `pinetop` entry point
-        │   ├── app.ts            router, event loop, the only spawn site
-        │   ├── state.ts          AppState (pages, flags, overrides, run, ask)
-        │   ├── keymap.ts         the normative keymap; `?` is generated from it
-        │   ├── terminal.ts       alt screen, raw mode, key decoding
-        │   ├── frame.ts          tab bar, breadcrumb, command line, hints
-        │   ├── overlays.ts       help, run dialog, palette, filter, ask drawer
-        │   ├── scripts.ts        .pine discovery for the STRATEGIES pane
-        │   ├── persist.ts        per-project flag state (.pinetop/)
-        │   ├── flags/            flag schema, FlagModel → argv, Pine input titles
-        │   ├── render/           cell grid, panes, tables, theme, formatters
-        │   ├── run/              spawn pinerun --json, engine log, session log
-        │   ├── views/            report JSON → renderable rows
-        │   ├── pages/            one module per page (7)
-        │   └── ask/              the {answer, proposal, action} contract
-        ├── test/
-        ├── design.md            the design document behind it
-        └── README.md
+    ├── pinery/               @heyphat/pinery   — providers in src/adapters/, cache behind /node
+    ├── pinerun/              @heyphat/pinerun  — jobs, runners, commands, the pinerun CLI
+    ├── pinelive/             @heyphat/pinelive — core mirror/ledger, Paper + Tiger brokers
+    └── pinetop/              @heyphat/pinetop  — TUI pages, flag schema, spawns pinerun --json
 ```
 
 The detailed public APIs live in each package README; this tree shows ownership

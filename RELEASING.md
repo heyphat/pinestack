@@ -3,8 +3,8 @@
 The A-to-Z runbook for cutting a new pinestack release — prebuilt `pinerun` and
 `pinetop` binaries attached to a GitHub Release. There is **no npm publish**: the packages
 run from TypeScript source in this workspace, and the binaries are the product.
-A release publishes **no `pinelive` binary and no npm packages**:
-`@heyphat/pinelive` remains source-checkout/workspace-only.
+A release also publishes **no `pinelive` binary**: `@heyphat/pinelive` is
+source-checkout/workspace-only and is not installed by the release installer.
 
 ## Release model
 
@@ -33,12 +33,11 @@ tag vX.Y.Z on main  ──push──▶  release.yml  ──▶  GitHub Release 
 verify: gh release view · curl installer · pinerun/pinetop --version
 ```
 
-Normal pushes and PR merges do not release anything. A matching tag push is the
-release trigger; there is no separate manual `gh release create` step.
+The `curl | sh` installer (`scripts/install.sh`) serves users from
+`releases/latest/download/…`, so the moment the workflow finishes, new installs
+get the new version.
 
-### Workflow limitations operators must cover
-
-The repository workflow currently does **not** enforce all release policy:
+## Prerequisites (one-time)
 
 - **Bun** locally, at the exact version pinned in `.github/workflows/release.yml`
   (`bun-version:`) — the compiled binaries are the product, and bun's
@@ -56,25 +55,40 @@ The repository workflow currently does **not** enforce all release policy:
   (`permissions: contents: write` is already declared in `release.yml`).
 - **`gh` CLI** authenticated (`gh auth status`) — only for watching the run and
   polishing release notes; not required for the release itself.
+- **A clean worktree.** `git status --short` must print nothing. Never bump
+  versions or tag from a dirty feature worktree: preserve that work on its branch
+  and land it through review, or use a separate clean worktree.
 
-- The trigger is broad `v*`, not strict `vMAJOR.MINOR.PATCH` validation.
-- It does not prove that the tagged commit is on `main`.
-- It does not compare the tag with package-manifest versions.
-- It does not enforce lockstep versions across the three workspace packages.
-- It does not run a built binary and inspect `pinerun --version`.
-- Repository rulesets and branch/tag protections are hosted GitHub state and
-  cannot be established from the checked-in workflow alone.
+### Workflow limitations you must cover manually
 
-Complete the manual gates in this runbook before pushing a tag. Do not rely on a
-successful workflow alone as proof that the release was cut from the right
-commit or carries the right version.
+`release.yml` does not enforce all release policy. It does **not**:
 
-## Version and artifact policy
+- validate the tag strictly (the trigger is broad `v*`, not `vMAJOR.MINOR.PATCH`);
+- prove the tagged commit is on `main`;
+- compare the tag against the package-manifest versions;
+- enforce lockstep versions across the four workspace packages.
+
+Repository rulesets and branch/tag protections are hosted GitHub state and cannot
+be established from the checked-in workflow alone. Complete the manual gates below
+before pushing a tag; a green workflow alone is not proof that the release was cut
+from the right commit or carries the right version.
+
+## Versioning policy
+
+Semantic Versioning, pre-1.0:
+
+- **Breaking changes → bump MINOR** (`0.1.0 → 0.2.0`). Pre-1.0, minor absorbs
+  breaking.
+- **New features / additive CLI or API → bump MINOR** (or PATCH if tiny).
+- **Bug fixes only → bump PATCH** (`0.1.0 → 0.1.1`).
 
 Judge "breaking" from the **user's** view of the product: the `pinerun` CLI
 surface first (commands, flags, output contracts like `--json` shapes and CSV
 columns), then `pinetop`'s keymap and pages, then the programmatic API of
-`@heyphat/pinerun` / `@heyphat/pinery` / `@heyphat/pinetop`.
+`@heyphat/pinerun` / `@heyphat/pinery` / `@heyphat/pinetop` / `@heyphat/pinelive`.
+For pinelive also treat the durable v3 ledger schema and recovery contract as a
+user-facing surface: a change that stops an existing ledger from replaying is
+breaking even though no CLI flag moved.
 
 Note that a `--json` shape is now a **contract between two shipped binaries**, not
 just an output format: `pinetop` parses those payloads. Changing one is breaking
@@ -83,71 +97,45 @@ even if no user script reads it.
 The four workspace packages are versioned **in lockstep** with the release tag:
 `packages/pinerun/package.json`, `packages/pinery/package.json`,
 `packages/pinetop/package.json` and `packages/pinelive/package.json` all carry
-`X.Y.Z`, even when only one changed.
-Each binary bakes in **its own** manifest version — `build-bin.ts` injects it
+`X.Y.Z`, even when only one changed. Pinelive ships no binary, but it is stamped
+anyway so a checkout's four manifests can never disagree — `test/workspace.test.ts`
+enforces this. The private workspace-root package stays at `0.0.0`; do not confuse
+it with the pinned root dependency on `@heyphat/piner`.
+Each shipped binary bakes in **its own** manifest version — `build-bin.ts` injects it
 (plus the git commit) so `pinerun --version` and `pinetop --version` self-report.
 Forget a bump and that binary reports the previous version.
 
-Judge compatibility across the `pinerun` CLI and output contracts first, then
-the public APIs of all three workspace packages. Adding pinelive's forward
-execution surface, including deliberate data-boundary changes, warrants the
-recommended `0.7.0` minor release after normal mainline integration.
-
-The following manifests are versioned in lockstep with `vX.Y.Z`:
-
-- `packages/pinerun/package.json`
-- `packages/pinery/package.json`
-- `packages/pinelive/package.json`
-
-The private workspace-root package remains `0.0.0`; do not confuse that private
-version with the pinned root dependency on `@heyphat/piner`.
-`packages/pinerun/package.json` is also compiled into each standalone binary, so
-a missed bump makes `pinerun --version` report the old version.
-
-Release assets are intentionally limited to:
-
-- `pinerun-linux-x64`
-- `pinerun-linux-arm64`
-- `pinerun-darwin-x64`
-- `pinerun-darwin-arm64`
-- `pinerun-windows-x64.exe`
-- `checksums.txt`
-
-The shell installer supports Linux and macOS on x64/arm64. Windows users
-download the `.exe` manually. Neither path installs `pinelive`.
-
-## Prerequisites
-
-- **Bun 1.2.5**, matching the exact mainline CI/release toolchain. Preserve that
-  pin when integrating branches; do not release with a floating `latest` setup.
-- Push rights for `heyphat/pinestack` and permission to create release tags.
-- An authenticated `gh` CLI for checking CI, hosted rules, and the release.
-- A clean local worktree with all intended source and documentation committed.
-- A green, current `main` containing the full release contents.
-
-The workflow uses the built-in `GITHUB_TOKEN` with `contents: write`; no npm
-publishing token is involved.
+The changelog is written **from the Conventional Commit history** (`feat:`,
+`fix:`, `feat(...)!:` for breaking). Keep commits conventional so the log maps
+cleanly to changelog sections.
 
 ## Step by step
 
-### 0. Preserve work and integrate normally
+### 0. Upstream first: does this release need a new piner?
 
-Never switch branches, pull, bump versions, or tag from a dirty feature
-worktree. Start by checking:
+`@heyphat/piner` is a peer installed from the npm registry (pinned in the root
+`package.json` + `bun.lock`), and CI builds with `--frozen-lockfile`. If the
+release depends on new engine behavior:
+
+1. Cut the piner release first (see piner's own `RELEASING.md`).
+2. Bump `@heyphat/piner` in the root `package.json`, run `bun install`, and land
+   the `package.json` + `bun.lock` change on `main`.
+
+A local binary built with `build:bin --local` (the sibling `../piner` checkout)
+is a dev convenience only — **CI always builds against the registry version in
+the lockfile**, so unpublished engine changes cannot ship.
+
+### 1. Start from a green `main` and land the release's changes
 
 ```bash
-git status --short
+git checkout main && git pull
 ```
 
-Any output is a stop condition. Preserve the work on its feature branch and
-land it through the normal review process (or use a separate clean worktree).
-Do not discard, hide, or tag around uncommitted and untracked release content.
+CI (`ci.yml`) must be green. Feature/fix work merges to `main` as usual; the
+release prep below can ride the last PR or a small dedicated one — either is
+fine, as long as it lands on `main` before the tag.
 
-After the feature work is preserved, merge current `main` normally. Resolve
-conflicts semantically: retain both the feature and mainline's current engine,
-exact-history/cache identity, and Bar Magnifier behavior. Do not use a wholesale
-`ours`/`theirs` replacement and do not rewrite shared history merely to prepare
-a release.
+### 2. Bump the versions
 
 Edit `version` in **all four** package manifests to the release version:
 
@@ -162,41 +150,25 @@ Edit `version` in **all four** package manifests to the release version:
 "version": "0.2.0",
 ```
 
-CI for that integrated commit must be green before release preparation starts.
+Do not bump the private root package version.
 
-### 1. Confirm the piner dependency
+### 3. Update `CHANGELOG.md`
 
-`@heyphat/piner` is installed from the npm registry and pinned by the root
-`package.json` plus `bun.lock`. If the release depends on unpublished engine
-behavior:
+Keep a Changelog format. Add a new `## [X.Y.Z] - YYYY-MM-DD` section **above**
+the previous one, with `### Added` / `### Changed` / `### Changed (breaking)` /
+`### Fixed` subsections as needed. Write entries from the user's perspective;
+omit pure dev tooling (formatting, CI, internal docs, test fixtures).
 
-1. Release piner first using its own runbook.
-2. Update the exact `@heyphat/piner` dependency in the root `package.json`.
-3. Run `bun install` and commit both `package.json` and `bun.lock` through a PR.
-4. Confirm a frozen install uses the intended registry release.
+Then add a compare link at the bottom, above the previous version's link:
 
-A local `build:bin --local` against a sibling piner checkout is development-only;
-the GitHub workflow builds from the dependency recorded in the lockfile.
-
-### 2. Create the release-prep branch
-
-```bash
-git switch -c chore/release-0.7.0
+```
+[0.2.0]: https://github.com/heyphat/pinestack/compare/v0.1.0...v0.2.0
 ```
 
-If the baseline or scope changed, choose a new version before editing anything.
+(`0.1.0`, the first release, links to its tag instead — nothing to compare
+against.)
 
-### 3. Bump all three workspace manifests and regenerate the lockfile
-
-Set `"version": "0.7.0"` in all three lockstep manifests:
-
-```text
-packages/pinerun/package.json
-packages/pinery/package.json
-packages/pinelive/package.json
-```
-
-Then regenerate workspace metadata and inspect the result:
+### 4. Verify locally (must all pass)
 
 ```bash
 bun install
@@ -226,9 +198,10 @@ the _previous_ version and is not a failure.
 hand: if the release added or renamed a CLI flag, this is what catches the TUI
 not knowing about it. It exits non-zero on drift.
 
-If the bump touched dependencies, regenerate and inspect the lockfile, then
-prove it is self-consistent — `bun.lock` must describe the same versions as the
-manifests:
+If the bump touched dependencies, regenerate the lockfile and inspect it — every
+workspace entry must describe the same versions as the manifests; do not assume
+Bun refreshed stale metadata just because the install exited successfully. Then
+prove it is self-consistent the way CI will:
 
 ```bash
 bun install --frozen-lockfile
@@ -252,33 +225,23 @@ git push -u origin chore/release-X.Y.Z
 gh pr create --fill      # merge once CI is green
 ```
 
-Do not bump the private root package version.
+### 6. Tag on `main` and push
 
-### 4. Reconcile and update `CHANGELOG.md`
-
-First merge mainline's complete released history. Do not invent missing
-`0.4.x`–`0.6.x` sections from a stale feature branch.
-
-Then add `## [0.7.0] - YYYY-MM-DD` above the previous release, using Keep a
-Changelog headings such as `Added`, `Changed`, `Changed (breaking)`, and `Fixed`.
-Write user-visible behavior, not internal test or formatting work. Add the
-compare link using the actual preceding tag:
-
-```markdown
-[0.7.0]: https://github.com/heyphat/pinestack/compare/v0.6.1...v0.7.0
-```
-
-Verify the date, previous tag, and every material breaking migration before
-continuing.
-
-### 5. Run pre-tag consistency checks
-
-Set the intended values once:
+The workflow checks out **the tagged commit**, so tag `main` after the release
+prep is on it.
 
 ```bash
-VERSION=0.7.0
-TAG="v$VERSION"
-[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+git checkout main && git pull      # ensure the release-prep commit is present
+git tag vX.Y.Z                     # tag name must start with "v"
+git push origin vX.Y.Z
+```
+
+This is the point of no return: the push triggers `release.yml`.
+
+### 7. Watch the release
+
+```bash
+gh run watch                       # or: gh run list --workflow=release.yml
 ```
 
 The job runs: checkout → setup Bun → `bun install --frozen-lockfile` →
@@ -326,29 +289,30 @@ at:
 "$PINESTACK_INSTALL_DIR/pinetop" upgrade --check   # → already up to date
 ```
 
-Then repeat without `PINERUN_VERSION` and confirm `releases/latest` resolves to
-the same release. Test the Windows `.exe` by direct download on Windows.
+(Or simply re-run the one-liner from the README on any machine.) Test the Windows
+`.exe` by direct download on Windows.
 
-The installer's checksum path is currently best-effort in some download or
-lookup failure cases, rather than a universal hard failure. A successful
-installer run therefore does not replace the independent checksum check in step 10. Review installer warnings rather than treating exit status alone as proof of
-verification.
+The installer's checksum verification is best-effort in some download and lookup
+failure cases rather than a universal hard failure, so a successful installer run
+does not replace checking the asset against `checksums.txt` yourself. Read its
+warnings instead of trusting exit status alone.
 
-Finally, confirm the docs do not imply that this installer provides `pinelive`.
-Pinelive remains runnable from a source checkout only.
+Finally, confirm the docs still do not imply that this installer provides
+`pinelive` — it remains runnable from a source checkout only.
 
-### 12. Review generated notes
+### 9. Polish the release notes (optional)
 
-The workflow generates notes from commit/PR history. Compare them with the
-changelog. If needed, replace them deliberately:
+The workflow auto-generates notes from the commit/PR history. For a nicer entry,
+replace them with the CHANGELOG section:
 
 ```bash
-gh release edit v0.7.0 --notes-file <release-notes-file>
+gh release edit vX.Y.Z --notes "<paste the CHANGELOG section>"
 ```
 
-Do not paste shell-expanded secrets or account data into release notes.
+## What `release.yml` does (reference)
 
-## What `release.yml` does
+`.github/workflows/release.yml`, triggered on `push` of tags matching `v*`,
+single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 
 | Step      | Command / action                                                       |
 | --------- | ---------------------------------------------------------------------- |
@@ -373,42 +337,42 @@ Do not paste shell-expanded secrets or account data into release notes.
 > cannot fix — the assets are already published — so it fails before the release
 > step rather than after.
 
-| Step      | Command / action                                                        |
-| --------- | ----------------------------------------------------------------------- |
-| Trigger   | push of a tag matching `v*`                                             |
-| Checkout  | `actions/checkout@v4`                                                   |
-| Bun       | `oven-sh/setup-bun@v2`, explicitly pinned to `1.2.5`                    |
-| Install   | `bun install --frozen-lockfile`                                         |
-| Typecheck | `bun run typecheck`                                                     |
-| Test      | `bun test`                                                              |
-| Build     | `bun run build:bin all` (5 targets, version + sha baked in)             |
-| Checksums | `sha256sum pinerun-* > checksums.txt`                                   |
-| Release   | `softprops/action-gh-release@v2`, uploading assets and generating notes |
+## Fixing a botched release
 
-If an integration conflict changes the workflow back to a floating Bun version,
-stop and restore the mainline pin before tagging.
+- **Workflow failed before the release step** (typecheck/test/build red): no
+  release was created. Delete the tag, fix `main`, re-tag. `v*` tags are
+  protected by the `protect-release-tags` ruleset (no delete/move), so disable
+  it for the moment of deletion and re-enable right after:
 
-## Recovery and break-glass policy
+  ```bash
+  RS=$(gh api repos/heyphat/pinestack/rulesets --jq '.[] | select(.name=="protect-release-tags") | .id')
+  gh api -X PUT repos/heyphat/pinestack/rulesets/$RS -F enforcement=disabled >/dev/null
+  git push --delete origin vX.Y.Z
+  git tag -d vX.Y.Z
+  gh api -X PUT repos/heyphat/pinestack/rulesets/$RS -F enforcement=active >/dev/null
+  # fix, land on main, then re-tag
+  ```
 
-Treat published tags and versions as immutable. The default recovery is always
-to fix forward with a new patch release.
+- **Release published but the binaries are bad:** unlike npm, GitHub Release
+  assets _can_ be replaced — but a version that users may already have installed
+  should not silently change meaning. Prefer to **patch forward** (`X.Y.Z+1`).
+  If the release is minutes old and clearly unused, deleting release + tag and
+  re-cutting the same version is acceptable:
 
-- **Workflow failed before creating a release:** diagnose and fix on `main`, then
-  prefer a new version. Reusing a tag requires deleting/moving hosted state and
-  can race cached or fetched references.
-- **Release exists or assets were downloadable:** do not replace binaries under
-  the same version. Patch forward.
-- **`latest` points at a bad release:** an owner may mark it prerelease while a
-  patch is prepared, but first confirm how GitHub currently resolves `latest`.
-- **Tag points at the wrong commit:** stop the workflow if possible and patch
-  forward if the tag or assets may have been observed.
+  ```bash
+  gh release delete vX.Y.Z --yes
+  git push --delete origin vX.Y.Z && git tag -d vX.Y.Z
+  ```
 
-Deleting a release, deleting or moving a tag, or disabling a hosted ruleset is
-an owner-only break-glass action. It can invalidate provenance and user caches,
-and it may be blocked by repository rules. Before such an action, capture the
-run/release state, obtain explicit owner approval, verify the current rules with
-`gh api`, and record exactly what changed. Do not encode a ruleset name or assume
-protections exist without checking hosted state.
+- **`latest` points at the wrong release:** `releases/latest` (what the
+  installer follows) is the newest non-draft, non-prerelease release. Marking a
+  bad release as a **pre-release** (`gh release edit vX.Y.Z --prerelease`)
+  immediately steers the installer back to the previous good version while you
+  patch forward.
+
+- **Tag pushed from the wrong commit:** delete the remote tag before the
+  workflow finishes if you can; otherwise treat it as a bad release and patch
+  forward.
 
 ## Quick checklist
 
@@ -416,7 +380,7 @@ protections exist without checking hosted state.
 [ ] piner dependency current (publish + bump @heyphat/piner first if needed)
 [ ] main is green (CI passing)
 [ ] release changes merged to main
-[ ] version bumped in ALL FOUR packages/pinerun + pinetop + pinery + pinelive package.json
+[ ] version bumped in ALL FOUR pinerun + pinetop + pinery + pinelive package.json
 [ ] bun.lock regenerated, inspected, and accepted by --frozen-lockfile
 [ ] CHANGELOG.md section + compare link added
 [ ] bun run typecheck / bun test pass
@@ -428,6 +392,6 @@ protections exist without checking hosted state.
 [ ] release.yml green; gh release view shows 10 binaries + checksums.txt
 [ ] curl installer → pinerun --version AND pinetop --version report X.Y.Z
 [ ] pinetop upgrade --check on the previous release offers the new one
-[ ] docs accurately state that pinelive is source-only and no npm publish occurs
+[ ] docs still state that pinelive is source-only and that no npm publish occurs
 [ ] (optional) release notes replaced with the CHANGELOG section
 ```

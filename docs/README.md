@@ -38,10 +38,9 @@ a broker adapter.
 > contains a runnable Paper/CSV example.
 
 Broker implementers should read the
-[adapter contract](./pinelive-adapter-contract.md). The permanent
-[`feat/pinelive` audit and remediation record](./feat-pinelive-audit.md)
-documents confirmed findings, offline validation evidence, Tiger readiness
-limits, and the remaining mainline integration action.
+[adapter contract](./pinelive-adapter-contract.md). Tiger readiness limits and
+the offline-only nature of its validation are documented in the
+[forward-testing guide](./pinelive.md).
 
 ## Shared flags
 

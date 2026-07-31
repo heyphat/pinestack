@@ -11,9 +11,12 @@ reconciles that target through a broker while writing an auditable JSONL ledger.
 Pinelive is currently **source-checkout/workspace-only**:
 
 - It is not published to npm.
-- Pinestack GitHub Releases contain standalone `pinerun` binaries only.
+- Pinestack GitHub Releases contain the standalone `pinerun` and `pinetop`
+  binaries only; pinelive declares no `bin` entry and has no build product.
 - The `curl | sh` installer and `pinerun upgrade` do not install `pinelive`.
 - Run the CLI from a pinestack checkout with Bun 1.2.5.
+- Its version is still bumped in lockstep with the other workspace packages, so
+  a checkout's four manifests never disagree.
 
 `PaperBroker` is the safe default. The Tiger market-data and execution adapters
 have extensive offline tests against injected SDK facades, but no credentialed
@@ -202,6 +205,26 @@ broker execution is deliberately unavailable before any Tiger execution
 credentials or profile are read. Tiger may still be selected as the data
 provider, subject to the provider's own readiness restrictions.
 
+#### Execution safety limits
+
+Mirrored execution runs under fixed per-bar and per-minute budgets — 8 admitted
+target changes per bar, 4 order intents per bar, 20 submit attempts per rolling
+minute, and 3 consecutive errors before the breaker latches. They are not
+configurable while the every-update mirror cadence is fail-closed.
+
+The per-bar target budget counts only evaluations **admitted** for broker
+correction. Journal-only skips never consume it, so an every-update bar that
+computes hundreds of forming revisions cannot starve its own authoritative close.
+Should an authoritative final ever be refused by that budget, the breaker latches
+with reason `target-limit` and the runtime logs it, because a dropped final means
+the mirrored position has stopped tracking the strategy.
+
+`TargetScheduler` retains finalized per-bar decision state for a bounded window
+(`retainBars`, default 512 bars per binding) so multi-day runs do not grow
+without limit. Pruning is in-memory only — the durable ledger is never pruned,
+and a bar is retained while any of its orders is unresolved or its position
+uncertainty has not been reset.
+
 ## Lifecycle, reconciliation, and ledger
 
 V1 startup performs these steps in order:
@@ -296,6 +319,14 @@ PaperBroker models signed net quantity, weighted basis, realized/unrealized PnL,
 point value, commission, quantity/tick validation, and client-id idempotency. It
 is deterministic and intended for replay, development, conformance, and parity
 work—not as a claim that bar-close fills model live execution quality.
+
+There is no margin or buying-power model: the account's `available` equals its
+equity, so margin-sensitive strategy behavior cannot be validated in paper mode.
+Limit mirroring also assumes tick-aligned reference closes. Because the derived
+limit is snapped passively (a buy never rounds up, a sell never rounds down), a
+reference close that sits off the mintick grid puts a zero-offset buy limit one
+tick below the mark, and Paper rejects it as non-marketable with both prices in
+the message.
 
 ## Tiger readiness
 
@@ -403,7 +434,6 @@ but no longer parses CSV or owns replay timing.
 
 - [Forward-testing guide](../../docs/pinelive.md)
 - [Broker adapter contract](../../docs/pinelive-adapter-contract.md)
-- [`feat/pinelive` audit and remediation record](../../docs/feat-pinelive-audit.md)
 - [Pinery market-data API](../pinery/README.md)
 
 ## License

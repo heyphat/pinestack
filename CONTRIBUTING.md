@@ -103,12 +103,25 @@ framed client ids, durable ledger evidence, exact account/position reads, and
 bounded shutdown drainage. An error before reconciliation must not silently
 become an order.
 
+The durable v3 ledger is a compatibility surface: a change that stops an existing
+ledger from replaying is breaking. Two invariants are easy to break by accident
+and are covered by tests — a journaled-only decision (a forming revision, a
+compute-only skip) must never consume the per-bar **admission** budget that gates
+real broker corrections, and dropping an authoritative final must never be silent.
+Both have been broken before; keep `packages/pinelive/test/forming-budget.test.ts`
+and `intrabar-forming-budget-e2e.test.ts` passing.
+
 ## Data providers
 
 Historical adapters implement `HistoryProvider` in
 `packages/pinery/src/provider.ts`. Forward adapters implement
 `MarketDataProvider`, including strict instrument resolution, warmup history,
-exclusive-after closed-bar streaming, cancellation, and cleanup.
+exclusive-after closed-bar streaming, cancellation, and cleanup. An adapter may
+additionally advertise `liveBars()` for forming-bar updates; if it does, pinery
+alone decides finality, and every update must satisfy the strict
+`BarUpdateValidator` contract (aligned opens, monotonic event time, one active
+forming bar, strictly increasing revisions, `isClose` only for an authoritative
+final). Never infer a bar close from elapsed time or child-bar count.
 
 Keep network access behind an injectable transport or the shared retrying HTTP
 helper. Read credentials from environment variables or local profiles; never
@@ -129,9 +142,7 @@ account/position identity, terminal fills, cancellation, flattening,
 idempotency, arming, error classes, and redaction requirements.
 
 Broker or market-data work that changes readiness claims must update the
-[forward guide](./docs/pinelive.md) and the permanent
-[`feat/pinelive` audit](./docs/feat-pinelive-audit.md) with the exact evidence and
-remaining limits.
+[forward guide](./docs/pinelive.md) with the exact evidence and remaining limits.
 
 ## Workflow
 

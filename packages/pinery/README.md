@@ -418,6 +418,11 @@ remain authoritative.
   `InstrumentInfo`, `toDataFeed`, and `applyRange`.
 - Forward contracts: `MarketDataProvider`, `ResolvedDataInstrument`,
   `MarketDataError`, provider config types, and cancellation/lifecycle types.
+- Live updates: `BarUpdate`, `LiveSourcePolicy`, `supportsLiveBars`,
+  `validateBarUpdate`, `BarUpdateValidator`, `equivalentFinalBarUpdate`,
+  `liveTimeframeSeconds`, `snapshotLiveSourcePolicy`, `conformLiveBarUpdates`,
+  `bufferLiveBarUpdates`, `LiveBarUpdateBuffer`, `ExactChildBarAggregator`,
+  `aggregateExactChildBarUpdates`, and `recoverLiveBarUpdates`.
 - Timeframes: `timeframeSeconds`, `toPinerTimeframe`, `parseTimeframe`, and
   `pinerTimeframeToCanonical`.
 - Addressing/factories: asset-class registry and instrument-address helpers,
@@ -516,6 +521,41 @@ Tiger transport. Existing `createProvider` remains the permissive historical
 factory. Forward symbol/provider or asset-class mismatches fail instead of
 coercing to another instrument.
 
+### Live updates (`liveBars()`)
+
+`closedBars()` yields only finished bars. A provider may additionally advertise
+`liveBars()` — checked with `supportsLiveBars(provider)` — to stream `BarUpdate`
+snapshots of the bar still forming. Each update carries the bar, a strictly
+increasing `revision` within that bar, an `eventTime`, an `isClose` flag that is
+true only for the authoritative final, its `LiveSourcePolicy` (`native`, or
+`lower-bars` when derived from a finer timeframe), and optional `recovered` /
+`coalescedCount` provenance. Only pinery decides finality; consumers never infer
+a close from elapsed time or child count.
+
+The helpers are deliberately strict and never repair or reorder input:
+
+- **`validateBarUpdate` / `BarUpdateValidator`** enforce grid-aligned opens,
+  finite non-negative OHLCV, `high`/`low` consistency, monotonic `eventTime`, one
+  active forming bar at a time, strictly increasing revisions, and no update
+  after a bar finalizes. The single exception is an equivalent duplicate final,
+  which deduplicates idempotently. Anything else raises non-retryable
+  `malformed-data`. `liveTimeframeSeconds` refuses non-fixed (day/week/month)
+  timeframes outright rather than guessing calendar arithmetic.
+- **`conformLiveBarUpdates` / `bufferLiveBarUpdates` / `LiveBarUpdateBuffer`**
+  validate and throttle a stream. Only forming snapshots coalesce, and the
+  throttle is measured against provider `eventTime` rather than wall clock;
+  authoritative finals always bypass it, so a final can never be throttled away.
+- **`ExactChildBarAggregator` / `aggregateExactChildBarUpdates`** build a coarse
+  forming bar from exact lower-timeframe children. Each child slot is a
+  replaceable snapshot keyed by its open, so a revised child replaces rather than
+  double-counts. Child count never implies finality: `finalize()` requires a
+  separate authoritative final and rejects one that disagrees with the child
+  aggregate. That comparison is exact on OHLC but tolerates relative float noise
+  (1e-9) on the summed `volume`, since float summation is order-sensitive and a
+  provider may have totalled the same trades differently.
+- **`recoverLiveBarUpdates`** replays a bounded gap as authoritative finals after
+  a disconnect; a recovered update must be a final.
+
 ### Tiger
 
 Tiger is registered as `TG:` and futures-only. `TigerProvider` uses an injected
@@ -545,8 +585,7 @@ checked immediately before and after, not during, an in-flight SDK call.
 > credentialed contract resolution, quote/history response, entitlement,
 > demo/live order, cancellation, or fill was validated by this audit. The data
 > and execution adapters are not sandbox- or production-approved. See the
-> [pinelive forward guide](../../docs/pinelive.md#paper-and-tiger) and permanent
-> [`feat/pinelive` audit](../../docs/feat-pinelive-audit.md).
+> [pinelive forward guide](../../docs/pinelive.md#paper-and-tiger).
 
 ## License
 

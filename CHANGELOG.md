@@ -9,7 +9,7 @@ self-contained binaries (see the README). The workspace packages run from
 TypeScript source and version in lockstep with the release tag; publishing the
 libraries to npm remains a possible follow-up.
 
-## [Unreleased]
+## [0.7.0] - 2026-07-31
 
 ### Added
 
@@ -353,6 +353,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.7.0]: https://github.com/heyphat/pinestack/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/heyphat/pinestack/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/heyphat/pinestack/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/heyphat/pinestack/compare/v0.4.0...v0.5.0

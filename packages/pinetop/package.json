@@ -1,6 +1,6 @@
 {
   "name": "@heyphat/pinetop",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Terminal UI over the pinerun CLI: one page per command, flags live and editable, the report resident on screen.",
   "type": "module",
   "license": "AGPL-3.0-only",

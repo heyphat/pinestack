@@ -169,12 +169,15 @@ export function initialPanes(): Record<PageId, PaneSelection> {
     // keyboard while it has focus — `1` there is a count, not page 1 — so
     // entering it is a deliberate `tab` or `↵`, never where you simply land.
     editor: make('files'),
+    // Every command page opens on STRATEGIES, because picking the script is step
+    // one on all of them — and because a pane that is in the same place and gets
+    // focus at the same moment on six pages reads as one thing rather than six.
     backtest: make('strategies'),
-    sweep: make('axes'),
-    walkforward: make('config'),
-    scan: make('universe'),
-    portfolio: make('sleeves'),
-    compare: make('config'),
+    sweep: make('strategies'),
+    walkforward: make('strategies'),
+    scan: make('strategies'),
+    portfolio: make('strategies'),
+    compare: make('strategies'),
     trades: make('ledger'),
   };
 }

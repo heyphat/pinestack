@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { App } from '../src/app.js';
-import { PAGES, type PageId } from '../src/flags/schema.js';
+import { COMMANDS, PAGES, type PageId } from '../src/flags/schema.js';
+import { cachedScripts } from '../src/scripts.js';
 import { BINDINGS } from '../src/keymap.js';
 import { hiddenFlagCount, isRunRow, runRowCount, visibleFlags } from '../src/pages/config-pane.js';
 import { composeArgv } from '../src/flags/model.js';
@@ -1109,5 +1110,76 @@ describe('workflow hand-offs (§3 G3)', () => {
     app.onKey({ name: 'enter' });
     expect(state.page).toBe('backtest');
     expect(state.flags.backtest.values['symbol']).toBe('BTCUSDT');
+  });
+});
+
+describe('the STRATEGIES pane, on every command page', () => {
+  const list = cachedScripts();
+
+  test('discovery found the project’s examples, so the rest of this block means something', () => {
+    expect(list.length).toBeGreaterThan(2);
+  });
+
+  test('every command page draws it, and TRADES — which has no command — does not', () => {
+    for (const command of COMMANDS) {
+      state.page = command;
+      expect(screenText(makeApp(state)), command).toContain('STRATEGIES');
+    }
+    state.page = 'trades';
+    expect(screenText(makeApp(state))).not.toContain('STRATEGIES');
+  });
+
+  test('it is first in the focus ring, and each page opens on it', () => {
+    for (const command of COMMANDS) {
+      state.page = command;
+      expect(makeApp(state).page.panes(state)[0], command).toBe('strategies');
+      expect(state.panes[command].focus, command).toBe('strategies');
+    }
+  });
+
+  test('↵ loads the selection as that command’s own script argument', () => {
+    for (const command of COMMANDS) {
+      state.page = command;
+      state.flags[command].scripts = [];
+      state.panes[command].focus = 'strategies';
+      state.panes[command].cursor['strategies'] = 1;
+      makeApp(state).onKey({ name: 'enter' });
+      // Not BACKTEST's — the point of the change is that each page loads its own.
+      expect(state.flags[command].scripts[0], command).toBe(list[1]!.path);
+    }
+  });
+
+  test('compare fills A, then B, then keeps replacing A', () => {
+    state.page = 'compare';
+    state.flags.compare.scripts = [];
+    state.panes.compare.focus = 'strategies';
+    const app = makeApp(state);
+
+    state.panes.compare.cursor['strategies'] = 0;
+    app.onKey({ name: 'enter' });
+    expect(state.flags.compare.scripts).toEqual([list[0]!.path]);
+
+    state.panes.compare.cursor['strategies'] = 1;
+    app.onKey({ name: 'enter' });
+    expect(state.flags.compare.scripts).toEqual([list[0]!.path, list[1]!.path]);
+
+    state.panes.compare.cursor['strategies'] = 2;
+    app.onKey({ name: 'enter' });
+    expect(state.flags.compare.scripts).toEqual([list[2]!.path, list[1]!.path]);
+  });
+
+  test('compare marks the two slots A and B rather than with one bar', () => {
+    state.page = 'compare';
+    state.flags.compare.scripts = [list[0]!.path, list[1]!.path];
+    const text = screenText(makeApp(state));
+    expect(text).toContain(`A${list[0]!.label}`);
+    expect(text).toContain(`B${list[1]!.label}`);
+  });
+
+  test('the loaded script keeps its marker when the cursor is elsewhere', () => {
+    state.page = 'sweep';
+    state.flags.sweep.scripts = [list[0]!.path];
+    state.panes.sweep.cursor['strategies'] = 2;
+    expect(screenText(makeApp(state))).toContain(`▌${list[0]!.label}`);
   });
 });

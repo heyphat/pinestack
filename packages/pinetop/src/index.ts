@@ -191,6 +191,14 @@ export {
   filterPalette,
   paletteItems,
 } from './overlays.js';
+export type { StrategiesPaneOptions } from './pages/strategies-pane.js';
+export {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+} from './pages/strategies-pane.js';
 export {
   configRowCount,
   drawConfigPane,

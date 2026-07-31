@@ -24,9 +24,16 @@ import { scriptLabel } from '../scripts.js';
 import type { AppState } from '../state.js';
 import type { WalkforwardJson, WalkforwardWindowJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
-import { clampCursor, columns, windowFor, type Page, type PageContext } from './page.js';
+import {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+} from './strategies-pane.js';
+import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = ['config', 'windows', 'verdict'] as const;
+const PANES = [STRATEGIES_PANE, 'config', 'windows', 'verdict'] as const;
 
 export function report(state: AppState): WalkforwardJson | undefined {
   if (state.run?.command !== 'walkforward' || state.run.status !== 'ok') return undefined;
@@ -240,6 +247,7 @@ export const walkforwardPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === STRATEGIES_PANE) return strategyRowCount();
     if (paneId === 'config') return configRowCount(state, 'walkforward');
     if (paneId === 'windows') return windowRows(state).length;
     return 0;
@@ -262,6 +270,8 @@ export const walkforwardPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.walkforward.focus === STRATEGIES_PANE)
+      return loadStrategy(state, 'walkforward');
     // ↵ on a window loads its winner into BACKTEST: the natural next question
     // after "which fold won" is "what did that fold actually do".
     if (state.panes.walkforward.focus !== 'windows') return undefined;
@@ -297,7 +307,12 @@ export const walkforwardPage: Page = {
       Rect,
     ];
 
-    drawConfigPane(ctx, leftCol, { command: 'walkforward', actions: ['RUN r', 'ASK a', ': cmd'] });
+    const [stratRect, configRect] = rows(leftCol, [strategiesHeight(leftCol.h)]) as [Rect, Rect];
+    drawStrategiesPane(ctx, stratRect, { command: 'walkforward' });
+    drawConfigPane(ctx, configRect, {
+      command: 'walkforward',
+      actions: ['RUN r', 'ASK a', ': cmd'],
+    });
     drawWindows(ctx, midCol);
     if (railW > 0) drawVerdict(ctx, rightCol);
   },

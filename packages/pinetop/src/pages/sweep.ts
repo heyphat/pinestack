@@ -28,9 +28,16 @@ import type { AppState } from '../state.js';
 import { buildHeatmap, heatmapLegend } from '../views/heatmap.js';
 import type { SweepJson, SweepRankedJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
+import {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+} from './strategies-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = ['axes', 'config', 'ranked', 'heatmap'] as const;
+const PANES = [STRATEGIES_PANE, 'axes', 'config', 'ranked', 'heatmap'] as const;
 
 export function report(state: AppState): SweepJson | undefined {
   if (state.run?.command !== 'sweep' || state.run.status !== 'ok') return undefined;
@@ -267,6 +274,7 @@ export const sweepPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === STRATEGIES_PANE) return strategyRowCount();
     if (paneId === 'config') return configRowCount(state, 'sweep');
     if (paneId === 'ranked') return rankedRows(state).length;
     return 0;
@@ -291,6 +299,7 @@ export const sweepPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.sweep.focus === STRATEGIES_PANE) return loadStrategy(state, 'sweep');
     // ↵ on a ranked row loads that combo into BACKTEST as fixed inputs — the
     // sweep → backtest deep-dive edge (§2, §4.2).
     if (state.panes.sweep.focus !== 'ranked') return undefined;
@@ -322,9 +331,13 @@ export const sweepPage: Page = {
 
     const [top, bottom] = rows(body, [body.h - heatH]) as [Rect, Rect];
     const [leftCol, rankedCol] = columns(top, [leftW]) as [Rect, Rect];
-    const axesH = Math.min(9, Math.max(5, Math.floor(leftCol.h * 0.42)));
-    const [axesRect, configRect] = rows(leftCol, [axesH]) as [Rect, Rect];
+    // Three panes share the left column here, so the axes take their share of
+    // what is left after STRATEGIES rather than of the whole column.
+    const stratH = strategiesHeight(leftCol.h);
+    const axesH = Math.min(9, Math.max(5, Math.floor((leftCol.h - stratH) * 0.42)));
+    const [stratRect, axesRect, configRect] = rows(leftCol, [stratH, axesH]) as [Rect, Rect, Rect];
 
+    drawStrategiesPane(ctx, stratRect, { command: 'sweep' });
     drawAxes(ctx, axesRect);
     drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'WF w', 'ASK a'] });
     drawRanked(ctx, rankedCol);

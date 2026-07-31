@@ -246,6 +246,19 @@ correctness bug, not a style choice.
   EFF and OOS EQUITY on WALKFORWARD, the EQUITY sparkline on SWEEP.
 - The config pane is always the left column; the primary result is the wide middle; a
   summary/verdict pane is the right rail; full-width tables sit beneath.
+- **STRATEGIES sits above the config pane on all six command pages**, at the same size and
+  first in the focus ring. It started on BACKTEST alone, which made choosing a script a
+  BACKTEST-only verb: sweeping a different strategy meant going to page 2, loading it, and
+  coming back. Every command takes a `.pine` as its first positional argument, so every
+  command page owes you a way to pick one. One renderer (`strategies-pane.ts`), for the same
+  reason the config pane is one renderer — a page must not invent its own dialect for a thing
+  all of them do. TRADES has none, because it has no command and a script picker there would
+  imply it could run something (§4.2.b); EDITOR's FILES pane is the sibling, where `↵` opens
+  a buffer instead of loading an argument.
+- **`compare` marks its two slots `A` and `B`, and `↵` fills the first free one, then keeps
+  replacing A.** That is the order the work happens in: pick one, pick the other, then keep
+  swapping the left-hand side. The markers make the state visible, and the config pane can
+  still set either slot directly (§10.2).
 
 ### 4.5 The AI layer
 

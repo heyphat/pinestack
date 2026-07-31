@@ -128,6 +128,12 @@ One tab per command, numbered in workflow order.
 | 7   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
 | 8   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
 
+All six command pages carry the same **STRATEGIES** pane above their config, first
+in the focus ring, because all six take a `.pine` as their first argument — `↵`
+loads the selected script into that page's command. `compare` takes two, so it
+marks them `A` and `B`, and `↵` fills the first free slot before it starts
+replacing A. TRADES has no picker: it has no command of its own.
+
 The workflow between them is navigation, not documentation: `w` on SWEEP carries
 the grid into WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed
 inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it. EDITOR is

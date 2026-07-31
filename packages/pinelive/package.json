@@ -1,6 +1,6 @@
 {
   "name": "@heyphat/pinelive",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "description": "Forward runner and broker protocol for mirroring piner strategy positions into paper accounts or Tiger through the official OpenAPI SDK.",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -22,9 +22,6 @@
     "broker",
     "trading"
   ],
-  "bin": {
-    "pinelive": "./src/cli.ts"
-  },
   "exports": {
     ".": {
       "types": "./src/index.ts",

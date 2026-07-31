@@ -112,7 +112,12 @@ export type {
   TargetSchedulerOptions,
   CircuitBreakerSnapshot,
 } from './core/scheduler.js';
-export { CircuitBreaker, TargetScheduler, SerializedTargetScheduler } from './core/scheduler.js';
+export {
+  CircuitBreaker,
+  DEFAULT_DECISION_RETENTION_BARS,
+  TargetScheduler,
+  SerializedTargetScheduler,
+} from './core/scheduler.js';
 export type {
   ExecutionLease,
   ExecutionLeaseSnapshot,

@@ -65,6 +65,9 @@ export function createRunInstrumentBinding(
       throw new InstrumentBindingError('broker metadata is missing pointValue');
     compare('pointValue', brokerInstrument.pointValue, resolved.pointValue);
   }
+  // The broker instrument's pointValue scales PnL even when the data provider reports none,
+  // so the binding must attest whichever value execution will actually use.
+  const attestedPointValue = resolved.pointValue ?? brokerInstrument.pointValue;
   if (
     resolved.exchange &&
     brokerInstrument.exchange &&
@@ -82,7 +85,7 @@ export function createRunInstrumentBinding(
     qtyStep: resolved.qtyStep,
     minOrderQty: resolved.minOrderQty,
     mintick: resolved.mintick,
-    pointValue: resolved.pointValue,
+    pointValue: attestedPointValue,
     exchange: resolved.exchange,
     expiry: resolved.expiry,
     brokerId: broker.id,

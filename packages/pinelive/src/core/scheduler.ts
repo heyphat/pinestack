@@ -1,6 +1,12 @@
 import { BrokerError, submitFailureCertainty } from './broker.js';
 import type { BrokerErrorCode, ExactOrderLookupResult } from './broker.js';
 import type { RunInstrumentBinding } from './binding.js';
+import {
+  DEFAULT_MAX_CONSECUTIVE_EXECUTION_ERRORS,
+  DEFAULT_MAX_ORDERS_PER_BAR,
+  DEFAULT_MAX_ORDERS_PER_MINUTE,
+  DEFAULT_MAX_TARGET_CHANGES_PER_BAR,
+} from './config.js';
 import type { ExecutionLease } from './lease.js';
 import {
   SequencedLedger,
@@ -41,6 +47,12 @@ import {
 } from './recovery.js';
 import type { Fill, OrderRequest, Position } from './types.js';
 
+/**
+ * Execution safety limits. Every limit defaults to the shared config-default value rather than
+ * "unlimited", so a bare `TargetScheduler` is fail-closed out of the box. `maxTargetsPerBar`
+ * counts only evaluations that were durably ACCEPTED for broker admission; journal-only skips
+ * (forming revisions, compute-only decisions, cadence skips) never consume the budget.
+ */
 export interface SchedulerLimits {
   /** Minimum start-to-start spacing between complete mirror reconciliations. Default 0. */
   minIntervalMs?: number;
@@ -49,6 +61,9 @@ export interface SchedulerLimits {
   maxAttemptsPerMinute?: number;
   maxConsecutiveErrors?: number;
 }
+
+/** Finalized per-bar decision state retained in memory for duplicate detection. */
+export const DEFAULT_DECISION_RETENTION_BARS = 512;
 
 export interface TargetEvaluation {
   target: number;
@@ -96,6 +111,13 @@ export interface TargetSchedulerOptions {
   lease?: ExecutionLease;
   /** The shared writer already contains the active acquired lease row. */
   leaseAlreadyRecorded?: boolean;
+  /**
+   * Finalized bars per binding whose decision state stays in memory for duplicate detection.
+   * Older bars are pruned once their stream has moved on; a stale duplicate of a pruned decision
+   * is rejected fail-closed by the chart-update admission gate instead of resolving 'duplicate'.
+   * The durable ledger is never pruned. Default {@link DEFAULT_DECISION_RETENTION_BARS}.
+   */
+  retainBars?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   decisionIdFactory?: (evaluation: Readonly<TargetEvaluation>) => string;
@@ -235,6 +257,14 @@ export class TargetScheduler {
   private readonly activeChartUpdates = new Map<string, RecoveredChartUpdate>();
   private readonly restartInterruptedChartStreams = new Set<string>();
   private readonly eventIdToDecisionId = new Map<string, string>();
+  /** Reverse index for bounded retention: everything one bar owns, prunable as one unit. */
+  private readonly barIndex = new Map<
+    string,
+    { decisionIds: Set<string>; eventIds: Set<string>; clientIds: Set<string> }
+  >();
+  /** Ascending finalizable bar opens per binding, drained by pruneFinalizedBars. */
+  private readonly bindingBars = new Map<string, number[]>();
+  private readonly retainBars: number;
   private attemptTimes: number[] = [];
   private intakeTail: Promise<void> = Promise.resolve();
   private lifecycleTail: Promise<void> = Promise.resolve();
@@ -259,6 +289,8 @@ export class TargetScheduler {
       options.sleep ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.limits = normalizeLimits(options.limits);
+    this.retainBars = options.retainBars ?? DEFAULT_DECISION_RETENTION_BARS;
+    positiveLimit(this.retainBars, 'retainBars');
     const recovery = options.recovery;
     if (options.binding && recovery && !recovery.binding && recovery.decisions.size > 0)
       throw new RangeError('scheduler cannot add a binding after recovered unbound evaluations');
@@ -319,6 +351,8 @@ export class TargetScheduler {
     unresolvedLogicalOrderIds: string[];
     activeChartUpdates: RecoveredChartUpdate[];
     nextSequence: number;
+    retainedDecisions: number;
+    retainedBars: number;
   } {
     return {
       breaker: this.breaker.snapshot,
@@ -328,6 +362,8 @@ export class TargetScheduler {
         structuredClone(update),
       ),
       nextSequence: this.writer.nextSequence,
+      retainedDecisions: this.decisions.size,
+      retainedBars: this.barIndex.size,
     };
   }
 
@@ -877,8 +913,21 @@ export class TargetScheduler {
     let newCounter: RecoveredBarCounters | undefined;
     if (!existing) {
       newCounter = this.barCounters(item);
-      if (newCounter.targets >= this.limits.maxTargetsPerBar) {
+      // Admission counts only durably ACCEPTED evaluations. Journal-only skips (forming
+      // revisions, compute-only decisions) advance the targetOrdinal but never consume budget,
+      // so a bar's authoritative final cannot be starved by its own forming revisions.
+      if ((newCounter.admitted ?? 0) >= this.limits.maxTargetsPerBar) {
         await this.appendSkipped(item, 'target-limit');
+        if (item.update.authoritativeFinal && !this.breaker.snapshot.latched) {
+          // Dropping the only executable update of a bar must never be silent: it means the
+          // mirrored position stops tracking the strategy while the run continues.
+          await this.latchBreaker(
+            'target-limit',
+            item,
+            undefined,
+            'authoritative final was refused by the per-bar target limit',
+          );
+        }
         item.resolve({ decisionId: item.decisionId, status: 'skipped', reason: 'target-limit' });
         return;
       }
@@ -914,6 +963,7 @@ export class TargetScheduler {
         targetOrdinal: newCounter!.targets + 1,
       })) as EvaluationAcceptedEventV3;
       newCounter!.targets++;
+      newCounter!.admitted = (newCounter!.admitted ?? 0) + 1;
       item.accepted = accepted;
       this.decisions.set(item.decisionId, {
         accepted,
@@ -1017,6 +1067,7 @@ export class TargetScheduler {
           currentIntent = { intent, attempts: [], results: [], resolutions: [] };
           this.unresolved.set(expectedLogicalId, currentIntent);
           this.clientMappings.set(clientId, expectedLogicalId);
+          this.indexBarOwnership(item.context.bindingId, item.context.barTime, { clientId });
           this.decisions.get(item.decisionId)!.logicalOrderIds.push(expectedLogicalId);
         },
         onOrderAttempt: async (event) => {
@@ -1175,7 +1226,10 @@ export class TargetScheduler {
             };
           }
           if (recoveredOutcome.action === 'order') {
-            if (recoveredOutcome.actualAfter === recoveredOutcome.target) {
+            if (
+              recoveredOutcome.actualAfter != null &&
+              nearlyEqual(recoveredOutcome.actualAfter, recoveredOutcome.target)
+            ) {
               await this.completeEvaluation(item, recoveredOutcome);
               this.breaker.recordSuccess();
               return {
@@ -1411,7 +1465,7 @@ export class TargetScheduler {
           outcome,
         };
       }
-      if (outcome.actualAfter === outcome.target) {
+      if (nearlyEqual(outcome.actualAfter, outcome.target)) {
         await this.completeEvaluation(item, outcome);
         this.breaker.recordSuccess();
         return { decisionId: item.decisionId, status: 'completed', outcome };
@@ -1641,6 +1695,12 @@ export class TargetScheduler {
       throw new RangeError('scheduled context does not match the durable instrument binding');
   }
 
+  /**
+   * Chart-update admission contract (fail-closed by design): once a bar has an authoritative
+   * final, any later update for the same or an older bar time on that stream is rejected with a
+   * RangeError — including a provider re-delivering a corrected closed bar. Callers own benign
+   * upstream corrections; the scheduler never silently re-trades or re-journals a finalized bar.
+   */
   private assertCanAdmitChartUpdate(item: PendingEvaluation): void {
     const priorDecisionId = this.eventIdToDecisionId.get(item.update.eventId);
     if (priorDecisionId)
@@ -1687,11 +1747,76 @@ export class TargetScheduler {
     const key = chartStreamKey(event.bindingId, event.timeframe);
     this.latestChartUpdates.set(key, update);
     this.eventIdToDecisionId.set(event.update.eventId, event.decisionId);
+    this.indexBarOwnership(event.bindingId, event.barTime, {
+      decisionId: event.decisionId,
+      eventId: event.update.eventId,
+    });
     if (event.update.kind === 'intrabar' && !event.update.authoritativeFinal) {
       this.activeChartUpdates.set(key, update);
     } else {
       this.activeChartUpdates.delete(key);
       this.restartInterruptedChartStreams.delete(key);
+      this.pruneFinalizedBars(event.bindingId);
+    }
+  }
+
+  private indexBarOwnership(
+    bindingId: string,
+    barTime: number,
+    owned: { decisionId?: string; eventId?: string; clientId?: string },
+  ): void {
+    const key = ledgerBarKey(bindingId, barTime);
+    let entry = this.barIndex.get(key);
+    if (!entry) {
+      entry = { decisionIds: new Set(), eventIds: new Set(), clientIds: new Set() };
+      this.barIndex.set(key, entry);
+      const bars = this.bindingBars.get(bindingId) ?? [];
+      if (!this.bindingBars.has(bindingId)) this.bindingBars.set(bindingId, bars);
+      if (bars.length === 0 || barTime > bars[bars.length - 1]!) bars.push(barTime);
+      else if (!bars.includes(barTime)) {
+        bars.push(barTime);
+        bars.sort((left, right) => left - right);
+      }
+    }
+    if (owned.decisionId) entry.decisionIds.add(owned.decisionId);
+    if (owned.eventId) entry.eventIds.add(owned.eventId);
+    if (owned.clientId) entry.clientIds.add(owned.clientId);
+  }
+
+  /**
+   * Bounded in-memory retention (durable rows are never touched). Keeps the newest
+   * `retainBars` finalized bars per binding for duplicate detection; anything older is
+   * unreachable through the chart-update admission gate, which rejects stale bar times
+   * fail-closed. A bar is retained while any of its logical orders is unresolved or its
+   * position uncertainty has not been reset.
+   */
+  private pruneFinalizedBars(bindingId: string): void {
+    const bars = this.bindingBars.get(bindingId);
+    if (!bars) return;
+    while (bars.length > this.retainBars) {
+      const oldest = bars[0]!;
+      const key = ledgerBarKey(bindingId, oldest);
+      const entry = this.barIndex.get(key);
+      if (entry) {
+        for (const decisionId of entry.decisionIds) {
+          const decision = this.decisions.get(decisionId);
+          if (!decision) continue;
+          if (decision.logicalOrderIds.some((id) => this.unresolved.has(id))) return;
+          const uncertainty = decision.latestPositionUncertaintySequence;
+          if (
+            uncertainty != null &&
+            (this.latestBreakerResetSequence == null ||
+              this.latestBreakerResetSequence <= uncertainty)
+          )
+            return;
+        }
+        for (const decisionId of entry.decisionIds) this.decisions.delete(decisionId);
+        for (const eventId of entry.eventIds) this.eventIdToDecisionId.delete(eventId);
+        for (const clientId of entry.clientIds) this.clientMappings.delete(clientId);
+        this.barIndex.delete(key);
+      }
+      this.perBar.delete(key);
+      bars.shift();
     }
   }
 
@@ -1741,9 +1866,23 @@ export class TargetScheduler {
       this.activeChartUpdates.set(key, structuredClone(value));
       this.restartInterruptedChartStreams.add(key);
     }
+    const logicalToClientId = new Map<string, string>();
+    for (const [clientId, logicalId] of recovery.clientIdToLogicalOrderId)
+      logicalToClientId.set(logicalId, clientId);
     for (const [decisionId, decision] of recovery.decisions) {
       const identity = decision.accepted ?? decision.skipped[0];
-      if (identity) this.eventIdToDecisionId.set(identity.update.eventId, decisionId);
+      if (identity) {
+        this.eventIdToDecisionId.set(identity.update.eventId, decisionId);
+        this.indexBarOwnership(identity.bindingId, identity.barTime, {
+          decisionId,
+          eventId: identity.update.eventId,
+        });
+        for (const logicalId of decision.logicalOrderIds) {
+          const clientId = logicalToClientId.get(logicalId);
+          if (clientId)
+            this.indexBarOwnership(identity.bindingId, identity.barTime, { clientId });
+        }
+      }
     }
     this.attemptTimes = [...recovery.rollingMinuteAttemptTimes];
     this.latestBreakerResetSequence = recovery.latestBreakerResetSequence;
@@ -2091,12 +2230,14 @@ function cloneOrder(order: OrderRequest): OrderRequest {
 }
 
 function normalizeLimits(limits: SchedulerLimits = {}): NormalizedLimits {
+  // Fail-closed defaults: an unconfigured scheduler gets the same safety rails as the
+  // intrabar server rather than unlimited execution.
   const value = {
     minIntervalMs: limits.minIntervalMs ?? 0,
-    maxTargetsPerBar: limits.maxTargetsPerBar ?? Number.MAX_SAFE_INTEGER,
-    maxIntentsPerBar: limits.maxIntentsPerBar ?? Number.MAX_SAFE_INTEGER,
-    maxAttemptsPerMinute: limits.maxAttemptsPerMinute ?? Number.MAX_SAFE_INTEGER,
-    maxConsecutiveErrors: limits.maxConsecutiveErrors ?? Number.MAX_SAFE_INTEGER,
+    maxTargetsPerBar: limits.maxTargetsPerBar ?? DEFAULT_MAX_TARGET_CHANGES_PER_BAR,
+    maxIntentsPerBar: limits.maxIntentsPerBar ?? DEFAULT_MAX_ORDERS_PER_BAR,
+    maxAttemptsPerMinute: limits.maxAttemptsPerMinute ?? DEFAULT_MAX_ORDERS_PER_MINUTE,
+    maxConsecutiveErrors: limits.maxConsecutiveErrors ?? DEFAULT_MAX_CONSECUTIVE_EXECUTION_ERRORS,
   };
   if (!Number.isFinite(value.minIntervalMs) || value.minIntervalMs < 0)
     throw new RangeError('minIntervalMs must be a non-negative finite number');
@@ -2183,21 +2324,32 @@ function stableDecisionId(
   return stableHash(source);
 }
 
+const FNV64_OFFSET = 0xcbf29ce484222325n;
+const FNV64_PRIME = 0x100000001b3n;
+const FNV64_MASK = 0xffffffffffffffffn;
+
+/**
+ * 64-bit FNV-1a for fallback decision/event identity. A collision is fail-closed (it trips
+ * `assertScheduledDecisionMatches`), so the width only bounds availability, not correctness;
+ * 64 bits keeps the birthday bound far beyond any realistic decision count.
+ */
 function stableHash(source: string): string {
-  let hash = 2166136261;
+  let hash = FNV64_OFFSET;
   for (let index = 0; index < source.length; index++) {
-    hash ^= source.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+    hash ^= BigInt(source.charCodeAt(index));
+    hash = (hash * FNV64_PRIME) & FNV64_MASK;
   }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  return hash.toString(16).padStart(16, '0');
 }
 
 function canonical(value: unknown): string {
   if (value === undefined) return 'undefined';
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'undefined';
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  // Codepoint order, never locale order: this string feeds durable identity hashes, so the
+  // serialization must not depend on the runtime's ICU data.
   return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([key, member]) => `${JSON.stringify(key)}:${canonical(member)}`)
     .join(',')}}`;
 }

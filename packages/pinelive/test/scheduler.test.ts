@@ -2327,6 +2327,7 @@ test('recovery exposes interrupted discontinuity state and rejects impossible tr
   expect(recoverLedger(memory.events).perBar.get(`${binding.id}:20`)).toEqual({
     targets: 1,
     intents: 0,
+    admitted: 1,
   });
 });
 

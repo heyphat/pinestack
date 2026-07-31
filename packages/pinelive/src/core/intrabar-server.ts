@@ -49,7 +49,12 @@ import {
 } from './ledger.js';
 import { PositionMirror } from './mirror.js';
 import { recoverLedger, type LedgerRecoveryState, type RecoveredBarCounters } from './recovery.js';
-import { TargetScheduler, type ScheduledTargetResult, type TargetEvaluation } from './scheduler.js';
+import {
+  DEFAULT_DECISION_RETENTION_BARS,
+  TargetScheduler,
+  type ScheduledTargetResult,
+  type TargetEvaluation,
+} from './scheduler.js';
 import type { Account, Position } from './types.js';
 import { isMarkableBroker } from '../brokers/paper.js';
 
@@ -397,6 +402,12 @@ export async function runIntrabarServer(
         if (scheduled?.status === 'unknown') {
           options.onLog?.(`decision ${evaluation.decisionId} has an unknown broker outcome`);
         }
+        if (scheduled?.status === 'skipped' && scheduled.reason === 'target-limit') {
+          options.onLog?.(
+            `decision ${evaluation.decisionId} was refused by the per-bar target limit` +
+              (evaluation.finalCommit ? '; the execution breaker is now latched' : ''),
+          );
+        }
         evaluationCount++;
         latestDecision = decisionSummary(evaluation);
         await options.onEvaluation?.(evaluation);
@@ -674,6 +685,9 @@ class ComputeDecisionJournal {
   readonly decisionIds = new Set<string>();
   initialized = false;
   private leaseRecorded: boolean;
+  /** Bounded retention (in-memory only; the durable ledger is never pruned). */
+  private readonly barDecisions = new Map<string, Set<string>>();
+  private readonly barTimes: number[] = [];
 
   constructor(private readonly options: ComputeDecisionJournalOptions) {
     this.leaseRecorded = options.leaseRecorded;
@@ -715,7 +729,8 @@ class ComputeDecisionJournal {
     if (!this.initialized) throw new Error('compute journal is not initialized');
     if (this.decisionIds.has(evaluation.decisionId!)) return;
     const { writer, binding, strategyId } = this.options;
-    const key = `${binding.id}:${evaluation.context.barTime}`;
+    const barTime = evaluation.context.barTime;
+    const key = `${binding.id}:${barTime}`;
     const counter = this.perBar.get(key) ?? { targets: 0, intents: 0 };
     this.perBar.set(key, counter);
     await writer.append({
@@ -727,6 +742,30 @@ class ComputeDecisionJournal {
     });
     counter.targets++;
     this.decisionIds.add(evaluation.decisionId!);
+    let owned = this.barDecisions.get(key);
+    if (!owned) {
+      owned = new Set();
+      this.barDecisions.set(key, owned);
+      if (this.barTimes.length === 0 || barTime > this.barTimes[this.barTimes.length - 1]!)
+        this.barTimes.push(barTime);
+      else if (!this.barTimes.includes(barTime)) {
+        this.barTimes.push(barTime);
+        this.barTimes.sort((left, right) => left - right);
+      }
+    }
+    owned.add(evaluation.decisionId!);
+    if (evaluation.update?.authoritativeFinal) this.prune();
+  }
+
+  /** Keep the newest DEFAULT_DECISION_RETENTION_BARS bars of dedup state in memory. */
+  private prune(): void {
+    while (this.barTimes.length > DEFAULT_DECISION_RETENTION_BARS) {
+      const oldest = this.barTimes.shift()!;
+      const key = `${this.options.binding.id}:${oldest}`;
+      for (const decisionId of this.barDecisions.get(key) ?? []) this.decisionIds.delete(decisionId);
+      this.barDecisions.delete(key);
+      this.perBar.delete(key);
+    }
   }
 
   async stop(): Promise<void> {

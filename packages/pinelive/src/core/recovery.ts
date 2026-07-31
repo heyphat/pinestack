@@ -33,8 +33,11 @@ export class LedgerRecoveryError extends Error {
 }
 
 export interface RecoveredBarCounters {
+  /** Durable evaluation identities (accepted AND journal-only skips); drives targetOrdinal. */
   targets: number;
   intents: number;
+  /** Evaluations durably ACCEPTED for broker admission; drives maxTargetsPerBar. */
+  admitted?: number;
 }
 
 export interface RecoveredIntent {
@@ -327,6 +330,7 @@ export function assertLedgerEventV3(
           'position-unknown',
           'submission-unknown',
           'recovery-unresolved',
+          'target-limit',
           'operator',
         ].includes(String(event.reason))
       )
@@ -483,6 +487,7 @@ export function recoverLedger(
         const counter = counters(perBar, event.bindingId, event.barTime);
         if (event.targetOrdinal !== counter.targets + 1) fail('targetOrdinal is out of order');
         counter.targets++;
+        counter.admitted = (counter.admitted ?? 0) + 1;
         decisions.set(event.decisionId, {
           accepted: event,
           skipped: [],

@@ -212,7 +212,12 @@ export class PaperBroker implements Broker, MarkableBroker {
         throw this.rememberRejection(
           order,
           fingerprint,
-          'paper: resting limit orders are not simulated; limit is not marketable at the mark',
+          `paper: resting limit orders are not simulated; ${order.side} limit ` +
+            `${order.limitPrice} is not marketable at mark ${state.mark.price}` +
+            (isTickAligned(state.mark.price, instrument.mintick)
+              ? ''
+              : ' (the mark itself is not tick-aligned: with limit orders, off-grid reference' +
+                ' data makes every zero-offset limit non-marketable)'),
         );
     }
     const rejection = this.options.reject?.(order);

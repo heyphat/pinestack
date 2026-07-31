@@ -303,8 +303,19 @@ function sameBar(left: Readonly<Bar>, right: Readonly<Bar>): boolean {
     left.high === right.high &&
     left.low === right.low &&
     left.close === right.close &&
-    left.volume === right.volume
+    volumesEquivalent(left.volume, right.volume)
   );
+}
+
+/**
+ * OHLC values are selected, so they compare exactly; volume is SUMMED, and floating-point
+ * summation is order-sensitive, so a provider that totalled the same children differently can
+ * disagree in the last bits. Only relative noise is tolerated — a real conflict (a missing or
+ * revised child) moves volume by far more than 1e-9 of its magnitude.
+ */
+function volumesEquivalent(left: number, right: number): boolean {
+  if (left === right) return true;
+  return Math.abs(left - right) <= Math.max(Math.abs(left), Math.abs(right)) * 1e-9;
 }
 
 function malformed(message: string, details?: Readonly<Record<string, unknown>>): MarketDataError {

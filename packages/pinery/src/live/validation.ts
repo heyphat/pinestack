@@ -329,8 +329,14 @@ function sameBar(left: Readonly<Bar>, right: Readonly<Bar>): boolean {
     left.high === right.high &&
     left.low === right.low &&
     left.close === right.close &&
-    left.volume === right.volume
+    volumesEquivalent(left.volume, right.volume)
   );
+}
+
+/** Volume may be a float SUM upstream, so equivalent finals tolerate relative rounding noise. */
+function volumesEquivalent(left: number, right: number): boolean {
+  if (left === right) return true;
+  return Math.abs(left - right) <= Math.max(Math.abs(left), Math.abs(right)) * 1e-9;
 }
 
 function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown>> {

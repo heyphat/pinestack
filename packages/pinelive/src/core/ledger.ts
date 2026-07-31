@@ -229,6 +229,8 @@ export type BreakerReasonV3 =
   | 'position-unknown'
   | 'submission-unknown'
   | 'recovery-unresolved'
+  /** An authoritative final was refused by the per-bar target limit; execution must stop loudly. */
+  | 'target-limit'
   | 'operator';
 
 export interface BreakerEventV3 extends LedgerEventBaseV3 {

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Programmable, parallel execution surface for the piner Pine Script engine \u2014 data (pinery) + orchestration (pinerun).",
+  "description": "Programmable, parallel execution surface for the piner Pine Script engine \u2014 data (pinery) + orchestration (pinerun) + a terminal UI (pinetop).",
   "license": "AGPL-3.0-only",
   "author": "Phat Huynh (heyphat)",
   "homepage": "https://github.com/heyphat/pinestack#readme",

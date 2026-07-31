@@ -25,6 +25,14 @@ threads.
 `piner` (`@heyphat/piner`) is a **peer dependency**; `@heyphat/pinery` is a
 regular dependency (used by `scan` / `sweep` to fetch history).
 
+> **Prefer to drive these commands interactively?**
+> [`pinetop`](../pinetop#readme) is a terminal UI over this CLI — one page per
+> command, the flags editable beside the report, so an edit → rerun → reread loop
+> does not mean retyping the invocation. It shells out to `pinerun … --json` and
+> reuses the chart and tearsheet builders below, so its numbers are these numbers.
+> Note that this makes the `--json` payload shapes and the exported renderers a
+> contract with a second binary: changing one is a breaking change.
+
 ## Install
 
 The `pinerun` CLI ships as a single self-contained binary — the Bun runtime, the

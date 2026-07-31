@@ -10,11 +10,15 @@ strategy into a full tearsheet, and sweep parameter grids — all off the
 deterministic piner core.
 
 This is the "terminal" layer around the engine. piner stays a pure, browser-safe
-library; pinestack adds the data and orchestration rings on top.
+library; pinestack adds the data, orchestration, and interactive rings on top.
+
+Two ways to drive it: `pinerun`, the one-shot CLI, and `pinetop`, a terminal UI
+over that CLI for when you are iterating on the same script and want the flags
+editable next to the report instead of retyped each run.
 
 ## Install
 
-The `pinerun` CLI ships as a single self-contained binary — the Bun runtime, the
+Both binaries ship as single self-contained executables — the Bun runtime, the
 piner engine, and the pinery data layer are all baked in, so there is nothing
 else to install (no Node, no Bun, no npm):
 
@@ -22,23 +26,31 @@ else to install (no Node, no Bun, no npm):
 curl -fsSL https://raw.githubusercontent.com/heyphat/pinestack/main/scripts/install.sh | sh
 ```
 
-This downloads the right binary for your platform from the
+This downloads `pinerun` and `pinetop` for your platform from the
 [latest release](https://github.com/heyphat/pinestack/releases/latest) and drops
-it in `~/.local/bin` (override with `PINERUN_INSTALL_DIR`; pin a version with
-`PINERUN_VERSION=v0.1.0`). Prebuilt targets: Linux and macOS on x64/arm64, plus a
-Windows x64 `.exe` you can download directly from the Releases page.
+them in `~/.local/bin`. Overrides: `PINESTACK_BINS` to install just one (e.g.
+`PINESTACK_BINS=pinerun`), `PINESTACK_INSTALL_DIR` for the directory,
+`PINESTACK_VERSION=v0.1.0` to pin a tag. Prebuilt targets: Linux and macOS on
+x64/arm64, plus Windows x64 `.exe` files you can download directly from the
+Releases page.
 
 ```bash
 pinerun --version
 pinerun --help
 pinerun scan --help
+
+pinetop --version        # also reports the pinerun it drives
+pinetop                  # open the TUI; everything else is configured in it
 ```
 
-Later, update in place with `pinerun upgrade` — it downloads the latest
-release's binary for your platform, verifies its checksum, and swaps the
-executable atomically (`--check` to just look).
+Later, update either in place with `pinerun upgrade` / `pinetop upgrade` — each
+downloads the latest release's binary for your platform, verifies its checksum
+against the release's `checksums.txt`, and swaps the executable atomically
+(`--check` to just look).
 
-Prefer to build it yourself? See [Getting started](#getting-started) below, then
+`pinetop` spawns `pinerun` for every number it shows, so keep both current.
+
+Prefer to build them yourself? See [Getting started](#getting-started) below, then
 `bun run build:bin --install`.
 
 ## Packages
@@ -47,6 +59,7 @@ Prefer to build it yourself? See [Getting started](#getting-started) below, then
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | [`@heyphat/pinery`](./packages/pinery)   | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache. | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                    |
 | [`@heyphat/pinerun`](./packages/pinerun) | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI) |
+| [`@heyphat/pinetop`](./packages/pinetop) | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload.   | `@heyphat/pinetop`, `pinetop` (TUI)                                         |
 
 ```
 piner            (engine — separate repo, pure, browser-safe)
@@ -54,15 +67,21 @@ piner            (engine — separate repo, pure, browser-safe)
   │   └── @heyphat/pinery   depends on piner (implements DataFeed / Bar)
   │            ▲
   └────────────┴── @heyphat/pinerun   depends on piner + pinery (orchestrates)
-                       ▲
+                       ▲        ▲
+                       │        └── @heyphat/pinetop   spawns the pinerun CLI
+                       │                               (and reuses its renderers)
                        └── consumers: the pinerun CLI, a charting frontend, your scripts
 ```
 
-`piner` is declared a **peer dependency** of both packages, so there is only ever
-one engine copy in a consumer's tree. The `@heyphat/pinery` and
-`@heyphat/pinerun` names describe workspace/API entry points; pinestack's
-release artifact is the self-contained `pinerun` binary above, not separately
-published npm workspace packages.
+`piner` is declared a **peer dependency** of all three packages, so there is only
+ever one engine copy in a consumer's tree. The `@heyphat/pinery`,
+`@heyphat/pinerun` and `@heyphat/pinetop` names describe workspace/API entry
+points; pinestack's release artifacts are the self-contained `pinerun` and
+`pinetop` binaries above, not separately published npm workspace packages.
+
+`pinetop` deliberately does **not** link the engine: it builds argv, spawns
+`pinerun … --json`, and renders the result. That keeps one execution path, so the
+numbers on screen and the numbers from the printed command cannot disagree.
 
 ## Repository layout
 
@@ -70,7 +89,7 @@ published npm workspace packages.
 pinestack/
 ├── package.json              workspaces root (packages/*)
 ├── tsconfig.base.json        shared compiler options (strict, ES2022, bundler res)
-├── tsconfig.json             solution file: references both packages (tsc -b)
+├── tsconfig.json             solution file: references every package (tsc -b)
 ├── examples/
 │   ├── rsi.pine              sample indicator used by the scan demo
 │   ├── sma-cross-param.pine  MA crossover, parameterized (scan + sweep demo)
@@ -96,27 +115,50 @@ pinestack/
     │   │       ├── static.ts      in-memory provider + barsFromCsv
     │   │       └── csv.ts         local CSV-file provider (Node-only, /node entry)
     │   └── README.md
-    └── pinerun/              @heyphat/pinerun — orchestration layer
+    ├── pinerun/              @heyphat/pinerun — orchestration layer
+    │   ├── src/
+    │   │   ├── index.ts          browser-safe barrel
+    │   │   ├── job.ts            Job model
+    │   │   ├── result.ts         RunResult contract
+    │   │   ├── hash.ts           jobHash — determinism key
+    │   │   ├── execute.ts        executeJob — the pure run primitive
+    │   │   ├── runner.ts         Runner interface, fanOut, LocalRunner
+    │   │   ├── rank.ts           extractor/ranker grammar
+    │   │   ├── scan.ts           the scan fan-out
+    │   │   ├── params.ts         sweep axis grammar (cartesian input expansion)
+    │   │   ├── sweep.ts          the parameter-sweep fan-out
+    │   │   ├── backtest.ts       single-strategy deep run (tearsheet data)
+    │   │   ├── walkforward.ts    out-of-sample / walk-forward validation
+    │   │   ├── chart.ts          braille price/equity/drawdown builders
+    │   │   ├── tearsheet.ts      monthly grids, top drawdowns, histogram
+    │   │   ├── export.ts         CSV + equity/drawdown plot builders
+    │   │   ├── scaffold.ts       `init` starter-strategy source builders
+    │   │   ├── pool.ts           WorkerPoolRunner (node:worker_threads)
+    │   │   ├── worker-entry.ts   worker thread entry
+    │   │   ├── node.ts           @heyphat/pinerun/node barrel
+    │   │   └── cli.ts            the `pinerun` CLI
+    │   ├── test/
+    │   └── README.md
+    └── pinetop/              @heyphat/pinetop — interactive layer (TUI)
         ├── src/
-        │   ├── index.ts          browser-safe barrel
-        │   ├── job.ts            Job model
-        │   ├── result.ts         RunResult contract
-        │   ├── hash.ts           jobHash — determinism key
-        │   ├── execute.ts        executeJob — the pure run primitive
-        │   ├── runner.ts         Runner interface, fanOut, LocalRunner
-        │   ├── rank.ts           extractor/ranker grammar
-        │   ├── scan.ts           the scan fan-out
-        │   ├── params.ts         sweep axis grammar (cartesian input expansion)
-        │   ├── sweep.ts          the parameter-sweep fan-out
-        │   ├── backtest.ts       single-strategy deep run (tearsheet data)
-        │   ├── walkforward.ts    out-of-sample / walk-forward validation
-        │   ├── export.ts         CSV + equity/drawdown plot builders
-        │   ├── scaffold.ts       `init` starter-strategy source builders
-        │   ├── pool.ts           WorkerPoolRunner (node:worker_threads)
-        │   ├── worker-entry.ts   worker thread entry
-        │   ├── node.ts           @heyphat/pinerun/node barrel
-        │   └── cli.ts            the `pinerun` CLI
+        │   ├── index.ts          public barrel
+        │   ├── cli.ts            the `pinetop` entry point
+        │   ├── app.ts            router, event loop, the only spawn site
+        │   ├── state.ts          AppState (pages, flags, overrides, run, ask)
+        │   ├── keymap.ts         the normative keymap; `?` is generated from it
+        │   ├── terminal.ts       alt screen, raw mode, key decoding
+        │   ├── frame.ts          tab bar, breadcrumb, command line, hints
+        │   ├── overlays.ts       help, run dialog, palette, filter, ask drawer
+        │   ├── scripts.ts        .pine discovery for the STRATEGIES pane
+        │   ├── persist.ts        per-project flag state (.pinetop/)
+        │   ├── flags/            flag schema, FlagModel → argv, Pine input titles
+        │   ├── render/           cell grid, panes, tables, theme, formatters
+        │   ├── run/              spawn pinerun --json, engine log, session log
+        │   ├── views/            report JSON → renderable rows
+        │   ├── pages/            one module per page (7)
+        │   └── ask/              the {answer, proposal, action} contract
         ├── test/
+        ├── design.md            the design document behind it
         └── README.md
 ```
 
@@ -175,6 +217,13 @@ pot across symbols with `pinerun portfolio`. See the
 flag, and [`packages/pinerun/README.md`](./packages/pinerun/README.md) for the
 programmatic API.
 
+Once you are iterating rather than running one-shot, `pinetop` puts those same
+commands on seven pages with the flags editable beside the report:
+
+```bash
+pinetop      # 1–7 pages · tab panes · ↵ edit a flag · r ↵ run · ? keys
+```
+
 ### Developing from source
 
 Requires [Bun](https://bun.sh) ≥ 1.2.
@@ -182,24 +231,30 @@ Requires [Bun](https://bun.sh) ≥ 1.2.
 ```bash
 bun install        # links workspaces + the piner peer
 bun test           # runs every package's test suite
-bun run typecheck  # tsc -b across both packages
+bun run typecheck  # tsc -b across every package
 ```
 
-Build a standalone `pinerun` binary from your checkout and drop it on your PATH
-with `bun run build:bin --install`.
+Build a standalone binary from your checkout and drop it on your PATH with
+`bun run build:bin --install` — run it inside `packages/pinerun` or
+`packages/pinetop` to pick which one (or pass `--product pinerun|pinetop` from
+anywhere).
 
 ## Design principles
 
-1. **piner stays pure.** No I/O, no orchestration leaks into the engine. pinery
-   and pinerun are the rings around it.
+1. **piner stays pure.** No I/O, no orchestration leaks into the engine. pinery,
+   pinerun and pinetop are the rings around it.
 2. **Determinism is the moat.** A piner run is a pure function of
    `(source, bars, inputs, backend)`. That makes runs cacheable (`jobHash`),
    reproducible, and trivially parallel — the things TradingView can't offer.
-3. **Browser-safe core, Node extras behind `/node`.** Neither package drags Node
-   built-ins into a browser bundle; filesystem cache and worker threads live in
+3. **Browser-safe core, Node extras behind `/node`.** pinery and pinerun keep Node
+   built-ins out of a browser bundle; filesystem cache and worker threads live in
    the separate `/node` entry. The same `scan` runs in the CLI (worker threads)
    or later in a browser (Web Workers) over the identical `Runner` contract.
 4. **One engine copy.** `piner` is a peer dependency everywhere.
+5. **One execution path.** The UI does not re-implement the engine or the CLI: it
+   spawns `pinerun --json` and reuses the CLI's own chart and table renderers.
+   A number can therefore never differ between what pinetop shows and what the
+   command it prints would produce.
 
 ## License
 

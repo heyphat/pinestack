@@ -11,6 +11,7 @@ import { PAGES, PAGE_TITLES } from './flags/schema.js';
 
 export type Action =
   | { kind: 'page'; page: PageId }
+  | { kind: 'page-prefix' }
   | { kind: 'focus-next' }
   | { kind: 'focus-prev' }
   | { kind: 'move'; delta: number }
@@ -20,6 +21,7 @@ export type Action =
   | { kind: 'run-dialog' }
   | { kind: 'sweep-dialog' }
   | { kind: 'walkforward' }
+  | { kind: 'edit-external' }
   | { kind: 'filter' }
   | { kind: 'toggle-advanced' }
   | { kind: 'ask' }
@@ -54,6 +56,16 @@ export const BINDINGS: Binding[] = [
     display: `1–${PAGES.length}`,
     description: 'Switch page',
     action: { kind: 'page', page: 'backtest' },
+    group: 'navigate',
+  },
+  {
+    keys: [' '],
+    display: `space 1–${PAGES.length}`,
+    // The second way to switch page, and the only one that also works inside the
+    // EDITOR buffer, where a bare digit is a vim count. Bound globally rather than
+    // on that page alone, so it is one rule everywhere instead of a local dialect.
+    description: 'Switch page — also works inside the editor buffer',
+    action: { kind: 'page-prefix' },
     group: 'navigate',
   },
   {
@@ -124,6 +136,16 @@ export const BINDINGS: Binding[] = [
     display: 'w',
     description: 'Walkforward page',
     action: { kind: 'walkforward' },
+    group: 'act',
+  },
+  {
+    keys: ['e'],
+    display: 'e',
+    // Global rather than EDITOR-only: from a report page this is the whole loop —
+    // `e`, edit, back, `r`. Inside the buffer it never fires, because the buffer
+    // claims the keyboard and `e` there is the word-end motion.
+    description: 'Edit this page’s script in $EDITOR, then reload it',
+    action: { kind: 'edit-external' },
     group: 'act',
   },
   {
@@ -215,6 +237,8 @@ export const EDITOR_KEYS: readonly { display: string; description: string }[] = 
   { display: 'w b e', description: 'By word (W B E by WORD)' },
   { display: '0 ^ $', description: 'Line start · indent · line end' },
   { display: 'gg G', description: 'First line · last line (42G → line 42)' },
+  { display: 'space 1–8', description: 'Switch page — the app binding, unchanged here' },
+  { display: 'ctrl-p', description: 'Command palette — reaches any page by name' },
   { display: '{ }', description: 'Previous / next blank line' },
   { display: 'f F t T', description: 'To a character on this line' },
   { display: 'ctrl-d/u', description: 'Half a window (ctrl-f/b a whole one)' },
@@ -234,14 +258,22 @@ export const EDITOR_KEYS: readonly { display: string; description: string }[] = 
   { display: ':q :q!', description: 'Close · discard unwritten changes' },
   { display: ':e path', description: 'Open a file; a new path starts one' },
   { display: ':42', description: 'Go to a line (`:set nonu` hides the gutter)' },
+  { display: '1 2 3 …', description: 'A count (5j, 42G, 3dd) — space 1–8 switches page' },
   { display: 'tab', description: 'Leave the buffer — pinetop is one key away' },
 ];
 
-/** The status bar's one-line hint strip, drawn from the same table. */
+/**
+ * The status bar's one-line hint strip, drawn from the same table.
+ *
+ * Seven items is what fits an 80-column strip with room left for the status text
+ * on the right, so this is a chosen seven and not everything. `/ filter` is not
+ * here because it only does anything on TRADES, which supplies its own strip
+ * through `Page.hints` — the same hook EDITOR uses.
+ */
 export const HINTS: readonly { key: string; label: string }[] = [
   { key: 'tab', label: 'pane' },
   { key: 'j/k', label: 'move' },
-  { key: '/', label: 'filter' },
+  { key: 'e', label: 'edit' },
   { key: 'r', label: 'run' },
   { key: 'a', label: 'ask' },
   { key: ':', label: 'command' },

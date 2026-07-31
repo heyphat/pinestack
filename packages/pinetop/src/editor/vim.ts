@@ -323,7 +323,7 @@ function resolveMotion(
       return flat(move.charLeft(buffer, at, count));
     case 'l':
     case 'right':
-    case ' ':
+      // Not space: that is the page prefix, and `l` is the same key it always was.
       return flat(move.charRight(buffer, at, count));
     case 'j':
     case 'down':
@@ -393,11 +393,22 @@ function onNormal(editor: EditorState, key: Key): VimOutcome {
   const buffer = editor.buffer!;
   const name = key.name;
 
-  // `tab` is how the user leaves the editor pane, so it belongs to the frame in
-  // every mode but insert. Without this the buffer would be a keyboard trap.
-  if (name === 'tab' || name === 'shift-tab') return PASS;
-
+  // A key waiting to be an argument is data, not a binding: after `f` or `r` the
+  // next keystroke is the character to find or write, space included. So this is
+  // checked before anything is handed back to the frame.
   if (editor.pending != null) return onPending(editor, key);
+
+  // Keys the frame keeps even while the buffer has focus, and each one is a
+  // binding that already means the same thing on every other page — the buffer
+  // does not invent bindings of its own (§4.8.i):
+  //
+  //   tab / shift-tab  leave the pane, so the buffer is never a keyboard trap
+  //   space            the page prefix: `space 3` is page 3, here as everywhere
+  //   ctrl-p           the command palette, which reaches any page by name
+  //
+  // vim leaves `ctrl-p` unbound in normal mode, and space there only means "one
+  // character right", which `l` already does. Everything else is the buffer's.
+  if (name === 'tab' || name === 'shift-tab' || name === 'ctrl-p' || name === ' ') return PASS;
 
   // Counts accumulate; a bare `0` is the line-start motion, not a count digit.
   if (/^[1-9]$/.test(name) || (name === '0' && editor.count !== '')) {
@@ -748,8 +759,8 @@ function onVisual(editor: EditorState, key: Key): VimOutcome {
   const linewise = editor.mode === 'visual-line';
   const anchor = editor.anchor ?? cursorOf(buffer);
 
-  if (name === 'tab' || name === 'shift-tab') return PASS;
   if (editor.pending != null) return onPending(editor, key);
+  if (name === 'tab' || name === 'shift-tab' || name === 'ctrl-p' || name === ' ') return PASS;
 
   if (name === 'escape') {
     enterNormal(editor);

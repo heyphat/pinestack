@@ -10,7 +10,8 @@ import {
 } from '../src/render/screen.js';
 import { fitColumns, drawLeader, drawRow, type Column } from '../src/render/table.js';
 import { STYLE, gradeStyle, signStyle } from '../src/render/theme.js';
-import { decodeKeys } from '../src/terminal.js';
+import { PassThrough } from 'node:stream';
+import { Terminal, decodeKeys } from '../src/terminal.js';
 
 /** Plain-text view of the screen, for asserting on layout. */
 function plain(screen: Screen): string[] {
@@ -239,5 +240,55 @@ describe('key decoding', () => {
   test('an unknown CSI does not leak its parameter bytes as typed text', () => {
     const keys = decodeKeys('\x1b[200~');
     expect(keys.every((k) => k.text == null)).toBe(true);
+  });
+});
+
+describe('suspending the terminal for another program', () => {
+  /** A stdin/stdout pair the Terminal can drive without a real TTY. */
+  function fakeTty(): {
+    stdin: PassThrough & { isTTY?: boolean };
+    stdout: PassThrough & { columns: number; rows: number; isTTY: boolean };
+  } {
+    const stdin = new PassThrough() as PassThrough & { isTTY?: boolean };
+    const stdout = Object.assign(new PassThrough(), {
+      columns: 100,
+      rows: 30,
+      isTTY: true,
+    });
+    stdout.resume(); // swallow the escape sequences the Terminal writes
+    return { stdin, stdout };
+  }
+
+  const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  test('keys typed while suspended are discarded, not replayed as commands', async () => {
+    // The bug this guards: `e` hands the terminal to $EDITOR, and the `:wq` that
+    // quit vim came back to pinetop — where `:` opens the command palette and
+    // `wq` lands in its filter. Input that arrived while we were not listening
+    // belongs to the program we suspended for.
+    const { stdin, stdout } = fakeTty();
+    const terminal = new Terminal({
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+    });
+    const seen: string[] = [];
+    terminal.onKey((key) => seen.push(key.name));
+
+    terminal.open();
+    await tick();
+
+    terminal.close(); // the editor now owns the terminal
+    stdin.write(':wq\r');
+    await tick();
+
+    terminal.open(); // and we take it back
+    await tick();
+    expect(seen).toEqual([]);
+
+    // Real keys after the hand-off still arrive.
+    stdin.write('j');
+    await tick();
+    expect(seen).toEqual(['j']);
+    terminal.close();
   });
 });

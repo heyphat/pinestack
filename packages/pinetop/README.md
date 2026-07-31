@@ -143,11 +143,13 @@ ordinals. `:` and `?` list them all.
 | Key                  | Action                                                                 |
 | -------------------- | ---------------------------------------------------------------------- |
 | `1`–`8`              | Switch page                                                            |
+| `space` `1`–`8`      | Switch page — also works inside the editor buffer                      |
 | `tab` / `shift-tab`  | Next / previous pane in the focus ring                                 |
 | `j` / `k`, `↓` / `↑` | Move selection                                                         |
 | `g` / `G`            | First / last row                                                       |
 | `↵`                  | Edit the focused config flag · load selection · apply pending proposal |
 | `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)           |
+| `e`                  | Edit this page's script in `$EDITOR`, then reload it                   |
 | `s`                  | Sweep dialog                                                           |
 | `w`                  | Walkforward page                                                       |
 | `/`                  | Filter fills                                                           |
@@ -181,6 +183,8 @@ FILES) enters the buffer; from there it is vim:
 | `i` `I` `a` `A` `o` | Insert · at the indent · after · at the line end · a line   |
 | `h j k l` `w b e`   | By character, by word (`W B E` by WORD)                     |
 | `0 ^ $` `gg G` `{}` | Line start / indent / end · first / last line · paragraph   |
+| `space` `1`–`8`     | Switch page — the app's own binding, unchanged here         |
+| `ctrl-p`            | Command palette, to reach any page by name                  |
 | `f F t T`           | To a character on this line                                 |
 | `d c y` + a motion  | `dw` `d$` `c2w` `y}` `dfx` `dgg` — and `dd` `cc` `yy`       |
 | `D C Y` `x` `s` `p` | To the line end · a character · put                         |
@@ -195,11 +199,26 @@ FILES) enters the buffer; from there it is vim:
 
 Counts work where you would expect them (`3dd`, `2w`, `42G`).
 
-Two keys the buffer refuses on purpose:
+**Switching pages from the buffer** is `space` then the page number — the same
+binding as everywhere else in pinetop, which is why it is `space`: bare `1`–`8`
+cannot do the job inside a buffer, where a digit is a vim count and `5j`, `42G`
+and `3dd` all need it. So the app gained a prefix instead of the editor gaining a
+dialect: `space 3` is page 3 on every page, buffer or not. `1`–`8` still work
+directly anywhere outside the buffer.
 
-- **`tab` always leaves the pane**, so the buffer is never a keyboard trap. Every
-  other key belongs to it while it has focus — digits are counts, not page
-  switches.
+Keys the buffer hands straight back to the frame, each one already meaning the
+same thing on every other page:
+
+- **`tab` / `shift-tab`** leave the pane, so the buffer is never a keyboard trap.
+- **`space`** is the page prefix, above.
+- **`ctrl-p`** opens the command palette, to reach a page by name.
+
+vim leaves `ctrl-p` unbound in normal mode, and `space` there only means "one
+character right", which `l` already does — so neither costs anything. Everything
+else belongs to the buffer while it has focus. One exception, because it is data
+rather than a binding: after `f`, `t` or `r` the next keystroke is that command's
+argument, so `f<space>` finds a space and `r<space>` writes one.
+
 - **`ctrl-c` always quits pinetop**, even mid-insert. `q` does not: inside the
   buffer it tells you to use `:q`, and everywhere else it warns once before
   discarding an unwritten buffer. Quitting on a stray `q` would throw away
@@ -216,6 +235,40 @@ on disk.
 not implemented. `?` lists exactly what is bound, so an unbound key does nothing
 rather than something almost-right. Whether the script compiles is still
 `piner`'s answer — press `2` then `r`.
+
+### `e` — the real editor
+
+For anything the in-frame buffer does not cover, `e` hands the file to your actual
+editor. It works from **any** page, which is the point: on BACKTEST you press `e`,
+edit, come back, press `r` — the whole loop, without leaving the keyboard.
+
+```sh
+export VISUAL="nvim"        # $VISUAL wins over $EDITOR; vim is the fallback
+export EDITOR="nvim -u NONE"  # arguments are honoured
+```
+
+pinetop leaves the alternate screen, hands over the terminal — so it is your real
+editor, with your config, your plugins, your colourscheme — and takes the screen
+back when it exits, reloading the file and refreshing the file list. vi-family
+editors are opened at the line your cursor was on (`+42`); others just get the
+path, since `code +42 file` would create a file called `+42`.
+
+`e` refuses when the in-frame buffer holds unwritten changes to that same file —
+your editor would open the older copy on disk and one of the two would lose. `:w`
+first. An unwritten buffer for some _other_ file is not in the way and is left
+untouched.
+
+The `$EDITOR` spec is split on whitespace and run directly, never through a
+shell, so nothing in that variable can be interpreted as `;` or `$(…)`. The cost
+is that an argument containing spaces cannot be expressed — point `$EDITOR` at a
+wrapper script if you need one.
+
+What this does not do is run your editor _inside_ a pane. That needs a pty and a
+terminal emulator to parse the editor's output into pinetop's cell grid, and the
+pty means a native module — which would end the self-contained single-binary
+build. So the frame goes away while you edit and comes back after. That is the
+whole trade, and it is why the in-frame buffer exists for the edits that are not
+worth it.
 
 ## How it behaves
 

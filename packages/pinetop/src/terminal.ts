@@ -114,6 +114,8 @@ export class Terminal {
   private readonly keyHandlers = new Set<(key: Key) => void>();
   private readonly resizeHandlers = new Set<(size: TerminalSize) => void>();
   private opened = false;
+  /** False for one tick after `open()`, while a stale input backlog flushes. */
+  private accepting = false;
   private onData?: (data: Buffer | string) => void;
   private onResize?: () => void;
   private onExit?: () => void;
@@ -146,7 +148,25 @@ export class Terminal {
     this.stdin.resume();
     this.stdin.setEncoding('utf8');
 
+    // Input that arrived while we were not listening belongs to whatever owned the
+    // terminal then — the shell before startup, or the editor `e` suspended us
+    // for. `pause()` does not discard it and `resume()` flushes the backlog to the
+    // next listener, which replayed a vim `:wq` into the keymap: `:` opens the
+    // command palette and `wq` lands in its filter.
+    //
+    // The backlog is flushed on the nextTick that `resume()` schedules, so a gate
+    // released on the following `setImmediate` drops exactly that and nothing
+    // else. Deliberately NOT done by reading stdin here: a read on this handle is
+    // a read on the terminal, and one issued on the way in can still be armed on
+    // the way out — where it competes with the editor for the user's keystrokes.
+    // Losing `:q` to that race is far worse than a stray palette.
+    this.accepting = false;
+    setImmediate(() => {
+      this.accepting = true;
+    });
+
     this.onData = (data) => {
+      if (!this.accepting) return;
       for (const key of decodeKeys(String(data))) {
         for (const handler of [...this.keyHandlers]) handler(key);
       }

@@ -105,6 +105,15 @@ export {
 export type { MotionResult } from './editor/motion.js';
 export type { EditorIo } from './editor/io.js';
 export { nodeIo, editorIo, setEditorIo } from './editor/io.js';
+export type { LaunchResult, Launcher, Suspendable } from './editor/handoff.js';
+export {
+  handOff,
+  launcher,
+  pathToEdit,
+  resolveEditor,
+  setLauncher,
+  spawnLauncher,
+} from './editor/handoff.js';
 export type { EditorState, Register, VimMode } from './editor/state.js';
 export { initialEditor, modeLabel } from './editor/state.js';
 export type { Span } from './editor/syntax.js';

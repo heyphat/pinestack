@@ -8,10 +8,11 @@
  *    propose; only `↵` applies, and `ctrl-x` rejects.
  */
 
+import { handOff } from './editor/handoff.js';
 import { drawFrame, widthWarning, windowTitle } from './frame.js';
 import { composeArgv, validate, withOverrides, type FlagValue, type Pair } from './flags/model.js';
 import { readInputTitles } from './flags/pine-inputs.js';
-import { COMMANDS, schemaFor, type CommandId, type PageId } from './flags/schema.js';
+import { COMMANDS, PAGES, schemaFor, type CommandId, type PageId } from './flags/schema.js';
 import { discoverScripts } from './scripts.js';
 import { resolve, type Action } from './keymap.js';
 import {
@@ -120,6 +121,8 @@ export class App {
   private readonly provider?: AskProvider;
   private abort?: AbortController;
   private disposers: (() => void)[] = [];
+  /** `space` was pressed and the next digit picks a page (§4.2.f). */
+  private pagePrefix = false;
 
   constructor(opts: AppOptions) {
     this.terminal = opts.terminal;
@@ -253,6 +256,22 @@ export class App {
       this.paint();
       return;
     }
+    // An armed `space` outranks the page, so `space 3` reaches page 3 even inside
+    // the EDITOR buffer, where a bare `3` is a vim count. This is what lets one
+    // page-switch binding hold everywhere instead of the buffer needing its own.
+    if (this.pagePrefix) {
+      this.pagePrefix = false;
+      const ordinal = /^[1-9]$/.test(key.name) ? Number.parseInt(key.name, 10) : 0;
+      const page = PAGES[ordinal - 1];
+      if (page != null) {
+        this.dispatch({ kind: 'page', page });
+        this.paint();
+        return;
+      }
+      // Not a page digit: the prefix is abandoned and the key means what it
+      // normally means, rather than being swallowed.
+      this.state.status = 'page switch cancelled';
+    }
     // A page may claim the keyboard before the global keymap. Exactly one does —
     // EDITOR, where `j` is a character and `1` is a count (see `Page.onKey`).
     if (this.page.onKey?.(this.state, key) === true) {
@@ -307,6 +326,10 @@ export class App {
         if (action.page === 'editor') ensureEditorFile(state);
         process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
         break;
+      case 'page-prefix':
+        this.pagePrefix = true;
+        state.status = `page 1–${PAGES.length}…`;
+        break;
       case 'focus-next':
         this.moveFocus(1);
         break;
@@ -356,6 +379,12 @@ export class App {
         break;
       case 'walkforward':
         this.handoffToWalkforward();
+        break;
+      case 'edit-external':
+        // The frame is torn down and rebuilt inside `handOff`, so the title bar
+        // has to be reclaimed: the editor will have set its own (§4.8.g).
+        state.status = handOff(state, this.terminal, this.cwd);
+        process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
         break;
       case 'filter':
         state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };
@@ -487,6 +516,10 @@ export class App {
           if (item != null) {
             const status = item.run(state);
             if (status != null) state.status = status;
+            // An item may name a keymap action instead of mutating state, which
+            // is how the palette reaches the things that need the App itself —
+            // the run dialog, the $EDITOR hand-off.
+            if (item.action != null) this.dispatch(item.action);
           }
           return;
         }

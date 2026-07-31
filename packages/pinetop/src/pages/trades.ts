@@ -255,9 +255,26 @@ function drawLog(ctx: PageContext, rect: Rect): void {
   }
 }
 
+/**
+ * `/` earns a place here and nowhere else — this is the only page with fills to
+ * filter. `r` is dropped for the same reason in reverse: TRADES has no command of
+ * its own, so advertising the run key would be a promise the page cannot keep.
+ */
+const TRADES_HINTS: readonly { key: string; label: string }[] = [
+  { key: 'tab', label: 'pane' },
+  { key: 'j/k', label: 'move' },
+  { key: '/', label: 'filter' },
+  { key: '↵', label: 'scope log' },
+  { key: 'e', label: 'edit' },
+  { key: ':', label: 'command' },
+  { key: '?', label: 'help' },
+];
+
 export const tradesPage: Page = {
   id: 'trades',
   minCols: 100,
+
+  hints: () => TRADES_HINTS,
 
   panes: () => [...PANES],
 

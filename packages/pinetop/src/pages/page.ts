@@ -56,8 +56,10 @@ export interface Page {
    * to a global table. Every other page leaves this unset and is driven entirely
    * by `keymap.ts`, which is what keeps `?` an honest account of the bindings.
    *
-   * A page that claims keys must leave a way out (EDITOR never takes `tab` in
-   * normal mode, and never takes `ctrl-c` at all).
+   * A page that claims keys must leave the app's own bindings reachable, and must
+   * not invent replacements for them: EDITOR passes `tab`, `space` (the page
+   * prefix) and `ctrl-p` straight through in normal mode, and never takes
+   * `ctrl-c` at all.
    */
   onKey?: (state: AppState, key: Key) => boolean;
   /** This page's hint strip. Defaults to the global `HINTS`. */

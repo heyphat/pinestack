@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { App } from '../src/app.js';
 import { PAGES, type PageId } from '../src/flags/schema.js';
+import { BINDINGS } from '../src/keymap.js';
 import { hiddenFlagCount, isRunRow, runRowCount, visibleFlags } from '../src/pages/config-pane.js';
 import { composeArgv } from '../src/flags/model.js';
 import { stripAnsi } from '../src/render/screen.js';
@@ -158,6 +159,27 @@ describe('P0 — the shell', () => {
     expect(text).toContain('shift-tab');
     expect(text).toContain('Reject pending AI proposal');
     expect(text).toContain('Command palette');
+  });
+
+  test('? shows every binding, at a tall terminal and a short one', () => {
+    // The guard that matters: the overlay is generated, so adding a binding must
+    // never push another one off the box. A fixed height did exactly that once.
+    for (const [cols, rows] of [
+      [168, 46],
+      [120, 30],
+      [100, 24],
+    ] as const) {
+      const app = makeApp(state, cols, rows);
+      app.onKey({ name: '?', text: '?' });
+      const text = screenText(app, cols, rows);
+      for (const binding of BINDINGS) {
+        // Long descriptions are truncated with an ellipsis at narrow widths; the
+        // opening words are enough to prove the row was drawn at all.
+        const head = binding.description.slice(0, 20);
+        expect(text, `${binding.display} missing at ${cols}×${rows}`).toContain(head);
+      }
+      app.onKey({ name: 'escape' });
+    }
   });
 
   test('esc dismisses the overlay', () => {

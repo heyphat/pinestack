@@ -673,3 +673,80 @@ describe('who owns the keyboard', () => {
     else expect(state.status).toContain('.pine');
   });
 });
+
+describe('leaving the buffer without leaving normal mode', () => {
+  let state: AppState;
+
+  beforeEach(() => {
+    state = initialState();
+    state.page = 'editor';
+    state.panes.editor.focus = 'editor';
+    io.store['a.pine'] = ['one', 'two', 'three', 'four', 'five', 'six'].join('\n');
+    openFile(state.editor, 'a.pine', io);
+  });
+
+  const app = (): App => new App({ terminal: stubTerminal(), state, cwd: '/tmp/pinetop-test' });
+
+  test('space then a digit switches page from inside the buffer', () => {
+    const instance = app();
+    instance.onKey({ name: ' ', text: ' ' });
+    instance.onKey({ name: '4', text: '4' });
+    expect(state.page).toBe('walkforward'); // page 4
+  });
+
+  test('space is not a motion, and an abandoned prefix leaves the key meaning itself', () => {
+    const instance = app();
+    const before = state.editor.buffer!.col;
+    instance.onKey({ name: ' ', text: ' ' });
+    expect(state.editor.buffer!.col).toBe(before); // space moved nothing
+
+    // `space` then a non-digit: the prefix is dropped and the key does its job.
+    instance.onKey({ name: 'j', text: 'j' });
+    expect(state.page).toBe('editor');
+    expect(state.editor.buffer!.line).toBe(1);
+  });
+
+  test('the same binding works on a report page, so it is one rule everywhere', () => {
+    state.page = 'backtest';
+    const instance = app();
+    instance.onKey({ name: ' ', text: ' ' });
+    instance.onKey({ name: '8', text: '8' });
+    expect(state.page).toBe('trades');
+  });
+
+  test('a bare digit is still a count, so 3j and 42G work', () => {
+    const instance = app();
+    instance.onKey({ name: '3', text: '3' });
+    instance.onKey({ name: 'j', text: 'j' });
+    expect(state.page).toBe('editor');
+    expect(state.editor.buffer!.line).toBe(3);
+  });
+
+  test('ctrl-p opens the palette from normal mode', () => {
+    app().onKey({ name: 'ctrl-p' });
+    expect(state.overlay.kind).toBe('palette');
+  });
+
+  test('insert mode keeps every key, including space and ctrl-p', () => {
+    const instance = app();
+    instance.onKey({ name: 'i', text: 'i' });
+    for (const ch of 'a b') instance.onKey({ name: ch, text: ch });
+    instance.onKey({ name: '2', text: '2' });
+    instance.onKey({ name: 'ctrl-p' });
+    expect(state.page).toBe('editor');
+    expect(state.overlay.kind).toBe('none');
+    expect(state.editor.buffer!.lines[0]).toBe('a b2one');
+  });
+});
+
+describe('a pending argument outranks the frame', () => {
+  test('f and r take a space as their argument, not as the page prefix', () => {
+    const find = editorWith('a b c');
+    type(find, 'f ');
+    expect(find.buffer!.col).toBe(1); // landed on the first space
+
+    const replace = editorWith('a-b');
+    type(replace, 'lr ');
+    expect(replace.buffer!.lines[0]).toBe('a b');
+  });
+});

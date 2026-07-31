@@ -150,6 +150,13 @@ page is downstream of the file this one edits. The ordinals of the six command p
 therefore shift by one, which is a real cost paid once (§4.2's "the seven ordinals are
 final" no longer holds; eight are).
 
+**Decision 4.2.f — `space` is a global page prefix, alongside `1`–`8`.** A second way to
+say the same thing needs justifying, and this is the justification: EDITOR's buffer cannot
+give the digits away, because there a digit is a vim count. Rather than let that page define
+its own page-switch key — a local dialect for a global verb — the *app* gained a prefix that
+works identically on all eight pages. `1`–`8` remain the one-keystroke form everywhere the
+digits are free. See §4.8.i.
+
 **Decision 4.2.e — Below ~105 columns the tab bar names only the active page.** Eight titles
 plus the run status and the grid size no longer fit an 80-column terminal, and a tab bar
 overprinted by the grid size is worse than a compact one. The active page keeps its title
@@ -165,11 +172,13 @@ within the focused pane.
 | Key | Action |
 |---|---|
 | `1`–`8` | Switch page |
+| `space` `1`–`8` | Switch page; the only form that works inside the EDITOR buffer (§4.2.f) |
 | `tab` / `shift-tab` | Next / previous pane in the focus ring |
 | `j` / `k`, `↓` / `↑` | Move selection |
 | `g` / `G` | First / last row |
 | `↵` | Load selection / confirm dialog / apply pending AI proposal |
 | `r` | Run dialog for the current page's command |
+| `e` | Edit the current page's script in `$EDITOR`, then reload it (§4.8.g) |
 | `s` | Sweep dialog |
 | `w` | Walkforward page |
 | `/` | Filter fills |
@@ -360,6 +369,61 @@ renamed `input()` title shows up in the outline before it is written.
 visual block, and regex search (`/` is a substring). The `?` overlay lists exactly what is
 bound, so an unimplemented key does nothing rather than something almost-right.
 
+**Decision 4.8.g — `e` hands the file to the real `$EDITOR`, from any page.**
+Because the buffer above is a subset, and the honest answer to "I need my `.vimrc`, my
+plugins, `.` repeat, `:%s///`" is to get out of the way: leave the alternate screen,
+`spawnSync` the editor with inherited stdio, take the terminal back when it exits, reload
+the file. It is a global binding rather than an EDITOR-page one because that is where the
+value is — from BACKTEST it is `e`, edit, back, `r`, the whole loop without leaving the
+keyboard. Inside the buffer it never fires, since the buffer claims the keyboard and `e`
+there is the word-end motion, so no special case is needed.
+
+Four things this decision pins down:
+
+- **The frame is restored in a `finally`.** A throw from the spawn must not strand the user
+  outside the alternate screen with raw mode off, and the terminal's own title is reclaimed
+  afterwards because the editor will have set its own.
+- **It refuses on an unwritten buffer for the same file** — the editor would open the older
+  copy on disk and one of the two would lose. Same answer, and same reason, as `:e` and
+  `:q` (§4.5.c). A modified buffer for a *different* file is not in the way and is left
+  untouched, including on the reload afterwards.
+- **`$EDITOR` is split on whitespace and run directly, never through a shell**, so nothing
+  in that variable can be interpreted as `;` or `$(…)`. `$VISUAL` wins over `$EDITOR`, which
+  is that convention's own split for full-screen editors.
+- **`+<line>` only goes to editors that understand it.** `code +42 file` would open a file
+  named `+42`, which is worse than losing the cursor position.
+
+**Decision 4.8.i — The buffer never invents a binding of its own; the app gained a prefix
+instead.** The tabs have to be reachable without leaving normal mode, but a bare digit there
+is a count, and `5j`, `42G` and `3dd` are not optional in an editor that claims to be vim.
+
+The first attempt was `gt` / `gT` / `<n>gt` — vim's own tab-page keys — and it was wrong for
+a reason worth recording: it worked *only* on the editor page, so pinetop had two different
+ways to switch page depending on where the cursor was. A local dialect for a global verb is
+worse than an awkward binding.
+
+So `space` became a **global** page prefix (§4.2.f): `space 3` is page 3 on every page,
+buffer or not, and `1`–`8` keep working directly everywhere outside the buffer. The buffer
+then passes `space` through rather than binding anything, which is the rule this decision
+really states: **a page that claims the keyboard may hand keys back, but may not define
+replacements for the app's own verbs.** `tab` and `ctrl-p` pass through on the same grounds.
+
+The costs, both accepted: `space` stops being "one character right" in normal mode (`l` is
+that key), and switching page is two keystrokes rather than one. What is bought is a keyboard
+with one page-switch rule in it.
+
+One ordering rule falls out of this. A key waiting to be an *argument* is data, not a
+binding: after `f`, `t` or `r` the next keystroke is the character to find or write. So the
+pending-argument check runs before anything is handed back to the frame, and `f<space>`
+finds a space instead of arming the page prefix.
+
+**Decision 4.8.h — Running the editor *inside* a pane was rejected on packaging grounds,
+not design ones.** It would need a pty plus a terminal emulator to parse the editor's
+escape output into the cell grid — what a tmux pane does. Bun exposes no pty, so it means a
+native module, which ends the self-contained single-binary build the installer depends on.
+That constraint is what makes the in-frame buffer and `e` complementary rather than
+redundant: the buffer for edits worth keeping the report on screen for, `e` for the rest.
+
 ---
 
 ## 5. Alternatives Considered
@@ -373,7 +437,8 @@ bound, so an unimplemented key does nothing rather than something almost-right.
 | AI applies changes directly | Fewer keystrokes | Silent divergence from the script on disk | Review-then-apply (§4.5.c) |
 | Filled-area block charts (`▁▂▃█`) | Simple to render | Reads as a slab at realistic equity ranges; fights the palette | Stroked braille line (§4.3.b/d) |
 | Scrollable panes | Nothing is ever hidden | Not terminal behaviour; breaks the fixed grid | Truncate like a TTY (§4.3.a) — except the EDITOR buffer, where the cursor defines the window (§4.8) |
-| Shell out to `$EDITOR` instead of an editor page | No editor to build or maintain | Tears down the frame, loses the report, and the flags/outline are no longer beside the source | An in-frame buffer keeps the edit → rerun → reread loop in one screen (§4.8.a) |
+| Shell out to `$EDITOR` *instead of* an editor page | No editor to build or maintain | Tears down the frame, loses the report, and the flags/outline are no longer beside the source | Rejected as a replacement, kept as a companion: the in-frame buffer holds the loop in one screen (§4.8.a) and `e` hands off when you want the real thing (§4.8.g) |
+| Run the real editor inside the pane, over a pty | Actual vim, actual config, frame intact | Needs a terminal emulator over the pty, and the pty needs a native module | Ends the self-contained single-binary build (§4.8.h) |
 | `--input` overrides listed in the config pane | Shows strategy params next to flags | `universe`, `bar`, and unmapped rows are not `--input` params; duplicates `--symbol`/`--tf` | Removed; the pane lists only real flags |
 
 ---
@@ -402,7 +467,7 @@ bound, so an unimplemented key does nothing rather than something almost-right.
 | **P4 — Trades + log** | Ledger, filter, per-fill log scoping | Selecting a fill scopes the log; `esc` restores |
 | **P5 — Ask** | Prompt drawer, grounding payload, proposal protocol, apply/reject/revert | No path exists that mutates config without a keypress |
 | **P6 — Persistence** | Per-project flag state, run history, `walkforward` hand-off from a swept winner | Reopening resumes the last session's flags |
-| **P7 — Editor** | Page 1: vim buffer (motions, operators, counts, visual, ex commands), Pine highlighting, FILES + INPUTS sidebar | The buffer owns the keyboard but never traps it; only `:w` writes |
+| **P7 — Editor** | Page 1: vim buffer (motions, operators, counts, visual, ex commands), Pine highlighting, FILES + INPUTS sidebar, and `e` to hand off to the real `$EDITOR` | The buffer owns the keyboard but never traps it; only `:w` writes; the frame is always restored after a hand-off |
 
 **Status: P0–P7 are built** (`packages/pinetop/`), verified against real `pinerun`
 runs for all six commands. Three things the build added that this plan did not

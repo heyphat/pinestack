@@ -18,7 +18,7 @@ import {
   PAGE_TITLES,
   type CommandId,
 } from './flags/schema.js';
-import { BINDINGS, EDITOR_KEYS } from './keymap.js';
+import { BINDINGS, EDITOR_KEYS, type Action } from './keymap.js';
 import { displayWidth, drawPane, truncate, type Rect, type Screen } from './render/screen.js';
 import { drawLeader } from './render/table.js';
 import { STYLE, type Style } from './render/theme.js';
@@ -51,7 +51,22 @@ const GROUP_TITLES: Record<string, string> = {
   overlay: 'OVERLAY',
 };
 
-/** §7 P0's exit criterion: `?` documents the real keymap. It is generated. */
+const GROUPS = ['navigate', 'select', 'act', 'overlay'] as const;
+
+/** Rows a group costs: its title, its bindings, and a blank line after it. */
+function groupHeight(group: string): number {
+  return 2 + BINDINGS.filter((binding) => binding.group === group).length;
+}
+
+/**
+ * §7 P0's exit criterion: `?` documents the real keymap. It is generated.
+ *
+ * Which means the box is sized from the table, never hard-coded. A fixed height
+ * silently dropped the last two bindings the moment one was added — a generated
+ * help that loses entries is worse than a hand-written one, because it still
+ * reads as complete. So: one column when the terminal is tall enough, two when it
+ * is not, and the height comes from what there is to show.
+ */
 export function drawHelp(screen: Screen, state: AppState): void {
   // On EDITOR the buffer's own bindings are the ones you need, and there are more
   // of them than the app's — so that page gets a two-column box wide enough to
@@ -60,7 +75,14 @@ export function drawHelp(screen: Screen, state: AppState): void {
     drawEditorHelp(screen, state);
     return;
   }
-  const rect = centred(screen, 76, 28);
+
+  const tall = GROUPS.reduce((sum, group) => sum + groupHeight(group), 0);
+  const columnGroups: string[][] =
+    tall + 3 <= screen.rows - 4 ? [[...GROUPS]] : [GROUPS.slice(0, 2), GROUPS.slice(2)];
+  const height =
+    Math.max(...columnGroups.map((c) => c.reduce((sum, g) => sum + groupHeight(g), 0))) + 3;
+
+  const rect = centred(screen, columnGroups.length === 1 ? 76 : 104, height);
   clear(screen, rect);
   // The legend answers "what am I running" — both halves of it, since every
   // number on screen came out of that pinerun, so a stale one explains a stale
@@ -73,33 +95,36 @@ export function drawHelp(screen: Screen, state: AppState): void {
         ? `${versions.pinetop} · driving ${versions.pinerun}`
         : `${versions.pinetop} · pinerun not found`;
   const inner = drawPane(screen, rect, { title: 'KEYS', focused: true, legend });
+  if (inner.h <= 1) return;
 
-  let y = inner.y;
-  for (const group of ['navigate', 'select', 'act', 'overlay']) {
-    if (y >= inner.y + inner.h - 1) break;
-    screen.text(inner.x, y, GROUP_TITLES[group]!, STYLE.title, inner);
-    y += 1;
-    for (const binding of BINDINGS) {
-      if (binding.group !== group) continue;
+  const columnW = Math.floor(inner.w / columnGroups.length);
+  for (let column = 0; column < columnGroups.length; column++) {
+    const x = inner.x + column * columnW;
+    let y = inner.y;
+    for (const group of columnGroups[column]!) {
       if (y >= inner.y + inner.h - 1) break;
-      screen.text(inner.x + 2, y, binding.display.padEnd(12), STYLE.accent, inner);
-      screen.text(
-        inner.x + 15,
-        y,
-        truncate(binding.description, Math.max(0, inner.w - 16)),
-        STYLE.none,
-        inner,
-      );
+      screen.text(x, y, GROUP_TITLES[group]!, STYLE.title, inner);
+      y += 1;
+      for (const binding of BINDINGS) {
+        if (binding.group !== group) continue;
+        if (y >= inner.y + inner.h - 1) break;
+        screen.text(x + 2, y, binding.display.padEnd(12), STYLE.accent, inner);
+        screen.text(
+          x + 15,
+          y,
+          truncate(binding.description, Math.max(0, columnW - 16)),
+          STYLE.none,
+          inner,
+        );
+        y += 1;
+      }
       y += 1;
     }
-    y += 1;
   }
 
   const note =
     '⌘K is listed in the design as the palette key; a terminal cannot see it — ctrl-p is the binding.';
-  if (y < inner.y + inner.h) {
-    screen.text(inner.x, inner.y + inner.h - 1, truncate(note, inner.w), STYLE.muted, inner);
-  }
+  screen.text(inner.x, inner.y + inner.h - 1, truncate(note, inner.w), STYLE.muted, inner);
 }
 
 /**
@@ -221,6 +246,12 @@ export interface PaletteItem {
   label: string;
   hint: string;
   run: (state: AppState) => string | undefined;
+  /**
+   * A keymap action to dispatch after `run`, for the verbs that need the App and
+   * not just the state — suspending the terminal for `$EDITOR`, opening a dialog.
+   * `run` alone cannot express those: it is handed a state, not a program.
+   */
+  action?: Action;
 }
 
 export function paletteItems(): PaletteItem[] {
@@ -237,6 +268,12 @@ export function paletteItems(): PaletteItem[] {
   }));
 
   items.push(
+    {
+      label: 'edit in $EDITOR',
+      hint: 'suspend the frame and open this page’s script in vim',
+      run: () => undefined,
+      action: { kind: 'edit-external' },
+    },
     {
       label: 'ask pinetop',
       hint: 'open the AI prompt drawer',

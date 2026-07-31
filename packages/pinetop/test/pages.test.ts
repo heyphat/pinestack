@@ -1,10 +1,10 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { App } from '../src/app.js';
 import { COMMANDS, PAGES, type PageId } from '../src/flags/schema.js';
-import { cachedScripts } from '../src/scripts.js';
+import { cachedScripts, refreshScripts } from '../src/scripts.js';
 import { BINDINGS } from '../src/keymap.js';
 import { hiddenFlagCount, isRunRow, runRowCount, visibleFlags } from '../src/pages/config-pane.js';
-import { composeArgv } from '../src/flags/model.js';
+import { composeArgv, type Pair } from '../src/flags/model.js';
 import { stripAnsi } from '../src/render/screen.js';
 import { initialState, resetRunIds, type AppState } from '../src/state.js';
 import type { Key, Terminal, TerminalSize } from '../src/terminal.js';
@@ -1181,5 +1181,93 @@ describe('the STRATEGIES pane, on every command page', () => {
     state.flags.sweep.scripts = [list[0]!.path];
     state.panes.sweep.cursor['strategies'] = 2;
     expect(screenText(makeApp(state))).toContain(`▌${list[0]!.label}`);
+  });
+});
+
+describe('SWEEP — choosing axes from the script’s own inputs', () => {
+  const script = 'examples/rsi-mean-reversion.pine';
+
+  beforeEach(() => {
+    refreshScripts();
+    state.page = 'sweep';
+    state.flags.sweep.scripts = [script];
+    state.panes.sweep.focus = 'inputs';
+    state.panes.sweep.cursor['inputs'] = 0;
+  });
+
+  const axes = (): Pair[] => (state.flags.sweep.values['input'] as Pair[] | undefined) ?? [];
+
+  /** Open the row under the cursor, type a grid, accept. */
+  function setGrid(app: App, grid: string): void {
+    app.onKey({ name: 'enter' });
+    for (const ch of grid) app.onKey({ name: ch, text: ch });
+    app.onKey({ name: 'enter' });
+  }
+
+  test('the pane lists every input the script declares, before any are swept', () => {
+    const text = screenText(makeApp(state));
+    expect(text).toContain('INPUTS');
+    for (const title of ['length', 'oversold', 'overbought']) expect(text).toContain(title);
+  });
+
+  test('a second axis does not disturb the first — the point of per-row editing', () => {
+    const app = makeApp(state);
+    setGrid(app, '7,14,21');
+    expect(axes()).toEqual([{ name: 'length', value: '7,14,21' }]);
+
+    state.panes.sweep.cursor['inputs'] = 1;
+    setGrid(app, '20:35:5');
+    expect(axes()).toEqual([
+      { name: 'length', value: '7,14,21' },
+      { name: 'oversold', value: '20:35:5' },
+    ]);
+
+    // And the composed line carries both, repeated as the CLI expects.
+    const argv = composeArgv(state.flags.sweep);
+    expect(argv.filter((a) => a === '--input')).toHaveLength(2);
+    expect(argv.join(' ')).toContain('--input length=7,14,21 --input oversold=20:35:5');
+  });
+
+  test('editing a swept input prefills its grid, and clearing it drops that axis', () => {
+    const app = makeApp(state);
+    setGrid(app, '7,14');
+    state.panes.sweep.cursor['inputs'] = 1;
+    setGrid(app, '20,30');
+    expect(axes()).toHaveLength(2);
+
+    // Re-open the first row: the buffer starts from what is already set.
+    state.panes.sweep.cursor['inputs'] = 0;
+    app.onKey({ name: 'enter' });
+    expect(state.edit?.buffer).toBe('7,14');
+    app.onKey({ name: 'ctrl-u' });
+    app.onKey({ name: 'enter' });
+
+    expect(axes()).toEqual([{ name: 'oversold', value: '20,30' }]);
+  });
+
+  test('swept inputs are marked and carry their grid; the rest stay plain', () => {
+    setGrid(makeApp(state), '7,14,21');
+    const text = screenText(makeApp(state));
+    expect(text).toContain('▌length');
+    expect(text).toMatch(/▌length[^\n]*7,14,21/);
+    expect(text).not.toContain('▌overbought');
+  });
+
+  test('the legend counts the axes and the grid they make', () => {
+    const app = makeApp(state);
+    setGrid(app, '7,14,21');
+    state.panes.sweep.cursor['inputs'] = 1;
+    setGrid(app, '20,25,30,35');
+    expect(screenText(makeApp(state))).toContain('2 axes · 12 combos');
+  });
+
+  test('an axis the script does not declare is still shown, so the reason is visible', () => {
+    state.flags.sweep.values['input'] = [{ name: 'notAnInput', value: '1,2' }];
+    expect(screenText(makeApp(state))).toContain('notAnInput');
+  });
+
+  test('with no script loaded the pane says what to do rather than sitting empty', () => {
+    state.flags.sweep.scripts = [];
+    expect(screenText(makeApp(state))).toContain('load a strategy above');
   });
 });

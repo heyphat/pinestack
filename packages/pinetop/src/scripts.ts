@@ -9,6 +9,7 @@
 
 import { readdirSync, statSync, type Dirent } from 'node:fs';
 import { join, relative } from 'node:path';
+import { readInputTitles } from './flags/pine-inputs.js';
 
 export interface ScriptEntry {
   /** Path as it will appear in argv — relative to cwd when it is below it. */
@@ -96,7 +97,27 @@ export function cachedScripts(cwd?: string): ScriptEntry[] {
   return cache;
 }
 
-/** Drop the cache: a script was added, renamed, or written for the first time. */
+/**
+ * A script's `input()` titles, read once.
+ *
+ * The INPUTS pane asks for these on every frame, and a synchronous file read per
+ * frame is not something a redraw should cost. Cleared with the script list,
+ * which covers the two ways the titles change from under us: a `:w` in the
+ * editor, and a return from `$EDITOR`.
+ */
+const titles = new Map<string, string[]>();
+
+export function cachedInputTitles(path: string): string[] {
+  let found = titles.get(path);
+  if (found == null) {
+    found = readInputTitles(path);
+    titles.set(path, found);
+  }
+  return found;
+}
+
+/** Drop the caches: a script was added, renamed, or written. */
 export function refreshScripts(): void {
   cache = undefined;
+  titles.clear();
 }

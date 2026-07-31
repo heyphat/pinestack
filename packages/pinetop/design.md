@@ -255,6 +255,19 @@ correctness bug, not a style choice.
   all of them do. TRADES has none, because it has no command and a script picker there would
   imply it could run something (§4.2.b); EDITOR's FILES pane is the sibling, where `↵` opens
   a buffer instead of loading an argument.
+- **SWEEP's INPUTS pane lists every `input()` the selected script declares**, marking the
+  ones being swept and showing their grid. It replaces the AXES pane, which listed only the
+  axes you had already set — you cannot choose a grid for inputs you cannot see, and these
+  are exactly the names `--input` is validated against (§4.5.e). Same renderer as EDITOR's
+  INPUTS, differing only in what sits beside a row. An axis whose name the script does not
+  declare is still listed, in warn style: `pinerun` will reject it, and a row that quietly
+  vanished would hide why.
+- **Each axis is edited on its own row (`EditState.origin: 'axis'`).** `--input` is
+  repeatable, so the config pane can only render it as one space-joined field — which meant
+  adding a second axis required retyping the first, and made a multi-axis sweep feel
+  unsupported when it never was. `↵` on an INPUTS row opens that one axis, prefilled;
+  clearing it drops that axis and leaves the others alone. This is the third edit surface
+  and shares the same text-input mode as the other two (§10.2).
 - **`compare` marks its two slots `A` and `B`, and `↵` fills the first free one, then keeps
   replacing A.** That is the order the work happens in: pick one, pick the other, then keep
   swapping the left-hand side. The markers make the state visible, and the config pane can

@@ -128,6 +128,18 @@ One tab per command, numbered in workflow order.
 | 7   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
 | 8   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
 
+**SWEEP has an INPUTS pane** below STRATEGIES, listing every `input()` the loaded
+script declares — the same pane EDITOR shows, plus the grid beside each swept
+one. `↵` on a row opens that axis for typing (`7,14,21`, or `30:100:10`), prefilled
+if it is already set; clearing it drops that axis and leaves the rest untouched.
+The legend counts the axes and the combos they make, and turns red when the grid
+goes over `--max-combos`.
+
+That per-row editing is the point: `--input` is a repeatable flag, so the config
+pane can only show it as one space-joined field, and adding a second axis meant
+retyping the first. Names the script does not declare still appear, in warn
+colour, because `pinerun` will reject them and a row that vanished would hide why.
+
 All six command pages carry the same **STRATEGIES** pane above their config, first
 in the focus ring, because all six take a `.pine` as their first argument — `↵`
 loads the selected script into that page's command. `compare` takes two, so it

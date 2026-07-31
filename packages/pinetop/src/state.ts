@@ -103,8 +103,18 @@ export interface EditState {
   index: number;
   /** What has been typed so far. */
   buffer: string;
-  /** Where the edit was started, so `esc` and `↵` return focus there. */
-  origin: 'config' | 'dialog';
+  /**
+   * Where the edit was started, so `esc` and `↵` return focus there.
+   *
+   * `axis` is the third surface and the odd one: it edits a single `--input`
+   * pair rather than a whole flag row. `--input` is repeatable, so the config
+   * pane can only render it as one space-joined field — adding a second axis
+   * meant retyping the first. On SWEEP's INPUTS pane each axis is its own row
+   * with its own `↵`, and `index` is unused; `input` names the axis instead.
+   */
+  origin: 'config' | 'dialog' | 'axis';
+  /** The Pine `input()` title this edit is an axis for (`origin: 'axis'`). */
+  input?: string;
 }
 
 export interface PaneSelection {

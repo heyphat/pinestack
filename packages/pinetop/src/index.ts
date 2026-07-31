@@ -175,7 +175,13 @@ export type { Page, PageContext } from './pages/page.js';
 export { clampCursor, columns, rows, windowFor } from './pages/page.js';
 
 export type { ScriptEntry } from './scripts.js';
-export { cachedScripts, discoverScripts, refreshScripts, scriptLabel } from './scripts.js';
+export {
+  cachedInputTitles,
+  cachedScripts,
+  discoverScripts,
+  refreshScripts,
+  scriptLabel,
+} from './scripts.js';
 
 export { loadFlags, saveFlags } from './persist.js';
 export { drawFrame, pageOrdinal, widthWarning, windowTitle } from './frame.js';
@@ -191,6 +197,8 @@ export {
   filterPalette,
   paletteItems,
 } from './overlays.js';
+export type { InputRow, InputsPaneOptions } from './pages/inputs-pane.js';
+export { declaredInputs, drawInputsPane } from './pages/inputs-pane.js';
 export type { StrategiesPaneOptions } from './pages/strategies-pane.js';
 export {
   STRATEGIES_PANE,

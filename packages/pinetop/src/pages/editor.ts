@@ -30,6 +30,7 @@ import { bufferText, orderCursors, type Cursor } from '../editor/buffer.js';
 import { highlight } from '../editor/syntax.js';
 import { modeLabel, type EditorState } from '../editor/state.js';
 import { handleKey, openFile } from '../editor/vim.js';
+import { drawInputsPane } from './inputs-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
 /**
@@ -117,41 +118,13 @@ function drawFiles(ctx: PageContext, rect: Rect): void {
  * front of you (§4.5.e is the same list, validated).
  */
 function drawInputs(ctx: PageContext, rect: Rect): void {
-  const { screen, state } = ctx;
-  const titles = bufferInputs(state.editor);
-
-  const inner = drawPane(screen, rect, {
-    title: 'INPUTS',
-    focused: ctx.focus === 'inputs',
+  const titles = bufferInputs(ctx.state.editor);
+  drawInputsPane(ctx, rect, {
+    paneId: 'inputs',
+    rows: titles.map((title) => ({ title })),
     legend: titles.length > 0 ? String(titles.length) : undefined,
+    empty: ctx.state.editor.buffer == null ? 'no file open' : 'no input() declared',
   });
-  if (inner.h <= 0) return;
-
-  if (titles.length === 0) {
-    screen.text(
-      inner.x,
-      inner.y,
-      state.editor.buffer == null ? 'no file open' : 'no input() declared',
-      STYLE.muted,
-      inner,
-    );
-    return;
-  }
-
-  const cursor = clampCursor(ctx.cursor('inputs'), titles.length);
-  const { from, to } = windowFor(cursor, titles.length, inner.h);
-  for (let i = from; i < to; i++) {
-    const y = inner.y + (i - from);
-    const selected = i === cursor && ctx.focus === 'inputs';
-    if (selected) screen.text(inner.x, y, ' '.repeat(inner.w), STYLE.selected);
-    screen.text(
-      inner.x,
-      y,
-      truncate(titles[i]!, inner.w),
-      selected ? STYLE.selected : STYLE.none,
-      inner,
-    );
-  }
 }
 
 // —————————————————————————————————————————————————————————————— the buffer

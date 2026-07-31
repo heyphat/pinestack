@@ -42,7 +42,7 @@ import { saveFlags } from './persist.js';
 import { Screen } from './render/screen.js';
 import { appendSession } from './run/session-log.js';
 import { runPinerun, type SpawnOptions } from './run/spawn.js';
-import type { AppState, RunState } from './state.js';
+import type { AppState, EditState, RunState } from './state.js';
 import { applyProposal, nextRunId, overridesFor, revertOverrides } from './state.js';
 import { groundReport, parseAskResponse, type AskProvider } from './ask/protocol.js';
 import type { Key, Terminal } from './terminal.js';
@@ -301,7 +301,7 @@ export class App {
       return;
     }
     if (key.name === 'enter') {
-      this.commitField(edit.command, edit.index, edit.buffer);
+      this.commitField(edit);
       state.edit = null;
       return;
     }
@@ -633,13 +633,50 @@ export class App {
     };
   }
 
+  /**
+   * One swept axis, committed on its own.
+   *
+   * An empty value removes the axis, which is what makes the INPUTS row a toggle:
+   * `↵` on a swept input opens its grid, and clearing it drops the input from the
+   * run. Nothing else in the model is touched, so the other axes survive — the
+   * whole point of editing them one at a time.
+   */
+  private commitAxis(command: CommandId, name: string, spec: string): void {
+    const model = this.state.flags[command];
+    const key = command === 'compare' ? 'input-a' : 'input';
+    const pairs = [...((model.values[key] as Pair[] | undefined) ?? [])];
+    const at = pairs.findIndex((pair) => pair.name === name);
+
+    if (spec === '') {
+      if (at < 0) return;
+      pairs.splice(at, 1);
+    } else if (at >= 0) {
+      pairs[at] = { name, value: spec };
+    } else {
+      pairs.push({ name, value: spec });
+    }
+
+    model.values[key] = pairs.length > 0 ? pairs : undefined;
+    this.state.status =
+      spec === ''
+        ? `${name} dropped from the grid`
+        : `${name} = ${spec} · ${pairs.length} ${pairs.length === 1 ? 'axis' : 'axes'}`;
+  }
+
   /** Parse a typed value back into the FlagModel according to the flag's kind. */
-  private commitField(command: CommandId, index: number, raw: string): void {
+  private commitField(edit: EditState): void {
     const state = this.state;
+    const { command, index } = edit;
+    const text = edit.buffer.trim();
+
+    if (edit.origin === 'axis') {
+      if (edit.input != null) this.commitAxis(command, edit.input, text);
+      return;
+    }
+
     const schema = schemaFor(command);
     const flags = visibleFlags(state, command);
     const model = state.flags[command];
-    const text = raw.trim();
 
     if (index < schema.scripts) {
       const next = [...model.scripts];

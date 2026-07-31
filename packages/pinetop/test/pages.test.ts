@@ -87,18 +87,29 @@ describe('P0 — the shell', () => {
     expect(makeApp(state).render(100, 30)).toHaveLength(30);
   });
 
-  test('the tab bar numbers the seven pages in workflow order', () => {
+  test('the tab bar numbers the eight pages in workflow order', () => {
     const text = screenText(makeApp(state));
-    expect(text).toContain('1 BACKTEST');
-    expect(text).toContain('2 SWEEP');
-    expect(text).toContain('3 WALKFORWARD');
-    expect(text).toContain('4 SCAN');
-    expect(text).toContain('5 PORTFOLIO');
-    expect(text).toContain('6 COMPARE');
-    expect(text).toContain('7 TRADES');
+    expect(text).toContain('1 EDITOR');
+    expect(text).toContain('2 BACKTEST');
+    expect(text).toContain('3 SWEEP');
+    expect(text).toContain('4 WALKFORWARD');
+    expect(text).toContain('5 SCAN');
+    expect(text).toContain('6 PORTFOLIO');
+    expect(text).toContain('7 COMPARE');
+    expect(text).toContain('8 TRADES');
   });
 
-  test('1–7 switch pages', () => {
+  test('a terminal too narrow for eight titles names only the page you are on', () => {
+    state.page = 'scan';
+    const text = screenText(makeApp(state, 80, 24), 80, 24);
+    const tabs = text.split('\n')[0]!;
+    expect(tabs).toContain('5 SCAN');
+    expect(tabs).not.toContain('WALKFORWARD');
+    // The grid size still has room, which is the whole point of going compact.
+    expect(tabs).toContain('80×24');
+  });
+
+  test('1–8 switch pages', () => {
     const app = makeApp(state);
     const expected: PageId[] = [...PAGES];
     for (let i = 0; i < expected.length; i++) {

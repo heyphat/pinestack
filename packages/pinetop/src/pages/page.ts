@@ -10,6 +10,7 @@
 import type { Rect, Screen } from '../render/screen.js';
 import type { AppState } from '../state.js';
 import type { CommandId, PageId } from '../flags/schema.js';
+import type { Key } from '../terminal.js';
 
 export interface PageContext {
   state: AppState;
@@ -35,8 +36,32 @@ export interface Page {
   confirm?: (state: AppState) => string | undefined;
   /** Columns this page needs before it degrades (§4.4). */
   minCols: number;
+  /**
+   * What actually happens below `minCols`, for the width warning. Defaults to
+   * dropping the right rail, which is what the six command pages do — a page
+   * without a rail must say what it really loses, or the warning describes a
+   * degradation that did not happen (§6: a dropped column has to be visible as a
+   * decision, which means naming the right one).
+   */
+  degradeNote?: string;
   /** The breadcrumb's left side: `pinetop / script / window / run`. */
   breadcrumb: (state: AppState) => string[];
+  /**
+   * Keys the page claims before the global keymap, returning true when it took
+   * one.
+   *
+   * This exists for exactly one page. EDITOR is a modal text buffer, so `j` there
+   * is a character and not a cursor move, and `1` is a count and not a page
+   * switch — a page that owns the keyboard cannot be expressed by adding entries
+   * to a global table. Every other page leaves this unset and is driven entirely
+   * by `keymap.ts`, which is what keeps `?` an honest account of the bindings.
+   *
+   * A page that claims keys must leave a way out (EDITOR never takes `tab` in
+   * normal mode, and never takes `ctrl-c` at all).
+   */
+  onKey?: (state: AppState, key: Key) => boolean;
+  /** This page's hint strip. Defaults to the global `HINTS`. */
+  hints?: (state: AppState) => readonly { key: string; label: string }[];
 }
 
 /**

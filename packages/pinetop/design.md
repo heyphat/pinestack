@@ -2,7 +2,7 @@
 
 **Name:** `pinetop` — confirmed
 **Author:** Design · **Status:** Built — see §7 and [README](./README.md)
-**Created:** 2026-07-31 · **Last Updated:** 2026-07-31 (v1.2)
+**Created:** 2026-07-31 · **Last Updated:** 2026-07-31 (v1.3)
 **Prototype:** `Tessera Backtester TUI.dc.html` (file name pending rename) (interactive, keyboard-driven)
 **Upstream:** `pinestack/packages/pinerun`, `pinestack/docs/*.md`
 
@@ -68,8 +68,17 @@ makes the loop, and therefore this tool, worth building.
   streaming state has no run boundary and no final number, so it does not fit the
   report-page shape this app is built around. No LIVE page, now or later.
 - **NG3** — Not a web app. No browser, no server, no remote state.
-- **NG4** — Not a Pine editor. Scripts are edited in the user's editor; `pinetop` reloads them.
+- **NG4** — ~~Not a Pine editor. Scripts are edited in the user's editor; `pinetop` reloads
+  them.~~ **Revised (as built): page 1 is a vim-modal editor for the `.pine`.** The
+  reasoning is §2's own: a session is iterative, and the flags were only half of what
+  iterating changes. A stop that is wrong in the *script* sent the user to another
+  window, and coming back left a stale report beside a changed file with nothing on
+  screen saying so. The `.pine` is part of the invocation; it now has a page like every
+  other part. What NG4 still rules out stands — no compile, no lint, no completion from a
+  language server: `piner` remains the only authority on whether the script is valid
+  (§3 NG1). See §4.8.
 - **NG5** — No scrolling viewport. Content that exceeds the terminal truncates (§4.4).
+  The EDITOR buffer is the one exception, and §4.8 records why.
 
 ---
 
@@ -116,22 +125,36 @@ One tab per command, numbered, in workflow order:
 
 | # | Page | Command | Purpose (docs' own verb) |
 |---|---|---|---|
-| 1 | BACKTEST | `pinerun backtest` | Analyze — one strategy, one symbol, full tearsheet |
-| 2 | SWEEP | `pinerun sweep` | Optimize — one script's input grid |
-| 3 | WALKFORWARD | `pinerun walkforward` | Validate — does the swept edge survive OOS |
-| 4 | SCAN | `pinerun scan` | Screen — one script across N symbols |
-| 5 | PORTFOLIO | `pinerun portfolio` | Combine — N symbols, one pot |
-| 6 | COMPARE | `pinerun compare` | Compare — two strategies, same bars |
-| 7 | TRADES | (ledger of the current run) | The fills and the engine log |
+| 1 | EDITOR | (the `.pine` source) | Write — the script itself, vim keys |
+| 2 | BACKTEST | `pinerun backtest` | Analyze — one strategy, one symbol, full tearsheet |
+| 3 | SWEEP | `pinerun sweep` | Optimize — one script's input grid |
+| 4 | WALKFORWARD | `pinerun walkforward` | Validate — does the swept edge survive OOS |
+| 5 | SCAN | `pinerun scan` | Screen — one script across N symbols |
+| 6 | PORTFOLIO | `pinerun portfolio` | Combine — N symbols, one pot |
+| 7 | COMPARE | `pinerun compare` | Compare — two strategies, same bars |
+| 8 | TRADES | (ledger of the current run) | The fills and the engine log |
 
 **Decision 4.2.a — Tabs are commands, not topics.** An earlier prototype had topical tabs
 (BACKTEST / TRADES / OPTIMIZE / LOGS). It broke down as soon as more commands arrived:
-users think in commands because that is what they type. Number keys `1`–`7` map to the
+users think in commands because that is what they type. Number keys `1`–`8` map to the
 same ordinal the tab shows.
 
 **Decision 4.2.b — TRADES is the exception and is justified.** It is not a command; it is
 the ledger plus engine log for whichever run is loaded. It exists because `--trades`
 output is consumed differently from a tearsheet — you scan rows, then interrogate one.
+
+**Decision 4.2.d — EDITOR is the other exception, and it goes first.** It is not a command
+either; it is the input to all of them. It is page 1 rather than appended at page 9 because
+the tabs are in workflow order and the source is where the workflow starts — every other
+page is downstream of the file this one edits. The ordinals of the six command pages
+therefore shift by one, which is a real cost paid once (§4.2's "the seven ordinals are
+final" no longer holds; eight are).
+
+**Decision 4.2.e — Below ~105 columns the tab bar names only the active page.** Eight titles
+plus the run status and the grid size no longer fit an 80-column terminal, and a tab bar
+overprinted by the grid size is worse than a compact one. The active page keeps its title
+immediately to the right of its own ordinal, so which tab it belongs to is unambiguous; the
+`:` palette and `?` list the rest.
 
 **Decision 4.2.c — Within a page, `tab` cycles a focus ring of panes.** The focused pane
 is marked two ways: accent border and a `◆` before its title. `j`/`k` moves selection
@@ -141,7 +164,7 @@ within the focused pane.
 
 | Key | Action |
 |---|---|
-| `1`–`7` | Switch command page |
+| `1`–`8` | Switch page |
 | `tab` / `shift-tab` | Next / previous pane in the focus ring |
 | `j` / `k`, `↓` / `↑` | Move selection |
 | `g` / `G` | First / last row |
@@ -156,6 +179,10 @@ within the focused pane.
 | `esc` | Dismiss overlay · clear filter · unscope log |
 | `ctrl-x` | Reject pending AI proposal |
 
+On EDITOR, while the buffer has focus, these bindings do **not** apply — the buffer owns the
+keyboard (§4.8). `tab` and `ctrl-c` are the two it refuses to take, so the table above is
+always one keystroke away.
+
 ### 4.3 Rendering contract
 
 This section is the one an implementer must not improvise. The prototype hit each of
@@ -166,6 +193,14 @@ A terminal truncates lines; it does not wrap tables or grow scrollbars. Every ta
 `white-space: nowrap` + clipped at the pane edge, so rows keep a uniform single-line
 rhythm. Content wider than the frame is cut, not scrolled. In a real TTY this is free; in
 the HTML prototype it must be enforced explicitly.
+
+*Exception, as built: the EDITOR buffer scrolls vertically.* Every other pane obeys the rule
+by **paging** its selection — the window jumps, it does not scroll. That is wrong for a text
+buffer and only for a text buffer: the cursor *is* the position, so a window that jumped a
+page whenever the cursor crossed a boundary would move the text out from under an edit in
+progress. The buffer therefore keeps a vim-style `scrolloff` of 3, and nothing else in the
+app scrolls. Horizontally it still truncates, with one shared offset for all rows so the
+indentation stays on a common grid.
 
 **Decision 4.3.b — Charts are braille (U+2800–U+28FF), not block fills.**
 Braille gives 2×4 sub-cell resolution, so an 84-column pane carries 168 samples. Three
@@ -283,6 +318,48 @@ the CLI does, and it respects the user's theme); the gold/brick mapping applies 
 GUI rendering only. Green/red is not available in Classical, and positives already read as
 accent throughout the app.
 
+Pine syntax colours are a separate scale (`SYNTAX` in `render/theme.ts`), kept apart from the
+value scale on purpose: these roles are lexical, and a number in source is not a "positive
+value". Conflating them would make a report's colour semantics move when a syntax colour is
+retuned.
+
+### 4.8 The editor (page 1)
+
+**Decision 4.8.a — Modal, with vim's bindings.** A plain text field cannot share a keyboard
+with a TUI: `j` cannot mean both "next flag" and "insert a j", so something has to say which,
+and a mode is that something. Given a mode, the rest of the grammar — counts, operators,
+motions — is what makes editing here worth doing rather than shelling out. The audience
+already has these bindings in their fingers.
+
+**Decision 4.8.b — The buffer owns the keyboard, with two escapes.** While the buffer has
+focus, the global keymap is suspended: digits are counts, `j` is a character. Two keys are
+refused deliberately. `tab` always leaves the pane, so the buffer is never a keyboard trap.
+`ctrl-c` always quits pinetop, so the app remains killable from a half-typed insert. `q` *is*
+taken, and answers with how to leave — quitting the app on a stray `q` would discard an
+unwritten buffer, and that is the one outcome this page must not have. Outside the buffer,
+`q` warns once before discarding, which is the same two-step `:q` / `:q!` gives inside it.
+
+**Decision 4.8.c — The page opens on FILES, not on the buffer.** Entering a surface that
+takes the whole keyboard has to be deliberate — `tab` or `↵`, never where you merely landed
+by pressing `1`.
+
+**Decision 4.8.d — The buffer is the only writer, and only on `:w`.** Every filesystem write
+goes through one injected interface (`EditorIo`), so "what can this program overwrite?" is
+answerable by reading one file, and the key layer is testable by pressing keys at a value.
+Nothing is written as a side effect of editing.
+
+**Decision 4.8.e — The buffer state is not persisted.** `.pinetop/flags.json` carries flags;
+an unwritten buffer restored from a previous session would be an unexplained divergence from
+the file on disk — the same reasoning that keeps pending parameter edits out of it (§4.5.c).
+
+**Decision 4.8.f — The INPUTS outline is read from the buffer, not from disk.** It is the same
+extraction `--input` is validated against (§4.5.e), run over the text in front of you, so a
+renamed `input()` title shows up in the outline before it is written.
+
+**What is deliberately not implemented:** `.` (repeat), macros, marks, named registers,
+visual block, and regex search (`/` is a substring). The `?` overlay lists exactly what is
+bound, so an unimplemented key does nothing rather than something almost-right.
+
 ---
 
 ## 5. Alternatives Considered
@@ -295,7 +372,8 @@ accent throughout the app.
 | Persistent AI chat sidebar | Conversation always visible | Permanently costs width; implies chat is the primary mode | Prompt drawer on demand (§4.5.a) |
 | AI applies changes directly | Fewer keystrokes | Silent divergence from the script on disk | Review-then-apply (§4.5.c) |
 | Filled-area block charts (`▁▂▃█`) | Simple to render | Reads as a slab at realistic equity ranges; fights the palette | Stroked braille line (§4.3.b/d) |
-| Scrollable panes | Nothing is ever hidden | Not terminal behaviour; breaks the fixed grid | Truncate like a TTY (§4.3.a) |
+| Scrollable panes | Nothing is ever hidden | Not terminal behaviour; breaks the fixed grid | Truncate like a TTY (§4.3.a) — except the EDITOR buffer, where the cursor defines the window (§4.8) |
+| Shell out to `$EDITOR` instead of an editor page | No editor to build or maintain | Tears down the frame, loses the report, and the flags/outline are no longer beside the source | An in-frame buffer keeps the edit → rerun → reread loop in one screen (§4.8.a) |
 | `--input` overrides listed in the config pane | Shows strategy params next to flags | `universe`, `bar`, and unmapped rows are not `--input` params; duplicates `--symbol`/`--tf` | Removed; the pane lists only real flags |
 
 ---
@@ -324,8 +402,9 @@ accent throughout the app.
 | **P4 — Trades + log** | Ledger, filter, per-fill log scoping | Selecting a fill scopes the log; `esc` restores |
 | **P5 — Ask** | Prompt drawer, grounding payload, proposal protocol, apply/reject/revert | No path exists that mutates config without a keypress |
 | **P6 — Persistence** | Per-project flag state, run history, `walkforward` hand-off from a swept winner | Reopening resumes the last session's flags |
+| **P7 — Editor** | Page 1: vim buffer (motions, operators, counts, visual, ex commands), Pine highlighting, FILES + INPUTS sidebar | The buffer owns the keyboard but never traps it; only `:w` writes |
 
-**Status: P0–P6 are built** (`packages/pinetop/`), verified against real `pinerun`
+**Status: P0–P7 are built** (`packages/pinetop/`), verified against real `pinerun`
 runs for all six commands. Three things the build added that this plan did not
 anticipate, each because the alternative was a screen that lied:
 
@@ -422,11 +501,11 @@ anticipate, each because the alternative was a screen that lied:
 | **Impact** | New binary in the pinestack family; no change to `pinerun` or piner | Additive |
 | **Hard Constraints** | Uniform font stream (U+2800 blanks, overlay markers, measured cell width); pane titles never clipped; stroked charts scaled to min–max | Each was a real defect in the prototype |
 | **AI Contract** | `{answer, proposal?: {effect, note, edits[]}, action?}`; `edits[].input` is a Pine `input()` title, `to` is a bare value | Never applied without a keypress |
-| **Estimated Effort** | 7 phases, P0–P6 | P1 is the vertical slice that proves the architecture |
-| **Status** | Built — P0–P6 in `packages/pinetop/` | Not yet a release artifact; built from a checkout |
+| **Estimated Effort** | 8 phases, P0–P7 | P1 is the vertical slice that proves the architecture |
+| **Status** | Built — P0–P7 in `packages/pinetop/` | Not yet a release artifact; built from a checkout |
 | **Owner (DRI)** | [TODO] | Single accountable person, not a team |
 | **Open Questions** | 2 of 4 remain (§10.3 run-history depth, §10.4 `--watch`) | Flag-schema drift is now caught by `--check-flags` rather than prevented |
-| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built | 2026-07-31 |
+| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built · v1.3 — NG4 revised: EDITOR is page 1 (§4.8), the eight ordinals replace seven | 2026-07-31 |
 
 ---
 
@@ -434,6 +513,7 @@ anticipate, each because the alternative was a screen that lied:
 
 - `[TODO]` Name a DRI (single accountable owner) and a target date for §12.
 
-Resolved 2026-07-31: name is `pinetop`; no LIVE page (§3 NG2), so the seven tab ordinals
-in §4.2 are final; the §2 iterative-session premise is confirmed. §10.1 and §10.2 are
-resolved as built; §10.3 and §10.4 remain open.
+Resolved 2026-07-31: name is `pinetop`; no LIVE page (§3 NG2); the §2 iterative-session
+premise is confirmed. §10.1 and §10.2 are resolved as built; §10.3 and §10.4 remain open.
+The tab ordinals are **eight**, not the seven this document previously called final: NG4 is
+revised and EDITOR is page 1 (§4.2.d, §4.8).

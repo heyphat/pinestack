@@ -9,14 +9,23 @@
  */
 
 import { commandLine, displayValue, isSet, validate, withOverrides } from './flags/model.js';
-import { schemaFor, PAGE_PURPOSE, PAGES, PAGE_TITLES, type CommandId } from './flags/schema.js';
-import { BINDINGS } from './keymap.js';
+import {
+  commandForPage,
+  isCommandPage,
+  schemaFor,
+  PAGE_PURPOSE,
+  PAGES,
+  PAGE_TITLES,
+  type CommandId,
+} from './flags/schema.js';
+import { BINDINGS, EDITOR_KEYS } from './keymap.js';
 import { displayWidth, drawPane, truncate, type Rect, type Screen } from './render/screen.js';
 import { drawLeader } from './render/table.js';
 import { STYLE, type Style } from './render/theme.js';
 import type { AppState } from './state.js';
 import { overridesFor } from './state.js';
 import { visibleFlags } from './pages/config-pane.js';
+import { ensureEditorFile } from './pages/editor.js';
 
 /** Centre a box of the given size in the screen. */
 function centred(screen: Screen, w: number, h: number): Rect {
@@ -44,6 +53,13 @@ const GROUP_TITLES: Record<string, string> = {
 
 /** §7 P0's exit criterion: `?` documents the real keymap. It is generated. */
 export function drawHelp(screen: Screen, state: AppState): void {
+  // On EDITOR the buffer's own bindings are the ones you need, and there are more
+  // of them than the app's — so that page gets a two-column box wide enough to
+  // hold both keyboards at once rather than a truncated version of either.
+  if (state.page === 'editor') {
+    drawEditorHelp(screen, state);
+    return;
+  }
   const rect = centred(screen, 76, 28);
   clear(screen, rect);
   // The legend answers "what am I running" — both halves of it, since every
@@ -87,6 +103,72 @@ export function drawHelp(screen: Screen, state: AppState): void {
 }
 
 /**
+ * `?` on the EDITOR page.
+ *
+ * Both keyboards, side by side: the buffer's bindings on the left (the ones in
+ * play while it has focus) and the app's on the right (the ones `tab` gets you
+ * back to). Generated from `EDITOR_KEYS` and `BINDINGS`, so neither column can
+ * drift from what the keys actually do.
+ */
+function drawEditorHelp(screen: Screen, state: AppState): void {
+  const rect = centred(screen, 116, 34);
+  clear(screen, rect);
+  const buffer = state.editor.buffer;
+  const inner = drawPane(screen, rect, {
+    title: 'KEYS — EDITOR',
+    focused: true,
+    legend:
+      buffer == null ? 'no file open' : `${buffer.path}${buffer.modified ? ' · unwritten' : ''}`,
+  });
+  if (inner.h <= 1) return;
+
+  const leftW = Math.min(62, Math.max(30, inner.w - 48));
+  const keyW = 10;
+
+  screen.text(inner.x, inner.y, 'IN THE BUFFER', STYLE.title, inner);
+  let y = inner.y + 1;
+  for (const key of EDITOR_KEYS) {
+    if (y >= inner.y + inner.h - 1) break;
+    screen.text(inner.x + 1, y, key.display.padEnd(keyW), STYLE.accent, inner);
+    screen.text(
+      inner.x + 1 + keyW + 1,
+      y,
+      truncate(key.description, Math.max(0, leftW - keyW - 3)),
+      STYLE.none,
+      inner,
+    );
+    y += 1;
+  }
+
+  const rightX = inner.x + leftW;
+  screen.text(rightX, inner.y, 'ELSEWHERE IN PINETOP', STYLE.title, inner);
+  let ry = inner.y + 1;
+  for (const binding of BINDINGS) {
+    if (ry >= inner.y + inner.h - 1) break;
+    screen.text(rightX + 1, ry, binding.display.padEnd(11), STYLE.accent, inner);
+    screen.text(
+      rightX + 13,
+      ry,
+      truncate(binding.description, Math.max(0, inner.x + inner.w - rightX - 14)),
+      STYLE.none,
+      inner,
+    );
+    ry += 1;
+  }
+
+  screen.text(
+    inner.x,
+    inner.y + inner.h - 1,
+    truncate(
+      'The buffer takes every key while it has focus, except tab (leave the pane) and ctrl-c (quit pinetop).',
+      inner.w,
+    ),
+    STYLE.muted,
+    inner,
+  );
+}
+
+/**
  * The first-launch overlay.
  *
  * `pinetop` with no arguments has to be a usable starting point, not a screen
@@ -95,7 +177,7 @@ export function drawHelp(screen: Screen, state: AppState): void {
  * Once `.pinetop/flags.json` exists this is never shown again.
  */
 export function drawWelcome(screen: Screen, state: AppState): void {
-  const command = state.page === 'trades' ? 'backtest' : state.page;
+  const command = commandForPage(state.page);
   const model = state.flags[command];
   const scriptSet = model.scripts[0] != null;
   const targetFlag = command === 'scan' || command === 'portfolio' ? '--symbols' : '--symbol';
@@ -121,7 +203,7 @@ export function drawWelcome(screen: Screen, state: AppState): void {
     ],
     ['· 3. run                r, then ↵ on RUN', STYLE.none],
     ['', STYLE.none],
-    ['1–7 switch command pages · ? shows every key', STYLE.muted],
+    [`1–${PAGES.length} switch pages · 1 EDITOR edits the .pine · ? shows every key`, STYLE.muted],
     ['Flags are saved per project, so next time this is already set.', STYLE.muted],
   ];
 
@@ -147,6 +229,9 @@ export function paletteItems(): PaletteItem[] {
     hint: PAGE_PURPOSE[page],
     run: (state) => {
       state.page = page;
+      // The same courtesy `1` gets: EDITOR opens the loaded script rather than
+      // showing an empty buffer.
+      if (page === 'editor') ensureEditorFile(state);
       return undefined;
     },
   }));
@@ -165,7 +250,7 @@ export function paletteItems(): PaletteItem[] {
       hint: 'discard AI/user overrides for this script',
       run: (state) => {
         const page = state.page;
-        if (page === 'trades') return 'no config on this page';
+        if (!isCommandPage(page)) return 'no config on this page';
         const key = state.flags[page].scripts[0] ?? '';
         if (key === '') return 'no script loaded';
         delete state.overrides[key];

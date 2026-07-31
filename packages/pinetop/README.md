@@ -78,7 +78,7 @@ pinetop
 
 On a fresh project it loads the only `.pine` it finds (or points you at the
 STRATEGIES pane if there are several), then names the two or three things left to
-set. From there:
+set. From there (on BACKTEST — page `2`):
 
 |              |                                                                                 |
 | ------------ | ------------------------------------------------------------------------------- |
@@ -119,23 +119,30 @@ One tab per command, numbered in workflow order.
 
 | #   | Page        | Command                     | Purpose                                            |
 | --- | ----------- | --------------------------- | -------------------------------------------------- |
-| 1   | BACKTEST    | `pinerun backtest`          | Analyze — one strategy, one symbol, full tearsheet |
-| 2   | SWEEP       | `pinerun sweep`             | Optimize — one script's input grid                 |
-| 3   | WALKFORWARD | `pinerun walkforward`       | Validate — does the swept edge survive OOS         |
-| 4   | SCAN        | `pinerun scan`              | Screen — one script across N symbols               |
-| 5   | PORTFOLIO   | `pinerun portfolio`         | Combine — N symbols, one pot                       |
-| 6   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
-| 7   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
+| 1   | EDITOR      | (the `.pine` source)        | Write — the script itself, vim keys                |
+| 2   | BACKTEST    | `pinerun backtest`          | Analyze — one strategy, one symbol, full tearsheet |
+| 3   | SWEEP       | `pinerun sweep`             | Optimize — one script's input grid                 |
+| 4   | WALKFORWARD | `pinerun walkforward`       | Validate — does the swept edge survive OOS         |
+| 5   | SCAN        | `pinerun scan`              | Screen — one script across N symbols               |
+| 6   | PORTFOLIO   | `pinerun portfolio`         | Combine — N symbols, one pot                       |
+| 7   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
+| 8   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
 
 The workflow between them is navigation, not documentation: `w` on SWEEP carries
 the grid into WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed
-inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it.
+inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it. EDITOR is
+page 1 because the source is where the workflow starts — every other page is
+downstream of the file it edits.
+
+Below about 105 columns there is no room for eight titles beside the run status,
+so the tab bar names only the page you are on and shows the rest as bare
+ordinals. `:` and `?` list them all.
 
 ## Keys
 
 | Key                  | Action                                                                 |
 | -------------------- | ---------------------------------------------------------------------- |
-| `1`–`7`              | Switch page                                                            |
+| `1`–`8`              | Switch page                                                            |
 | `tab` / `shift-tab`  | Next / previous pane in the focus ring                                 |
 | `j` / `k`, `↓` / `↑` | Move selection                                                         |
 | `g` / `G`            | First / last row                                                       |
@@ -156,6 +163,59 @@ inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it.
 `?` is generated from the keymap table, so it always documents the real
 bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
 `ctrl-p` is the binding.)
+
+On EDITOR, while the buffer has focus, none of the above applies — the buffer
+owns the keyboard. `?` there shows both keyboards side by side.
+
+## The editor
+
+Page 1 is a vim-modal editor for the `.pine` itself: the project's scripts and
+the open one's `input()` titles in the sidebar, the buffer in the wide middle
+with a line-number gutter and Pine syntax colouring from your terminal's palette.
+
+It opens on the strategy you already have loaded. `tab` (or `↵` on a file in
+FILES) enters the buffer; from there it is vim:
+
+|                     |                                                             |
+| ------------------- | ----------------------------------------------------------- |
+| `i` `I` `a` `A` `o` | Insert · at the indent · after · at the line end · a line   |
+| `h j k l` `w b e`   | By character, by word (`W B E` by WORD)                     |
+| `0 ^ $` `gg G` `{}` | Line start / indent / end · first / last line · paragraph   |
+| `f F t T`           | To a character on this line                                 |
+| `d c y` + a motion  | `dw` `d$` `c2w` `y}` `dfx` `dgg` — and `dd` `cc` `yy`       |
+| `D C Y` `x` `s` `p` | To the line end · a character · put                         |
+| `>>` `<<` `J` `r`   | Indent · outdent · join · replace one character             |
+| `v` `V`             | Visual · visual line, then `d` `y` `c` `>` `<`              |
+| `u` `ctrl-r`        | Undo · redo (one insert is one step)                        |
+| `/` `?` `n` `N`     | Search (substring, not regex) and repeat                    |
+| `:w` `:wq` `:q`     | Write · write and close · close (`:q!` discards)            |
+| `:e path`           | Open a file; a path with nothing behind it starts a new one |
+| `ctrl-d` `ctrl-u`   | Half a window down / up (`ctrl-f` / `ctrl-b` a whole one)   |
+| `:42` `:set nonu`   | Go to a line · hide the gutter                              |
+
+Counts work where you would expect them (`3dd`, `2w`, `42G`).
+
+Two keys the buffer refuses on purpose:
+
+- **`tab` always leaves the pane**, so the buffer is never a keyboard trap. Every
+  other key belongs to it while it has focus — digits are counts, not page
+  switches.
+- **`ctrl-c` always quits pinetop**, even mid-insert. `q` does not: inside the
+  buffer it tells you to use `:q`, and everywhere else it warns once before
+  discarding an unwritten buffer. Quitting on a stray `q` would throw away
+  edits, which is the one thing this page must not do.
+
+Nothing is written except by `:w`. The INPUTS outline is read from the buffer
+rather than from disk, so a renamed `input()` title shows up there before you
+save — and that is the same list `--input NAME` is checked against. The buffer is
+not persisted between sessions, for the same reason pending parameter edits are
+not: a restored unwritten buffer would be an unexplained divergence from the file
+on disk.
+
+`.` (repeat), macros, marks, named registers, visual block and regex search are
+not implemented. `?` lists exactly what is bound, so an unbound key does nothing
+rather than something almost-right. Whether the script compiles is still
+`piner`'s answer — press `2` then `r`.
 
 ## How it behaves
 
@@ -245,6 +305,6 @@ pinetop --check-flags
 ## Development
 
 ```sh
-bun test packages/pinetop/    # 156 tests
+bun test packages/pinetop/    # 289 tests
 bunx tsc -b                   # typecheck
 ```

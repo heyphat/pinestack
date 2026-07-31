@@ -15,6 +15,8 @@ import type { FlagModel, Override } from './flags/model.js';
 import { emptyModel } from './flags/model.js';
 import type { CommandId, PageId } from './flags/schema.js';
 import { COMMANDS } from './flags/schema.js';
+import type { EditorState } from './editor/state.js';
+import { initialEditor } from './editor/state.js';
 import type { LogLine } from './run/spawn.js';
 
 export type RunStatus = 'idle' | 'running' | 'ok' | 'failed';
@@ -127,6 +129,12 @@ export interface AppState {
   /** The field currently being typed into, in the pane or the dialog (§10.2). */
   edit: EditState | null;
   /**
+   * The EDITOR page's buffer and vim mode. Not persisted — an unwritten buffer
+   * restored from a previous session would be an unexplained divergence from the
+   * file on disk, the same reason overrides are not persisted (§4.5.c).
+   */
+  editor: EditorState;
+  /**
    * Reveal the rarely-touched flags (`--mintick`, `--data-dir`, the magnifier
    * overrides, …). Off by default so the config pane stays readable, but it must
    * be reachable: every flag has to be settable from the UI, or the user is back
@@ -157,6 +165,10 @@ export interface AppState {
 export function initialPanes(): Record<PageId, PaneSelection> {
   const make = (focus: string): PaneSelection => ({ focus, cursor: {} });
   return {
+    // EDITOR opens on FILES, not on the buffer. The buffer takes the whole
+    // keyboard while it has focus — `1` there is a count, not page 1 — so
+    // entering it is a deliberate `tab` or `↵`, never where you simply land.
+    editor: make('files'),
     backtest: make('strategies'),
     sweep: make('axes'),
     walkforward: make('config'),
@@ -181,6 +193,7 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
     ask: { open: false, input: '', transcript: [], pending: null, action: null, busy: false },
     overlay: { kind: 'none', buffer: '', cursor: 0 },
     edit: null,
+    editor: initialEditor(),
     showAdvanced: false,
     tradeFilter: '',
     logScope: null,

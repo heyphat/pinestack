@@ -82,3 +82,21 @@ export function scriptLabel(path: string): string {
   const base = path.split(/[\\/]/).pop() ?? path;
   return base.replace(/\.pine$/, '');
 }
+
+/**
+ * Discovery hits the filesystem, so it is cached for the process lifetime and
+ * shared: the STRATEGIES pane and the editor's FILES pane must not disagree
+ * about which scripts exist, and `:w` on a new file has to make it appear in
+ * both.
+ */
+let cache: ScriptEntry[] | undefined;
+
+export function cachedScripts(cwd?: string): ScriptEntry[] {
+  cache ??= discoverScripts(cwd);
+  return cache;
+}
+
+/** Drop the cache: a script was added, renamed, or written for the first time. */
+export function refreshScripts(): void {
+  cache = undefined;
+}

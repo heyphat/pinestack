@@ -13,8 +13,8 @@ This is the "terminal" layer around the engine. piner stays a pure, browser-safe
 library; pinestack adds the data, orchestration, and interactive rings on top.
 
 Two ways to drive it: `pinerun`, the one-shot CLI, and `pinetop`, a terminal UI
-over that CLI for when you are iterating on the same script and want the flags
-editable next to the report instead of retyped each run.
+over that CLI for when you are iterating on the same script and want the source
+and the flags editable next to the report instead of retyped each run.
 
 ## Install
 
@@ -55,11 +55,11 @@ Prefer to build them yourself? See [Getting started](#getting-started) below, th
 
 ## Packages
 
-| Package                                  | Role                                                                                                                                                                                                                | Entry points                                                                |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| [`@heyphat/pinery`](./packages/pinery)   | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache. | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                    |
-| [`@heyphat/pinerun`](./packages/pinerun) | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI) |
-| [`@heyphat/pinetop`](./packages/pinetop) | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload.   | `@heyphat/pinetop`, `pinetop` (TUI)                                         |
+| Package                                  | Role                                                                                                                                                                                                                                                | Entry points                                                                |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| [`@heyphat/pinery`](./packages/pinery)   | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache.                                 | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                    |
+| [`@heyphat/pinerun`](./packages/pinerun) | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI) |
+| [`@heyphat/pinetop`](./packages/pinetop) | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command plus a vim editor for the `.pine`, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload. | `@heyphat/pinetop`, `pinetop` (TUI)                                         |
 
 ```
 piner            (engine — separate repo, pure, browser-safe)
@@ -218,10 +218,12 @@ flag, and [`packages/pinerun/README.md`](./packages/pinerun/README.md) for the
 programmatic API.
 
 Once you are iterating rather than running one-shot, `pinetop` puts those same
-commands on seven pages with the flags editable beside the report:
+commands on eight pages with the flags editable beside the report — and page 1 is
+a vim editor for the `.pine` itself, so the whole loop stays in one screen:
 
 ```bash
-pinetop      # 1–7 pages · tab panes · ↵ edit a flag · r ↵ run · ? keys
+pinetop      # 1–8 pages · tab panes · ↵ edit a flag · r ↵ run · ? keys
+             # page 1: the source, vim keys — i inserts, :w writes, tab leaves
 ```
 
 ### Developing from source

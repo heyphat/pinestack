@@ -23,7 +23,7 @@ import { int, isoDay, isoMonth } from '../render/format.js';
 import { drawPane, truncate, type Rect } from '../render/screen.js';
 import { drawLeader } from '../render/table.js';
 import { STYLE, type Style } from '../render/theme.js';
-import { discoverScripts, scriptLabel, type ScriptEntry } from '../scripts.js';
+import { cachedScripts, refreshScripts, scriptLabel, type ScriptEntry } from '../scripts.js';
 import type { AppState } from '../state.js';
 import {
   fillModelNote,
@@ -35,17 +35,12 @@ import {
 import { configRowCount, drawConfigPane } from './config-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-/** Discovery hits the filesystem, so it is cached for the process lifetime. */
-let scriptCache: ScriptEntry[] | undefined;
-
+/** The shared discovery cache — see `scripts.ts`; the editor reads the same one. */
 export function scripts(): ScriptEntry[] {
-  scriptCache ??= discoverScripts();
-  return scriptCache;
+  return cachedScripts();
 }
 
-export function refreshScripts(): void {
-  scriptCache = undefined;
-}
+export { refreshScripts };
 
 export function report(state: AppState): BacktestJson | undefined {
   if (state.run?.command !== 'backtest' || state.run.status !== 'ok') return undefined;

@@ -25,12 +25,14 @@ import {
   filterPalette,
   paletteItems,
 } from './overlays.js';
-import { backtestPage, refreshScripts } from './pages/backtest.js';
+import { backtestPage } from './pages/backtest.js';
 import { comparePage } from './pages/compare.js';
 import { firstUnmetRow, isRunRow, runRowCount, visibleFlags } from './pages/config-pane.js';
+import { editorPage, ensureEditorFile } from './pages/editor.js';
 import type { Page } from './pages/page.js';
 import { clampCursor } from './pages/page.js';
 import { portfolioPage } from './pages/portfolio.js';
+import { refreshScripts } from './scripts.js';
 import { scanPage } from './pages/scan.js';
 import { selectedCombo, sweepPage } from './pages/sweep.js';
 import { tradesPage } from './pages/trades.js';
@@ -44,7 +46,11 @@ import { applyProposal, nextRunId, overridesFor, revertOverrides } from './state
 import { groundReport, parseAskResponse, type AskProvider } from './ask/protocol.js';
 import type { Key, Terminal } from './terminal.js';
 
+/** Said once before `q` will discard an unwritten editor buffer. */
+const QUIT_WARNING = 'unwritten changes in the editor — :w to write, or q again to discard';
+
 export const PAGE_MAP: Record<PageId, Page> = {
+  editor: editorPage,
   backtest: backtestPage,
   sweep: sweepPage,
   walkforward: walkforwardPage,
@@ -189,6 +195,7 @@ export class App {
 
   start(): void {
     this.terminal.open();
+    if (this.state.page === 'editor') ensureEditorFile(this.state);
     process.stdout.write(`\x1b]2;${windowTitle(this.state)}\x07`);
     this.disposers.push(this.terminal.onKey((key) => this.onKey(key)));
     this.disposers.push(this.terminal.onResizeEvent(() => this.paint()));
@@ -246,6 +253,12 @@ export class App {
       this.paint();
       return;
     }
+    // A page may claim the keyboard before the global keymap. Exactly one does —
+    // EDITOR, where `j` is a character and `1` is a count (see `Page.onKey`).
+    if (this.page.onKey?.(this.state, key) === true) {
+      this.paint();
+      return;
+    }
 
     const action = resolve(key.name);
     if (action != null) this.dispatch(action);
@@ -289,6 +302,9 @@ export class App {
     switch (action.kind) {
       case 'page':
         state.page = action.page;
+        // Arriving at EDITOR with nothing open is a blank screen beside a project
+        // full of scripts; open the loaded one (see `ensureEditorFile`).
+        if (action.page === 'editor') ensureEditorFile(state);
         process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
         break;
       case 'focus-next':
@@ -372,10 +388,19 @@ export class App {
           state.status = 'pending edits reverted';
         }
         break;
-      case 'quit':
+      case 'quit': {
+        // An unwritten buffer must not leave on one keystroke. `q` says so once
+        // and quits on the second, which is the same two-step `:q` / `:q!` gives
+        // inside the editor.
+        const buffer = state.editor.buffer;
+        if (buffer?.modified === true && state.status !== QUIT_WARNING) {
+          state.status = QUIT_WARNING;
+          break;
+        }
         state.quit = true;
         this.stop();
         break;
+      }
     }
   }
 

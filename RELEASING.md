@@ -2,7 +2,7 @@
 
 The A-to-Z runbook for cutting a new pinestack release — prebuilt `pinerun` and
 `pinetop` binaries attached to a GitHub Release. There is **no npm publish**: the packages
-run from TypeScript source in this workspace, and the binary is the product.
+run from TypeScript source in this workspace, and the binaries are the product.
 
 ## Release model
 
@@ -205,25 +205,48 @@ gh run watch                       # or: gh run list --workflow=release.yml
 ```
 
 The job runs: checkout → setup Bun → `bun install --frozen-lockfile` →
-`bun run typecheck` → `bun test` → `bun run build:bin all` → `sha256sum` →
-create the GitHub Release with every binary attached. Then confirm:
+`bun run typecheck` → `bun test` → build all targets for `pinerun`, then for
+`pinetop` → **verify** each linux-x64 asset self-reports the tag and
+`--check-flags` agrees → `sha256sum` over both → create the GitHub Release with
+every binary attached. Then confirm:
 
 ```bash
 gh release view vX.Y.Z             # 10 binaries + checksums.txt attached
 ```
 
-Expected assets: `pinerun-linux-x64`, `pinerun-linux-arm64`,
-`pinerun-darwin-x64`, `pinerun-darwin-arm64`, `pinerun-windows-x64.exe`,
-`checksums.txt`.
+Expected assets — 5 targets × 2 binaries, plus one shared manifest:
+
+```
+pinerun-linux-x64     pinetop-linux-x64
+pinerun-linux-arm64   pinetop-linux-arm64
+pinerun-darwin-x64    pinetop-darwin-x64
+pinerun-darwin-arm64  pinetop-darwin-arm64
+pinerun-windows-x64.exe   pinetop-windows-x64.exe
+checksums.txt
+```
+
+`checksums.txt` must list **all ten**: `pinerun upgrade` and `pinetop upgrade`
+each resolve their own asset from it, so an asset missing there cannot
+self-update even though it downloaded fine.
 
 ### 8. Verify the installer path end-to-end
 
-The installer follows `releases/latest`, which now points at the new release:
+The installer follows `releases/latest`, which now points at the new release. It
+installs both binaries, so check both:
 
 ```bash
-export PINERUN_INSTALL_DIR=$(mktemp -d)
+export PINESTACK_INSTALL_DIR=$(mktemp -d)
 curl -fsSL https://raw.githubusercontent.com/heyphat/pinestack/main/scripts/install.sh | sh
-"$PINERUN_INSTALL_DIR/pinerun" --version       # → pinerun X.Y.Z (<sha>)
+"$PINESTACK_INSTALL_DIR/pinerun" --version            # → pinerun X.Y.Z (<sha>)
+"$PINESTACK_INSTALL_DIR/pinetop" --version | head -1  # → pinetop X.Y.Z (<sha>)
+```
+
+Then confirm self-update resolves the new release from an older binary — this is
+the one path CI cannot exercise, because it needs a _published_ release to look
+at:
+
+```bash
+"$PINESTACK_INSTALL_DIR/pinetop" upgrade --check   # → already up to date
 ```
 
 (Or simply re-run the one-liner from the README on any machine.)

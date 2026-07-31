@@ -49,6 +49,7 @@ coverage/
 .claude/worktrees/
 .claude/settings.local.json
 
+
 # internal design/planning docs — not part of the public release
 # (promote individual files back into git when ready to publish them)
 dev-docs/

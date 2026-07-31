@@ -5,6 +5,6 @@
     "outDir": "./dist",
     "composite": true
   },
-  "references": [{ "path": "../pinery" }],
+  "references": [{ "path": "../pinery" }, { "path": "../pinerun" }],
   "include": ["src/**/*"]
 }

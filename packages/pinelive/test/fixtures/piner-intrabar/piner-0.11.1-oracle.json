@@ -1,0 +1,1066 @@
+{
+  "schemaVersion": 2,
+  "evidence": {
+    "runtime": "@heyphat/piner",
+    "version": "0.11.1",
+    "capturedOn": "2026-07-31",
+    "kind": "repository-owned-offline-piner-regression-evidence",
+    "venueEvidence": false
+  },
+  "publicObservability": {
+    "pendingOrders": false,
+    "fillEvents": false,
+    "position": true,
+    "closedTrades": true
+  },
+  "metadataProbes": {
+    "declaredTrue": true,
+    "declaredFalse": false,
+    "omitted": null
+  },
+  "barSets": {
+    "ordinaryWarmupMs": [
+      { "time": 0, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1 },
+      { "time": 60000, "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1 },
+      { "time": 120000, "open": 101, "high": 103, "low": 100, "close": 102, "volume": 1 }
+    ],
+    "stateTicksMs": [
+      {
+        "label": "entry-forming",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 101, "close": 111, "volume": 2 }
+      },
+      {
+        "label": "close-higher-revision",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 88, "close": 89, "volume": 3 }
+      },
+      {
+        "label": "entry-authoritative",
+        "isClose": true,
+        "bar": { "time": 180000, "open": 102, "high": 113, "low": 88, "close": 112, "volume": 4 }
+      },
+      {
+        "label": "next-authoritative",
+        "isClose": true,
+        "bar": { "time": 240000, "open": 112, "high": 114, "low": 110, "close": 113, "volume": 5 }
+      }
+    ],
+    "entryCloseTicksMs": [
+      {
+        "label": "entry-forming",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 101, "close": 111, "volume": 2 }
+      },
+      {
+        "label": "close-higher-revision",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 88, "close": 89, "volume": 3 }
+      },
+      {
+        "label": "entry-authoritative",
+        "isClose": true,
+        "bar": { "time": 180000, "open": 102, "high": 113, "low": 88, "close": 112, "volume": 4 }
+      },
+      {
+        "label": "next-authoritative-fill",
+        "isClose": true,
+        "bar": { "time": 240000, "open": 112, "high": 114, "low": 99, "close": 100, "volume": 5 }
+      },
+      {
+        "label": "close-forming",
+        "isClose": false,
+        "bar": { "time": 300000, "open": 100, "high": 101, "low": 88, "close": 89, "volume": 6 }
+      },
+      {
+        "label": "entry-higher-revision",
+        "isClose": false,
+        "bar": { "time": 300000, "open": 100, "high": 113, "low": 88, "close": 112, "volume": 7 }
+      },
+      {
+        "label": "close-authoritative",
+        "isClose": true,
+        "bar": { "time": 300000, "open": 100, "high": 113, "low": 86, "close": 88, "volume": 8 }
+      },
+      {
+        "label": "post-close-authoritative",
+        "isClose": true,
+        "bar": { "time": 360000, "open": 88, "high": 100, "low": 87, "close": 99, "volume": 9 }
+      }
+    ],
+    "reversalTicksMs": [
+      {
+        "label": "long-forming",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 101, "close": 111, "volume": 2 }
+      },
+      {
+        "label": "short-higher-revision",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 88, "close": 89, "volume": 3 }
+      },
+      {
+        "label": "long-authoritative",
+        "isClose": true,
+        "bar": { "time": 180000, "open": 102, "high": 113, "low": 88, "close": 112, "volume": 4 }
+      },
+      {
+        "label": "long-pyramid-authoritative",
+        "isClose": true,
+        "bar": { "time": 240000, "open": 112, "high": 114, "low": 110, "close": 113, "volume": 5 }
+      },
+      {
+        "label": "short-reversal-forming",
+        "isClose": false,
+        "bar": { "time": 300000, "open": 113, "high": 114, "low": 88, "close": 89, "volume": 6 }
+      },
+      {
+        "label": "long-higher-revision",
+        "isClose": false,
+        "bar": { "time": 300000, "open": 113, "high": 114, "low": 88, "close": 112, "volume": 7 }
+      },
+      {
+        "label": "short-reversal-authoritative",
+        "isClose": true,
+        "bar": { "time": 300000, "open": 113, "high": 114, "low": 86, "close": 88, "volume": 8 }
+      },
+      {
+        "label": "short-pyramid-authoritative",
+        "isClose": true,
+        "bar": { "time": 360000, "open": 88, "high": 89, "low": 86, "close": 87, "volume": 9 }
+      }
+    ],
+    "coofTicksMs": [
+      {
+        "label": "entry-forming",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 101, "close": 111, "volume": 2 }
+      },
+      {
+        "label": "close-higher-revision",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 88, "close": 89, "volume": 3 }
+      },
+      {
+        "label": "entry-authoritative",
+        "isClose": true,
+        "bar": { "time": 180000, "open": 102, "high": 113, "low": 88, "close": 112, "volume": 4 }
+      },
+      {
+        "label": "close-forming",
+        "isClose": false,
+        "bar": { "time": 240000, "open": 112, "high": 113, "low": 88, "close": 89, "volume": 5 }
+      },
+      {
+        "label": "entry-higher-revision",
+        "isClose": false,
+        "bar": { "time": 240000, "open": 112, "high": 114, "low": 88, "close": 112, "volume": 6 }
+      },
+      {
+        "label": "close-authoritative",
+        "isClose": true,
+        "bar": { "time": 240000, "open": 112, "high": 114, "low": 86, "close": 88, "volume": 7 }
+      }
+    ],
+    "supersededOrderTicksMs": [
+      {
+        "label": "entry-forming",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 101, "close": 111, "volume": 2 }
+      },
+      {
+        "label": "entry-superseded",
+        "isClose": false,
+        "bar": { "time": 180000, "open": 102, "high": 112, "low": 88, "close": 89, "volume": 3 }
+      },
+      {
+        "label": "neutral-authoritative",
+        "isClose": true,
+        "bar": { "time": 180000, "open": 102, "high": 113, "low": 88, "close": 100, "volume": 4 }
+      },
+      {
+        "label": "next-neutral-authoritative",
+        "isClose": true,
+        "bar": { "time": 240000, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 5 }
+      }
+    ],
+    "magnifierChartSec": [
+      { "time": 0, "open": 100, "high": 101, "low": 99, "close": 100.25, "volume": 1000 },
+      { "time": 3600, "open": 101, "high": 102, "low": 100, "close": 101.25, "volume": 1010 }
+    ],
+    "magnifierChildrenSec": [
+      { "time": 0, "open": 10, "high": 11, "low": 9, "close": 10.25, "volume": 100 },
+      { "time": 600, "open": 11, "high": 12, "low": 10, "close": 11.25, "volume": 110 },
+      { "time": 1200, "open": 12, "high": 13, "low": 11, "close": 12.25, "volume": 120 },
+      { "time": 1800, "open": 13, "high": 14, "low": 12, "close": 13.25, "volume": 130 },
+      { "time": 2400, "open": 14, "high": 15, "low": 13, "close": 14.25, "volume": 140 },
+      { "time": 3000, "open": 15, "high": 16, "low": 14, "close": 15.25, "volume": 150 },
+      { "time": 3600, "open": 16, "high": 17, "low": 15, "close": 16.25, "volume": 160 },
+      { "time": 4200, "open": 17, "high": 18, "low": 16, "close": 17.25, "volume": 170 },
+      { "time": 4800, "open": 18, "high": 19, "low": 17, "close": 18.25, "volume": 180 },
+      { "time": 5400, "open": 19, "high": 20, "low": 18, "close": 19.25, "volume": 190 },
+      { "time": 6000, "open": 20, "high": 21, "low": 19, "close": 20.25, "volume": 200 },
+      { "time": 6600, "open": 21, "high": 22, "low": 20, "close": 21.25, "volume": 210 }
+    ],
+    "magnifierTicksMs": [
+      {
+        "label": "first-live-authoritative",
+        "isClose": true,
+        "bar": { "time": 7200000, "open": 102, "high": 114, "low": 86, "close": 102, "volume": 1 }
+      },
+      {
+        "label": "second-live-authoritative",
+        "isClose": true,
+        "bar": { "time": 10800000, "open": 102, "high": 114, "low": 86, "close": 103, "volume": 2 }
+      },
+      {
+        "label": "fresh-live-close-forming",
+        "isClose": false,
+        "bar": { "time": 14400000, "open": 103, "high": 104, "low": 88, "close": 89, "volume": 3 }
+      },
+      {
+        "label": "fresh-live-entry-higher-revision",
+        "isClose": false,
+        "bar": { "time": 14400000, "open": 103, "high": 114, "low": 88, "close": 112, "volume": 4 }
+      },
+      {
+        "label": "fresh-live-close-authoritative",
+        "isClose": true,
+        "bar": { "time": 14400000, "open": 103, "high": 114, "low": 86, "close": 88, "volume": 5 }
+      },
+      {
+        "label": "post-forming-authoritative",
+        "isClose": true,
+        "bar": { "time": 18000000, "open": 88, "high": 101, "low": 87, "close": 100, "volume": 6 }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "state",
+      "source": "state.pine",
+      "ticks": "stateTicksMs",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": null,
+        "calcOnOrderFills": null,
+        "pyramiding": null,
+        "useBarMagnifier": null
+      },
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": {
+            "ordinary": [3, 101],
+            "var": [3, 3],
+            "varip": [3, 3],
+            "isnew": [3, 1],
+            "isrealtime": [3, 0],
+            "isconfirmed": [3, 1]
+          },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [3, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": {
+            "ordinary": [4, 102],
+            "var": [4, 4],
+            "varip": [4, 4],
+            "isnew": [4, 1],
+            "isrealtime": [4, 1],
+            "isconfirmed": [4, 0]
+          },
+          "alerts": [[3, "entry"]],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": {
+            "ordinary": [4, 102],
+            "var": [4, 4],
+            "varip": [4, 5],
+            "isnew": [4, 0],
+            "isrealtime": [4, 1],
+            "isconfirmed": [4, 0]
+          },
+          "alerts": [[3, "close"]],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": {
+            "ordinary": [4, 102],
+            "var": [4, 4],
+            "varip": [4, 6],
+            "isnew": [4, 0],
+            "isrealtime": [4, 1],
+            "isconfirmed": [4, 1]
+          },
+          "alerts": [[3, "entry"]],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": {
+            "ordinary": [5, 112],
+            "var": [5, 5],
+            "varip": [5, 7],
+            "isnew": [5, 1],
+            "isrealtime": [5, 1],
+            "isconfirmed": [5, 1]
+          },
+          "alerts": [
+            [3, "entry"],
+            [4, "entry"]
+          ],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [5, 0, 0],
+          "barMagnifier": null
+        }
+      ]
+    },
+    {
+      "id": "entry-close-default",
+      "source": "entry-close-default.pine",
+      "ticks": "entryCloseTicksMs",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": null,
+        "calcOnOrderFills": null,
+        "pyramiding": null,
+        "useBarMagnifier": null
+      },
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": { "position": [3, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [3, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [6, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [6, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [6, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [6, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [6, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [6, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [7, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 112, 88, 4, 6, 240000, 360000, -24, -24]],
+          "report": [7, 2, -24],
+          "barMagnifier": null
+        }
+      ]
+    },
+    {
+      "id": "entry-close-on-close",
+      "source": "entry-close-on-close.pine",
+      "ticks": "entryCloseTicksMs",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": true,
+        "calcOnOrderFills": null,
+        "pyramiding": null,
+        "useBarMagnifier": null
+      },
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": { "position": [3, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [3, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [6, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [6, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [6, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [6, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [6, 1] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 112, 88, 3, 5, 180000, 300000, -24, -24]],
+          "report": [6, 2, -24],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [7, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 112, 88, 3, 5, 180000, 300000, -24, -24]],
+          "report": [7, 2, -24],
+          "barMagnifier": null
+        }
+      ]
+    },
+    {
+      "id": "reversal-pyramiding",
+      "source": "reversal-pyramiding.pine",
+      "ticks": "reversalTicksMs",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": true,
+        "calcOnOrderFills": null,
+        "pyramiding": 2,
+        "useBarMagnifier": null
+      },
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": { "position": [3, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [3, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [2, 112.5, "L", 2, 0],
+          "closedTrades": [],
+          "report": [5, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [6, 2] },
+          "alerts": [],
+          "position": [2, 112.5, "L", 2, 0],
+          "closedTrades": [],
+          "report": [6, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [6, 2] },
+          "alerts": [],
+          "position": [2, 112.5, "L", 2, 0],
+          "closedTrades": [],
+          "report": [6, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [6, 2] },
+          "alerts": [],
+          "position": [-1, 88, "S", 1, 2],
+          "closedTrades": [
+            ["L", 1, 1, 112, 88, 3, 5, 180000, 300000, -24, -24],
+            ["L", 1, 1, 113, 88, 4, 5, 240000, 300000, -25, -49]
+          ],
+          "report": [6, 2, -49],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [7, -1] },
+          "alerts": [],
+          "position": [-2, 87.5, "S", 2, 2],
+          "closedTrades": [
+            ["L", 1, 1, 112, 88, 3, 5, 180000, 300000, -24, -24],
+            ["L", 1, 1, 113, 88, 4, 5, 240000, 300000, -25, -49]
+          ],
+          "report": [7, 3, -49],
+          "barMagnifier": null
+        }
+      ]
+    },
+    {
+      "id": "superseded-order",
+      "source": "superseded-order.pine",
+      "ticks": "supersededOrderTicksMs",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": null,
+        "calcOnOrderFills": null,
+        "pyramiding": null,
+        "useBarMagnifier": null
+      },
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": { "position": [3, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [3, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [5, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [5, 0, 0],
+          "barMagnifier": null
+        }
+      ]
+    },
+    {
+      "id": "calc-on-order-fills",
+      "source": "calc-on-order-fills.pine",
+      "ticks": "coofTicksMs",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": true,
+        "calcOnOrderFills": true,
+        "pyramiding": null,
+        "useBarMagnifier": null
+      },
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": { "position": [3, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [3, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [4, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [4, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [4, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 112, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [5, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 112, 88, 3, 4, 180000, 240000, -24, -24]],
+          "report": [5, 1, -24],
+          "barMagnifier": null
+        }
+      ]
+    }
+  ],
+  "magnifierCases": [
+    {
+      "id": "magnifier-default",
+      "source": "magnifier-default.pine",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": null,
+        "calcOnOrderFills": null,
+        "pyramiding": null,
+        "useBarMagnifier": true
+      },
+      "resolver": {
+        "targetPineTf": "10",
+        "targetCanonicalTf": "10m",
+        "sourceCanonicalTf": "10m",
+        "barCount": 12,
+        "chartOpenTimesMs": [0, 3600000],
+        "chartCloseTimesMs": [3600000, 7200000],
+        "coverage": {
+          "requested": { "from": 0, "to": 7200000 },
+          "covered": [{ "from": 0, "to": 7200000 }],
+          "gaps": [],
+          "complete": true
+        }
+      },
+      "historicalMagnifierActive": true,
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": { "position": [2, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 0],
+          "closedTrades": [],
+          "report": [2, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [3, 1] },
+          "alerts": [],
+          "position": [1, 102, "L", 1, 0],
+          "closedTrades": [],
+          "report": [3, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [4, 1] },
+          "alerts": [],
+          "position": [1, 102, "L", 1, 0],
+          "closedTrades": [],
+          "report": [4, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 102, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 3, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 102, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 3, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 102, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 3, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [6, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 102, 88, 2, 5, 7200000, 18000000, -14, -14]],
+          "report": [6, 3, -14],
+          "barMagnifier": null
+        }
+      ],
+      "magnifierReports": [
+        [true, true, "10", 2, 0, 0, 0, 12, "complete", 0],
+        [true, true, "10", 2, 1, 0, 1, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 2, 0, 2, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 3, 0, 3, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 3, 0, 3, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 3, 0, 3, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 4, 0, 4, 12, "mixed-data-fallback", 0]
+      ]
+    },
+    {
+      "id": "magnifier-on-close",
+      "source": "magnifier-on-close.pine",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": true,
+        "calcOnOrderFills": null,
+        "pyramiding": null,
+        "useBarMagnifier": true
+      },
+      "resolver": {
+        "targetPineTf": "10",
+        "targetCanonicalTf": "10m",
+        "sourceCanonicalTf": "10m",
+        "barCount": 12,
+        "chartOpenTimesMs": [0, 3600000],
+        "chartCloseTimesMs": [3600000, 7200000],
+        "coverage": {
+          "requested": { "from": 0, "to": 7200000 },
+          "covered": [{ "from": 0, "to": 7200000 }],
+          "gaps": [],
+          "complete": true
+        }
+      },
+      "historicalMagnifierActive": true,
+      "expected": [
+        {
+          "barstate": [true, false, true, true],
+          "plots": { "position": [2, 0] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [2, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [3, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [3, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [4, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [4, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 3, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 3, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 101.25, 88, 1, 4, 3600000, 14400000, -13.25, -13.25]],
+          "report": [5, 3, -13.25],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [6, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 101.25, 88, 1, 4, 3600000, 14400000, -13.25, -13.25]],
+          "report": [6, 3, -13.25],
+          "barMagnifier": null
+        }
+      ],
+      "magnifierReports": [
+        [true, true, "10", 2, 0, 0, 0, 12, "complete", 0],
+        [true, true, "10", 2, 1, 0, 1, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 2, 0, 2, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 3, 0, 3, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 3, 0, 3, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 3, 0, 3, 12, "mixed-data-fallback", 0],
+        [true, true, "10", 2, 4, 0, 4, 12, "mixed-data-fallback", 0]
+      ]
+    },
+    {
+      "id": "magnifier-on-close-coof",
+      "source": "magnifier-on-close-coof.pine",
+      "metadata": {
+        "calcOnEveryTick": true,
+        "processOrdersOnClose": true,
+        "calcOnOrderFills": true,
+        "pyramiding": null,
+        "useBarMagnifier": true
+      },
+      "resolver": {
+        "targetPineTf": "10",
+        "targetCanonicalTf": "10m",
+        "sourceCanonicalTf": "10m",
+        "barCount": 12,
+        "chartOpenTimesMs": [0, 3600000],
+        "chartCloseTimesMs": [3600000, 7200000],
+        "coverage": {
+          "requested": { "from": 0, "to": 7200000 },
+          "covered": [{ "from": 0, "to": 7200000 }],
+          "gaps": [],
+          "complete": true
+        }
+      },
+      "historicalMagnifierActive": false,
+      "expected": [
+        {
+          "barstate": [false, false, true, true],
+          "plots": { "position": [2, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [2, 0, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [3, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [3, 1, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [4, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [4, 2, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 3, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, false, false],
+          "plots": { "position": [5, 1] },
+          "alerts": [],
+          "position": [1, 101.25, "L", 1, 0],
+          "closedTrades": [],
+          "report": [5, 3, 0],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [false, true, true, false],
+          "plots": { "position": [5, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 101.25, 88, 1, 4, 3600000, 14400000, -13.25, -13.25]],
+          "report": [5, 3, -13.25],
+          "barMagnifier": null
+        },
+        {
+          "barstate": [true, true, true, false],
+          "plots": { "position": [6, 0] },
+          "alerts": [],
+          "position": [0, null, "", 0, 1],
+          "closedTrades": [["L", 1, 1, 101.25, 88, 1, 4, 3600000, 14400000, -13.25, -13.25]],
+          "report": [6, 3, -13.25],
+          "barMagnifier": null
+        }
+      ],
+      "magnifierReports": [
+        [true, false, "10", 0, 2, 0, 0, 0, "no-data", null],
+        [true, false, "10", 0, 3, 0, 0, 0, "no-data", null],
+        [true, false, "10", 0, 4, 0, 0, 0, "no-data", null],
+        [true, false, "10", 0, 5, 0, 0, 0, "no-data", null],
+        [true, false, "10", 0, 5, 0, 0, 0, "no-data", null],
+        [true, false, "10", 0, 5, 0, 0, 0, "no-data", null],
+        [true, false, "10", 0, 6, 0, 0, 0, "no-data", null]
+      ]
+    }
+  ]
+}

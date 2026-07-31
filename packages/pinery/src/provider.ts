@@ -395,6 +395,42 @@ export interface ClosedBarsOptions {
   signal?: AbortSignal;
 }
 
+/** How a provider obtains authoritative updates for the requested chart timeframe. */
+export type LiveSourcePolicy =
+  { readonly kind: 'native' } | { readonly kind: 'lower-bars'; readonly timeframe: string };
+
+/**
+ * One immutable normalized live event. `bar.time` is a unix-second bar open;
+ * `eventTime` is a finite unix-millisecond observation time. A close is the one
+ * authoritative final for that chart open.
+ */
+export interface BarUpdate {
+  readonly bar: Readonly<Bar>;
+  readonly isClose: boolean;
+  readonly revision: number;
+  readonly eventTime: number;
+  readonly source: LiveSourcePolicy;
+  readonly provenance?: Readonly<Record<string, string | number | boolean>>;
+  readonly coalescedCount?: number;
+  readonly recovered?: boolean;
+}
+
+export interface LiveBarsOptions {
+  /** Exclusive finalized chart-open cursor, never a revision cursor. */
+  readonly after?: number;
+  readonly signal?: AbortSignal;
+  readonly source: LiveSourcePolicy;
+  /** Forming-update throttle. Finals always bypass it. */
+  readonly throttleMs?: number;
+  /** Bounded non-droppable final queue. Overflow is fatal. */
+  readonly maxPendingFinals?: number;
+  /** Total time allowed to close a live iterator and its producer. Default 5,000ms. */
+  readonly teardownTimeoutMs?: number;
+  readonly reconnectAttempts?: number;
+  readonly reconnectDelayMs?: number;
+  readonly reconnectMaxDelayMs?: number;
+}
+
 export interface MarketDataProvider extends HistoryProvider {
   resolve(symbol: string, options?: ResolveDataInstrumentOptions): Promise<ResolvedDataInstrument>;
   historyResolved(
@@ -408,11 +444,26 @@ export interface MarketDataProvider extends HistoryProvider {
     timeframe: string,
     options?: ClosedBarsOptions,
   ): AsyncIterable<Bar>;
+  /** Optional intrabar stream. Providers without an authoritative source omit it. */
+  liveBars?(
+    instrument: ResolvedDataInstrument,
+    timeframe: string,
+    options: LiveBarsOptions,
+  ): AsyncIterable<BarUpdate>;
   disconnect?(): Promise<void>;
 }
 
+export type LiveBarsProvider = MarketDataProvider & Required<Pick<MarketDataProvider, 'liveBars'>>;
+
 export type MarketDataErrorCode =
-  'connectivity' | 'auth' | 'rate-limit' | 'invalid-symbol' | 'entitlement' | 'malformed-data';
+  | 'connectivity'
+  | 'auth'
+  | 'rate-limit'
+  | 'invalid-symbol'
+  | 'entitlement'
+  | 'malformed-data'
+  | 'live-discontinuity'
+  | 'live-cleanup';
 
 /** Classified operational provider error. Details must contain no credentials. */
 export class MarketDataError extends Error {
@@ -447,6 +498,11 @@ export function isMarketDataProvider(value: unknown): value is MarketDataProvide
     typeof provider.historyResolved === 'function' &&
     typeof provider.closedBars === 'function',
   );
+}
+
+/** True only when the complete market-data contract includes live bar updates. */
+export function supportsLiveBars(value: unknown): value is LiveBarsProvider {
+  return isMarketDataProvider(value) && typeof value.liveBars === 'function';
 }
 
 export function throwIfAborted(signal?: AbortSignal): void {

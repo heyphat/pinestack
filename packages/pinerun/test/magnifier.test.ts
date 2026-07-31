@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { compile } from '@heyphat/piner';
+import { ArrayFeed, Engine, compile } from '@heyphat/piner';
 import {
   StaticProvider,
   halfOpenIntervalSec,
@@ -24,6 +24,7 @@ import {
   magnifierMetadataKey,
   pinerCapabilities,
   preflightBarMagnifier,
+  preparePinerEngineForRun,
   executeJob,
   projectAuthoritativeBarMagnifierReport,
   resolveBarMagnifier,
@@ -151,6 +152,19 @@ function chartBars(count = 2): Bar[] {
 
 function targetBars(count = 12): Bar[] {
   return Array.from({ length: count }, (_, index) => bar(index * 600, 10 + index));
+}
+
+function engineFor(job: Job, useBarMagnifier?: boolean): Engine {
+  return new Engine(
+    compile(job.source),
+    new ArrayFeed(job.bars.map((row) => ({ ...row, time: row.time * 1_000 }))),
+    {
+      strategy:
+        useBarMagnifier === undefined
+          ? undefined
+          : ({ useBarMagnifier } as Record<string, unknown>),
+    },
+  );
 }
 
 function deepFreezeFixture<T>(value: T, seen = new Set<object>()): T {
@@ -431,6 +445,226 @@ describe('exact magnifier resolver and reuse identity', () => {
     expect(job.magnifier).toBeUndefined();
   });
 
+  test('fails closed when an already-created Engine setting disagrees with preflight', async () => {
+    const adapter = createPinerCapabilityAdapter(capableRuntime().runtime);
+    const offJob: Job = {
+      source: STRATEGY_OFF,
+      symbol: 'X',
+      timeframe: '60',
+      bars: chartBars(),
+    };
+    const enabledEngine = engineFor(offJob, true);
+    const enabledInitialData = enabledEngine.ctx.magnifierData;
+    expect(() => preparePinerEngineForRun(enabledEngine, offJob, { adapter })).toThrow(
+      expect.objectContaining({
+        code: 'bar-magnifier-engine-setting-mismatch',
+        details: { preflightRequested: false, engineRequested: true },
+      }),
+    );
+    expect(enabledEngine.ctx.magnifierData).toBe(enabledInitialData);
+    expect(enabledEngine.ctx.securityBars.size).toBe(0);
+
+    const onJob: Job = {
+      source: STRATEGY_ON,
+      symbol: 'X',
+      timeframe: '60',
+      bars: chartBars(),
+    };
+    await resolveBarMagnifier(
+      onJob,
+      '1h',
+      new StaticProvider(
+        { 'X|10m': targetBars() },
+        { alignment: 'utc-24x7', timeframes: ['10m'], cacheIdentity: 'engine-setting' },
+      ),
+      { adapter },
+    );
+    const disabledEngine = engineFor(onJob, false);
+    const disabledInitialData = disabledEngine.ctx.magnifierData;
+    expect(() => preparePinerEngineForRun(disabledEngine, onJob, { adapter })).toThrow(
+      expect.objectContaining({
+        code: 'bar-magnifier-engine-setting-mismatch',
+        details: { preflightRequested: true, engineRequested: false },
+      }),
+    );
+    expect(disabledEngine.ctx.magnifierData).toBe(disabledInitialData);
+    expect(disabledEngine.ctx.securityBars.size).toBe(0);
+  });
+
+  test('reuses a symbol-bound resolved chart source while the provider resolves exact static security', async () => {
+    const adapter = createPinerCapabilityAdapter(capableRuntimeWithPinerMetadata());
+    const source = `//@version=6
+strategy("resolved source", use_bar_magnifier=true)
+plot(request.security("AAPL", "60", close))`;
+    const chartProvider = new CountingExactProvider(
+      new StaticProvider(
+        { 'X|10m': targetBars() },
+        { alignment: 'utc-24x7', timeframes: ['10m'], cacheIdentity: 'resolved-chart' },
+      ),
+    );
+    const securityProvider = new CountingExactProvider(
+      new StaticProvider(
+        { 'AAPL|1h': chartBars() },
+        { alignment: 'utc-24x7', timeframes: ['1h'], cacheIdentity: 'resolved-static' },
+      ),
+    );
+    const resolvedSource = await chartProvider.resolveHistorySource('X');
+    const job: Job = { source, symbol: 'X', timeframe: '60', bars: chartBars() };
+
+    const resolution = await resolveBarMagnifier(job, '1h', securityProvider, {
+      adapter,
+      resolvedSource,
+      resolvedSourceSymbol: 'X',
+    });
+    expect(chartProvider.resolveCalls).toBe(1);
+    expect(chartProvider.exactCalls).toBe(1);
+    expect(securityProvider.resolveCalls).toBe(1);
+    expect(securityProvider.exactCalls).toBe(1);
+    expect(job.securityBars?.AAPL).toBeDefined();
+    expect(resolution.dataset?.provenance).toMatchObject({
+      normalizedSymbol: resolvedSource.normalizedSymbol,
+      cacheIdentity: resolvedSource.cacheIdentity,
+    });
+
+    const callsBeforePreparation = {
+      chartResolve: chartProvider.resolveCalls,
+      chartExact: chartProvider.exactCalls,
+      securityResolve: securityProvider.resolveCalls,
+      securityExact: securityProvider.exactCalls,
+    };
+    const engine = engineFor(job);
+    const preparation = preparePinerEngineForRun(engine, job, { adapter });
+    expect(preparation.preflight).toBe(resolution.preflight);
+    expect(preparation.magnifier).toMatchObject({
+      sourceIdentity: {
+        requestedSymbol: 'X',
+        normalizedSymbol: resolvedSource.normalizedSymbol,
+        cacheIdentity: resolvedSource.cacheIdentity,
+      },
+      targetPineTf: '10',
+      targetCanonicalTf: '10m',
+      sourceCanonicalTf: '10m',
+      targetBarCount: 12,
+      rawBarCount: 12,
+      acquisitionKey: resolution.dataset?.acquisitionKey,
+      barsDigest: resolution.dataset?.barsDigest,
+      coverage: { requested: { from: 0, to: 7_200_000 } },
+      chartOpenTimesMs: [0, 3_600_000],
+      chartCloseTimesMs: [3_600_000, 7_200_000],
+    });
+    expect(preparation.securityKeys).toEqual(['AAPL']);
+    expect(Object.isFrozen(preparation)).toBe(true);
+    expect(Object.isFrozen(preparation.magnifier)).toBe(true);
+    expect(engine.ctx.securityBars.get('AAPL')?.map((row) => row.time)).toEqual([0, 3_600_000]);
+    const injected = engine.ctx.magnifierData!;
+    expect(injected.bars).toBe(resolution.dataset?.barsMs);
+    expect(injected.chartIntervals.closeTimes).toBe(resolution.dataset?.chartCloseTimesMs);
+    expect({
+      chartResolve: chartProvider.resolveCalls,
+      chartExact: chartProvider.exactCalls,
+      securityResolve: securityProvider.resolveCalls,
+      securityExact: securityProvider.exactCalls,
+    }).toEqual(callsBeforePreparation);
+
+    const forged = deepFreezeFixture({ ...resolution.dataset! }) as ResolvedMagnifierDataset;
+    const forgedJob = { ...job, magnifier: forged };
+    const forgedEngine = engineFor(forgedJob);
+    const initialMagnifierData = forgedEngine.ctx.magnifierData;
+    try {
+      preparePinerEngineForRun(forgedEngine, forgedJob, { adapter });
+      throw new Error('expected forged resolver authority rejection');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'invalid-injected-bar-magnifier-data',
+        details: { mismatches: expect.arrayContaining(['resolver-authentication']) },
+      });
+    }
+    expect(forgedEngine.ctx.magnifierData).toBe(initialMagnifierData);
+    expect(forgedEngine.ctx.securityBars.size).toBe(0);
+
+    const mismatchedJob: Job = {
+      source: STRATEGY_ON,
+      symbol: 'X',
+      timeframe: '60',
+      bars: chartBars(),
+    };
+    await expect(
+      resolveBarMagnifier(mismatchedJob, '1h', securityProvider, {
+        adapter,
+        resolvedSource,
+        resolvedSourceSymbol: 'Y',
+      }),
+    ).rejects.toMatchObject({ code: 'resolved-history-source-symbol-mismatch' });
+    expect(securityProvider.resolveCalls).toBe(callsBeforePreparation.securityResolve);
+
+    await expect(
+      resolveBarMagnifier({ ...mismatchedJob }, '1h', securityProvider, {
+        adapter,
+        resolvedSource: {
+          ...resolvedSource,
+          cacheIdentity: `${resolvedSource.cacheIdentity}:mismatch`,
+        },
+        resolvedSourceSymbol: 'X',
+      }),
+    ).rejects.toMatchObject({ code: 'acquisition-identity' });
+  });
+
+  test('enforces distinct opt-in target and raw bar budgets before Engine mutation', async () => {
+    const adapter = createPinerCapabilityAdapter(capableRuntime().runtime);
+    const rawBars = Array.from({ length: 120 }, (_, index) => bar(index * 60, 10 + index));
+    const provider = new StaticProvider(
+      { 'X|1m': rawBars },
+      { alignment: 'utc-24x7', timeframes: ['1m'], cacheIdentity: 'budget-source' },
+    );
+    const job: Job = {
+      source: STRATEGY_ON,
+      symbol: 'X',
+      timeframe: '60',
+      bars: chartBars(),
+    };
+    const resolution = await resolveBarMagnifier(job, '1h', provider, { adapter });
+    expect(resolution.dataset).toMatchObject({ rawBarCount: 120 });
+    expect(resolution.dataset?.barsMs).toHaveLength(12);
+
+    for (const [options, code, detailOption] of [
+      [
+        { maxMagnifierTargetBars: 11 },
+        'bar-magnifier-target-bar-budget-exceeded',
+        'maxMagnifierTargetBars',
+      ],
+      [
+        { maxMagnifierRawBars: 119 },
+        'bar-magnifier-raw-bar-budget-exceeded',
+        'maxMagnifierRawBars',
+      ],
+    ] as const) {
+      const engine = engineFor(job);
+      const initialMagnifierData = engine.ctx.magnifierData;
+      try {
+        preparePinerEngineForRun(engine, job, { adapter, ...options });
+        throw new Error(`expected ${detailOption} rejection`);
+      } catch (error) {
+        expect(error).toMatchObject({
+          type: 'bar-magnifier-error',
+          kind: 'provider-limited',
+          code,
+          details: { option: detailOption },
+        });
+      }
+      expect(engine.ctx.magnifierData).toBe(initialMagnifierData);
+      expect(engine.ctx.securityBars.size).toBe(0);
+    }
+
+    const limited: Job = { ...job, magnifier: undefined };
+    await expect(
+      resolveBarMagnifier(limited, '1h', provider, {
+        adapter,
+        maxMagnifierRawBars: 119,
+      }),
+    ).rejects.toMatchObject({ code: 'bar-magnifier-raw-bar-budget-exceeded' });
+    expect(limited.magnifier).toBeUndefined();
+  });
+
   test('converts seconds once, deep-freezes, and shares only an equal full acquisition key', async () => {
     const { runtime } = capableRuntime();
     const adapter = createPinerCapabilityAdapter(runtime);
@@ -463,6 +697,7 @@ describe('exact magnifier resolver and reuse identity', () => {
     expect(dataset.targetPineTf).toBe('10');
     expect(dataset.targetCanonicalTf).toBe('10m');
     expect(dataset.sourceCanonicalTf).toBe('10m');
+    expect(dataset.rawBarCount).toBe(12);
     expect(dataset.barsMs[0]!.time).toBe(0);
     expect(dataset.barsMs[1]!.time).toBe(600_000);
     expect(dataset.chartOpenTimesMs).toEqual([0, 3_600_000]);
@@ -470,7 +705,7 @@ describe('exact magnifier resolver and reuse identity', () => {
     expect(dataset.coverage.requested).toEqual({ from: 0, to: 7_200_000 });
     expect(dataset.barsDigest).toBe(marketDataDigest(dataset.barsMs));
     expect(dataset.alignmentEvidence).toEqual({ kind: 'utc-24x7' });
-    expect(dataset.acquisitionKey).toStartWith('magnifier-dataset-acquisition-v4:');
+    expect(dataset.acquisitionKey).toStartWith('magnifier-dataset-acquisition-v5:');
     expect(dataset.acquisitionKey).toBe(magnifierDatasetAcquisitionKey(dataset));
     expect(Object.isFrozen(dataset)).toBe(true);
     expect(Object.isFrozen(dataset.coverage)).toBe(true);
@@ -1574,7 +1809,7 @@ test('complete-record magnifier evidence is identity-bearing, executable, and pr
       coverageSemantics: 'complete-record',
       recordSpan: { from: 0, to: 7_200 },
     });
-    expect(resolution.dataset?.acquisitionKey).toStartWith('magnifier-dataset-acquisition-v4:');
+    expect(resolution.dataset?.acquisitionKey).toStartWith('magnifier-dataset-acquisition-v5:');
     expect(() => assertResolvedMagnifierDatasetForJob(job, resolution.preflight)).not.toThrow();
 
     const prefix = deriveResolverIssuedMagnifierPrefix(resolution.dataset!, 1);

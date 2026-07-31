@@ -34,6 +34,14 @@
       "types": "./src/node.ts",
       "default": "./src/node.ts"
     },
+    "./config": {
+      "types": "./src/core/config.ts",
+      "default": "./src/core/config.ts"
+    },
+    "./intrabar": {
+      "types": "./src/intrabar.ts",
+      "default": "./src/intrabar.ts"
+    },
     "./testing": {
       "types": "./src/testing/index.ts",
       "default": "./src/testing/index.ts"
@@ -41,6 +49,7 @@
   },
   "dependencies": {
     "@heyphat/pinery": "workspace:*",
+    "@heyphat/pinerun": "workspace:*",
     "@tigeropenapi/tigeropen": "0.5.4"
   },
   "peerDependencies": {

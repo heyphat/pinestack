@@ -96,6 +96,8 @@ export interface ResolvedMagnifierDataset {
   readonly targetPineTf: string;
   readonly targetCanonicalTf: string;
   readonly sourceCanonicalTf: string;
+  /** Number of source-grid rows returned before any exact target aggregation. */
+  readonly rawBarCount: number;
   readonly barsMs: readonly Readonly<Bar>[];
   /** Chart opens retained solely to bind a serialized dataset to its Job envelope. */
   readonly chartOpenTimesMs: readonly UnixMillisecond[];

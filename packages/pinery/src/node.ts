@@ -16,7 +16,7 @@ import type {
   MarketDataProvider,
   ResolvedHistorySource,
 } from './provider.js';
-import { isMarketDataProvider } from './provider.js';
+import { isMarketDataProvider, supportsLiveBars } from './provider.js';
 import { resolveHistorySource } from './acquisition.js';
 import {
   snapshotHistoryCapabilities,
@@ -77,6 +77,8 @@ interface ExactHistoryPayload {
 }
 
 /** Wrap a provider so identical requests are served from disk. */
+export function cached(provider: MarketDataProvider, opts?: DiskCacheOptions): MarketDataProvider;
+export function cached(provider: HistoryProvider, opts?: DiskCacheOptions): HistoryProvider;
 export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): HistoryProvider {
   const dir = opts.dir ?? join(process.cwd(), '.pinery-cache');
   const cacheIdentity = provider.cacheIdentity ?? provider.id;
@@ -205,6 +207,10 @@ export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): 
       live.historyResolved(instrument, timeframe, range, signal);
     liveWrapped.closedBars = (instrument, timeframe, options) =>
       live.closedBars(instrument, timeframe, options);
+    if (supportsLiveBars(live)) {
+      liveWrapped.liveBars = (instrument, timeframe, options) =>
+        live.liveBars(instrument, timeframe, options);
+    }
     if (live.disconnect) liveWrapped.disconnect = () => live.disconnect!();
   }
   return wrapped;

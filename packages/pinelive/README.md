@@ -1,9 +1,10 @@
 # @heyphat/pinelive
 
-`@heyphat/pinelive` is pinestack's forward-execution layer. It advances a piner
-strategy on closed bars supplied by `@heyphat/pinery`, reads piner's target
-position, and reconciles that target through a broker while writing an auditable
-JSONL ledger.
+`@heyphat/pinelive` is pinestack's forward-execution layer. Its V1
+compatibility runtime advances a piner strategy on closed bars supplied by
+`@heyphat/pinery`; its V2 runtime can also evaluate accepted forming revisions.
+Pinelive reads piner's target position and, only in a supported mirrored mode,
+reconciles that target through a broker while writing an auditable JSONL ledger.
 
 ## Availability and safety status
 
@@ -20,27 +21,44 @@ quote/history, entitlement, demo/live order, cancellation, or fill validation.
 They are **not sandbox- or production-approved**. See
 [Tiger readiness](#tiger-readiness) before configuring Tiger.
 
+### Current capability matrix
+
+| Surface               | Current support                                                                                                                                                                                                                                                               |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V1 compatibility      | Close-only evaluation from `closedBars()` with the existing eager broker path.                                                                                                                                                                                                |
+| V2 compute-only       | `bar-close`, or `every-update` with compiled `calc_on_every_tick` support and an authoritative provider `liveBars()` contract; compute-only has no broker factory.                                                                                                            |
+| V2 Paper              | `mirrorOn: "bar-close"` only. With every-update cadence, forming decisions are computed and durably skipped; only the authoritative final can affect Paper. `mirrorOn: "every-update"` is rejected during pure validation/preparation before provider or broker construction. |
+| Exact historical data | Standard or finite Bar Magnifier warmup on the characterized non-COOF path. Exact static security, including separate feed/per-feed/total budgets, is close-only; every-update security is rejected before data I/O.                                                          |
+| Piner blockers        | Piner 0.11.1 has no typed public pending-order snapshot or per-fill stream and reports complete magnifier data inactive with `calc_on_order_fills=true`; forming Paper effects and active magnifier+COOF remain unavailable.                                                  |
+| Tiger blockers        | Tiger `liveBars()` remains unadvertised, and V2 Tiger execution is rejected before execution credentials or broker construction. Credentialed data/finality and demo/live execution gates were not run and are not authorized.                                                |
+
+All stated evidence is repository-owned and offline. It is not TradingView,
+broker, exchange, venue, credentialed Tiger, release, or production evidence.
+
 ## Architecture boundaries
 
 Pinelive coordinates three owners without duplicating their responsibilities:
 
 1. **pinery owns market data.** A `MarketDataProvider` resolves one exact
-   instrument, returns warmup history, and yields closed bars. CSV parsing,
-   closure decisions, overlap, deduplication, and gap recovery stay in pinery.
-2. **piner owns strategy state.** Pinelive advances piner once per yielded closed
-   chart bar and reads `strategy.position_size` as the target.
+   instrument and returns warmup history. V1 consumes `closedBars()`; a V2
+   every-update run requires an explicitly advertised `liveBars()` stream with
+   revision and authoritative-final semantics. CSV parsing, closure decisions,
+   overlap, deduplication, and gap recovery stay in pinery.
+2. **piner owns strategy state.** V1 advances piner once per yielded closed chart
+   bar. V2 advances accepted forming/final snapshots according to its prepared
+   cadence and reads `strategy.position_size` as the target.
 3. **pinelive owns execution orchestration.** A `Broker` reports the exact
    position/account, submits corrections, and exposes truthful capabilities.
    The runner binds identities, enforces arming, drains provider work, and writes
    the ledger.
 
 ```text
-pinery MarketDataProvider ──closed bars──▶ piner strategy
-          │                                    │ target position
-          │ exact resolved instrument          ▼
-          └──────────────────────────────▶ pinelive runner ──▶ Broker
-                                                   │
-                                                   └──▶ JSONL ledger
+pinery MarketDataProvider ──closed bars / explicit updates──▶ piner strategy
+          │                                                       │ target position
+          │ exact resolved instrument                             ▼
+          └─────────────────────────────────────────────────▶ pinelive runner ──▶ Broker
+                                                                      │
+                                                                      └──▶ JSONL ledger
 ```
 
 A run freezes one `RunInstrumentBinding`. The Pine strategy sees its configured
@@ -57,14 +75,15 @@ bun install --frozen-lockfile
 bun packages/pinelive/src/cli.ts --help
 ```
 
-The CLI has two commands:
+The CLI has three commands:
 
 ```text
 run --config <path> [--tiger-profile <path>]
+validate --config <path>
 parity <live.jsonl> <expected.jsonl>
 ```
 
-## Paper quick start
+## Paper quick start (v1 compatibility)
 
 This example uses only checked-in CSV fixtures and `PaperBroker`; it does not
 contact a market-data or broker service.
@@ -110,11 +129,12 @@ sandbox or production use.
 
 ## Configuration
 
-The CLI accepts one versioned JSON document. The primary fields are:
+The v1 compatibility CLI accepts the fields below. V2 uses the stricter
+configuration shown in the next section.
 
 | Field              | Purpose                                                                          |
 | ------------------ | -------------------------------------------------------------------------------- |
-| `configVersion`    | Must be `1`.                                                                     |
+| `configVersion`    | `1` for this compatibility runtime.                                              |
 | `strategy`         | Path to a Pine strategy.                                                         |
 | `symbol`           | Strategy-facing symbol; the provider resolves the exact execution instrument.    |
 | `timeframe`        | Canonical pinery timeframe such as `5m` or `1h`.                                 |
@@ -132,9 +152,59 @@ documented in the [forward-testing guide](../../docs/pinelive.md).
 Configuration is fail-closed: unknown or incompatible provider/symbol/asset-class
 combinations do not silently coerce into a different live instrument.
 
+### V2 intrabar runtime
+
+V2 performs a pure normalization/compile preflight before opening a provider,
+credential profile, broker, ledger, or lease. A compute-only bar-close config is:
+
+```json
+{
+  "configVersion": 2,
+  "strategy": "examples/rsi-mean-reversion.pine",
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "warmupBars": 20,
+  "data": {
+    "provider": "csv",
+    "dataDir": "examples/data",
+    "cutoverTime": 1704139200
+  },
+  "historical": { "mode": "standard" },
+  "live": { "cadence": "bar-close" },
+  "execution": { "kind": "compute-only" }
+}
+```
+
+Validate without constructing any runtime resource, then run:
+
+```bash
+bun packages/pinelive/src/cli.ts validate --config pinelive.v2.json
+bun packages/pinelive/src/cli.ts run --config pinelive.v2.json
+```
+
+For Paper mirroring, replace `execution` with:
+
+```json
+{
+  "kind": "mirrored",
+  "mirrorOn": "bar-close",
+  "broker": { "id": "paper" },
+  "ledger": { "path": ".pinelive/v2.jsonl", "durability": "sync" },
+  "lease": { "path": ".pinelive/v2.lock" }
+}
+```
+
+V2 persists schema-v3 authority, binding, recovery, lease, decision, and order
+events. It recovers only the crash-safe JSONL prefix and requires a non-stealable
+file lease for mirrored execution. Compute-only output contains no account
+fields; mirrored output is printed only when execution remains safe. V2 Tiger
+broker execution is deliberately unavailable before any Tiger execution
+credentials or profile are read. Tiger may still be selected as the data
+provider, subject to the provider's own readiness restrictions.
+
 ## Lifecycle, reconciliation, and ledger
 
-Startup performs these steps in order:
+V1 startup performs these steps in order:
 
 1. Validate the config and compile the strategy.
 2. Resolve and freeze the exact pinery instrument.
@@ -149,6 +219,12 @@ Schema-v2 ledgers start with a binding record and preserve the provider/broker
 ids, strategy and execution symbols, metadata, stable binding fingerprint, and
 the complete requested order economics. Existing schema-v1 cycle JSON remains
 readable by parity tooling.
+
+V2 first freezes a prepared authority from finite history, compares recovered
+authority before lease or broker ownership, records lease acquisition before the
+lazy Paper broker factory, and compares the strong execution binding before any
+mark, position read, or order. Forming/recovered/discontinuous updates are
+journaled but cannot bypass the configured final-only mirror gate.
 
 Shutdown cancels first, asks the provider to disconnect, and drains real
 secondary-feed operations before broker/ledger cleanup. A provider that ignores
@@ -248,18 +324,22 @@ also lacks request-level `AbortSignal` support, so in-flight HTTP calls cannot b
 interrupted. Operators must not treat this adapter as sandbox- or
 production-approved.
 
-For a future reviewed data dry run, use Tiger data with `broker.id: "paper"`.
-Do not enable real Tiger execution until credentialed validation and the missing
-restart controls have been completed and separately approved.
+For a future reviewed data dry run, use Tiger data with a Paper broker. In v1
+that is `broker.id: "paper"`; in v2 it is
+`execution: { "kind": "mirrored", "broker": { "id": "paper" }, ... }`. V2
+Tiger broker execution is fail-closed and does not read Tiger execution
+credentials. Do not enable real Tiger execution until credentialed validation
+and the missing restart controls have been completed and separately approved.
 
 ### Tiger credentials
 
 Prefer one local mode-0600 properties file at
 `~/.tigeropen/tiger_openapi_config.properties` (or the working directory). To
-use another location, set top-level `tigerProfile`, pass
+use another location for v1, set top-level `tigerProfile`, pass
 `--tiger-profile <path>`, or set `TIGEROPEN_CONFIG_PATH`; a per-section `profile`
-overrides it. `~` is expanded, a directory resolves to the standard filename,
-and a nonexistent explicit path fails immediately.
+overrides it. V2 accepts profiles only in its strict data section, and V2 Tiger
+broker execution remains unavailable. `~` is expanded, a directory resolves to
+the standard filename, and a nonexistent explicit path fails immediately.
 
 Environment alternatives are:
 
@@ -291,13 +371,20 @@ fill-price parity.
 
 ## Public entry points
 
-- `@heyphat/pinelive` — browser-safe broker protocol, PaperBroker, binding,
-  mirror, runner, units, parity, and shared types.
-- `@heyphat/pinelive/node` — JSONL ledger, Node factories, official Tiger SDK
-  adapters, and transport overrides.
+- `@heyphat/pinelive` — browser-safe v1/v2 config, prepared intrabar runtime,
+  authority/binding, scheduler/recovery/lease contracts, brokers, units, parity,
+  and shared types.
+- `@heyphat/pinelive/node` — durable JSONL prefix/recovery helpers,
+  `FileExecutionLease`, Node factories, official Tiger SDK adapters, and
+  transport overrides.
+- `@heyphat/pinelive/config` — strict v1/v2 normalization and compiled-source
+  validation contracts.
+- `@heyphat/pinelive/intrabar` — focused intrabar config, authority, state,
+  runner, and server exports.
 - `@heyphat/pinelive/testing` — `runBrokerConformance()` and test helpers for
   broker implementations.
-- `packages/pinelive/src/cli.ts` — source-checkout `run` and `parity` CLI.
+- `packages/pinelive/src/cli.ts` — source-checkout `run`, `validate`, and
+  `parity` CLI.
 
 A broker implements `Broker` (`id`, `capabilities`, `instrument`, `getPosition`,
 `getAccount`, `submit`, `flatten`, and optional lifecycle/cancel methods) and

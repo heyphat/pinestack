@@ -69,3 +69,33 @@ test('PaperBroker rejects unsafe economic configuration', () => {
       }),
   ).toThrow('pointValue');
 });
+
+test('PaperBroker exact lookup reports only proven in-memory terminal outcomes', async () => {
+  const broker = new PaperBroker({
+    instruments: { X: instrument },
+    reject: (order) => (order.clientId === 'rejected' ? 'blocked' : undefined),
+  });
+  broker.mark('X', 100, 1);
+  const filledOrder = {
+    symbol: 'X',
+    side: 'buy' as const,
+    qty: 1,
+    type: 'market' as const,
+    clientId: 'filled',
+  };
+  const rejectedOrder = { ...filledOrder, clientId: 'rejected' };
+  const fill = await broker.submit(filledOrder);
+  await expect(broker.submit(rejectedOrder)).rejects.toMatchObject({ code: 'reject' });
+
+  expect(await broker.lookupOrder(filledOrder)).toEqual({ status: 'filled', fill });
+  expect(await broker.lookupOrder(rejectedOrder)).toEqual({
+    status: 'rejected',
+    message: 'blocked',
+  });
+  expect(await broker.lookupOrder({ ...filledOrder, clientId: 'missing' })).toEqual({
+    status: 'not-found',
+  });
+  expect(await broker.lookupOrder({ ...filledOrder, side: 'sell' })).toMatchObject({
+    status: 'ambiguous',
+  });
+});

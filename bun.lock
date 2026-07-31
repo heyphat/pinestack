@@ -18,6 +18,7 @@
       },
       "dependencies": {
         "@heyphat/pinery": "workspace:*",
+        "@heyphat/pinerun": "workspace:*",
         "@tigeropenapi/tigeropen": "0.5.4",
       },
       "peerDependencies": {

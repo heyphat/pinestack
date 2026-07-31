@@ -130,7 +130,12 @@ test('TigerBroker maps unknown terminal outcomes to retryable timeout', async ()
   const broker = new TigerBroker({ transport, armed: true });
   await expect(
     broker.submit({ symbol: 'MGCZ24', side: 'buy', qty: 1, type: 'market', clientId: 'unknown' }),
-  ).rejects.toMatchObject({ code: 'timeout', retryable: true });
+  ).rejects.toMatchObject({
+    code: 'timeout',
+    retryable: true,
+    submitFailureCertainty: 'possibly-sent',
+  });
+  expect(broker.lookupOrder).toBeUndefined();
 });
 
 test('TigerBroker never retransmits an ambiguous client id', async () => {
@@ -147,8 +152,14 @@ test('TigerBroker never retransmits an ambiguous client id', async () => {
     type: 'market' as const,
     clientId: 'ambiguous',
   };
-  await expect(broker.submit(order)).rejects.toMatchObject({ code: 'timeout' });
-  await expect(broker.submit(order)).rejects.toMatchObject({ code: 'timeout' });
+  await expect(broker.submit(order)).rejects.toMatchObject({
+    code: 'timeout',
+    submitFailureCertainty: 'possibly-sent',
+  });
+  await expect(broker.submit(order)).rejects.toMatchObject({
+    code: 'timeout',
+    submitFailureCertainty: 'possibly-sent',
+  });
   expect(transport.submits).toBe(1);
 });
 
@@ -480,7 +491,10 @@ test('TigerBroker does not transmit after cancellation during client-id lookup',
   await started;
   controller.abort();
   releaseLookup();
-  await expect(submitting).rejects.toMatchObject({ code: 'precondition' });
+  await expect(submitting).rejects.toMatchObject({
+    code: 'precondition',
+    submitFailureCertainty: 'definitely-not-sent',
+  });
   expect(transport.submits).toBe(0);
 });
 

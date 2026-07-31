@@ -34,7 +34,11 @@ export type {
   ResolvedDataInstrument,
   ResolveDataInstrumentOptions,
   ClosedBarsOptions,
+  BarUpdate,
+  LiveSourcePolicy,
+  LiveBarsOptions,
   MarketDataProvider,
+  LiveBarsProvider,
   MarketDataErrorCode,
 } from './provider.js';
 export {
@@ -61,7 +65,33 @@ export {
   assertResolvedDataInstrument,
   MarketDataError,
   isMarketDataProvider,
+  supportsLiveBars,
 } from './provider.js';
+export type {
+  BarUpdateValidationOptions,
+  ExactChildAggregationOptions,
+  ExactChildBucket,
+  RecoverLiveBarUpdatesOptions,
+  BufferLiveBarUpdatesOptions,
+  ConformLiveBarUpdatesOptions,
+} from './live/index.js';
+export {
+  BarUpdateValidator,
+  DEFAULT_FINAL_DEDUPE_BARS,
+  DEFAULT_LIVE_TEARDOWN_TIMEOUT_MS,
+  DEFAULT_MAX_FORMING_BARS,
+  DEFAULT_MAX_PENDING_FINALS,
+  ExactChildBarAggregator,
+  LiveBarUpdateBuffer,
+  aggregateExactChildBarUpdates,
+  bufferLiveBarUpdates,
+  conformLiveBarUpdates,
+  equivalentFinalBarUpdate,
+  liveTimeframeSeconds,
+  recoverLiveBarUpdates,
+  snapshotLiveSourcePolicy,
+  validateBarUpdate,
+} from './live/index.js';
 export type {
   Timeframe,
   ExactTimeframeFailureKind,
@@ -180,7 +210,14 @@ export {
   type StaticProviderOptions,
 } from './adapters/static.js';
 
-export { ReplayProvider, type ReplayProviderOptions } from './adapters/replay.js';
+export {
+  ReplayProvider,
+  type ReplayProviderOptions,
+  type ReplayBarUpdateTrace,
+  type ReplayBarUpdateTraces,
+  type ReplayLowerBarBucketContext,
+  type ReplayLowerBarsOptions,
+} from './adapters/replay.js';
 export {
   TigerProvider,
   type TigerProviderOptions,

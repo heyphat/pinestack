@@ -56,7 +56,10 @@ test('mirror retries transient submissions with the same client id', async () =>
   let attempt = 0;
   broker.submit = async (order) => {
     clientIds.push(order.clientId);
-    if (attempt++ === 0) throw new BrokerError('connectivity', 'temporary');
+    if (attempt++ === 0)
+      throw new BrokerError('connectivity', 'temporary', {
+        submitFailureCertainty: 'definitely-not-sent',
+      });
     return submit(order);
   };
   const outcome = await new PositionMirror(broker, instrument, {
@@ -68,6 +71,29 @@ test('mirror retries transient submissions with the same client id', async () =>
     '7:default|1:s|4:ROOT|1:X|12:binding-test|2:1h|1:1|1:0|1:1|1:1|9:reconcile',
     '7:default|1:s|4:ROOT|1:X|12:binding-test|2:1h|1:1|1:0|1:1|1:1|9:reconcile',
   ]);
+});
+
+test('mirror never retries a possibly-sent or unspecified submit failure', async () => {
+  for (const explicit of [false, true]) {
+    const broker = new PaperBroker({ instruments: { X: instrument } });
+    broker.mark('X', 100, 1);
+    let submits = 0;
+    broker.submit = async () => {
+      submits++;
+      throw new BrokerError(
+        'timeout',
+        'outcome unknown',
+        explicit ? { submitFailureCertainty: 'possibly-sent' } : undefined,
+      );
+    };
+    await expect(
+      new PositionMirror(broker, instrument, {
+        transientRetries: 3,
+        sleep: async () => {},
+      }).reconcile(1, context()),
+    ).rejects.toMatchObject({ code: 'timeout' });
+    expect(submits).toBe(1);
+  }
 });
 
 test('position-read failure is classified as unknown, not flat', async () => {

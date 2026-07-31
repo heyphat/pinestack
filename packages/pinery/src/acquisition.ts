@@ -90,7 +90,7 @@ export async function resolveHistorySource(
   return snapshotResolvedHistorySource({
     provider,
     normalizedSymbol,
-    cacheIdentity: `legacy:${provider.id}`,
+    cacheIdentity: provider.cacheIdentity ?? `legacy:${provider.id}`,
     capabilities: snapshotHistoryCapabilities({ timeframes: [], alignment: 'unknown' }),
     async history(_request: HistoryRequest): Promise<HistoryAcquisition> {
       throw new ExactHistoryError({

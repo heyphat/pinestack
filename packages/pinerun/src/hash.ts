@@ -53,6 +53,7 @@ export function jobHash(job: Job): string {
         targetPineTf: job.magnifier.targetPineTf,
         targetCanonicalTf: job.magnifier.targetCanonicalTf,
         sourceCanonicalTf: job.magnifier.sourceCanonicalTf,
+        rawBarCount: job.magnifier.rawBarCount,
         bars: digest(job.magnifier.barsMs),
         chartOpenTimes: numberArrayDigest(job.magnifier.chartOpenTimesMs),
         chartCloseTimes: numberArrayDigest(job.magnifier.chartCloseTimesMs),
@@ -67,7 +68,7 @@ export function jobHash(job: Job): string {
     : null;
 
   const hash = canonicalDigest({
-    version: 7,
+    version: 8,
     source: job.source,
     symbol: job.symbol,
     timeframe: job.timeframe,

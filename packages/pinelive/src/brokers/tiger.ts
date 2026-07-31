@@ -120,11 +120,19 @@ interface CachedFill {
   fill: Fill;
 }
 
+interface RetiredClientId {
+  /** Missing only when cancellation discovered an order created outside this adapter instance. */
+  fingerprint?: string;
+  message: string;
+}
+
 export class TigerBroker implements Broker {
   readonly id = 'tiger';
   private accountValue?: TigerTradingAccount;
   private readonly instruments = new Map<string, Instrument>();
   private readonly fills = new Map<string, CachedFill>();
+  /** Terminal non-fill identities remain retired even if bounded venue history later forgets them. */
+  private readonly retiredClientIds = new Map<string, RetiredClientId>();
   private readonly pending = new Map<string, string>();
   private submitTail: Promise<void> = Promise.resolve();
 
@@ -237,10 +245,16 @@ export class TigerBroker implements Broker {
   }
 
   async submit(order: OrderRequest, signal?: AbortSignal): Promise<Fill> {
-    this.ensureArmed('submit');
-    this.throwIfAborted(signal);
-    validateOrderRequest(order);
-    return this.withSubmitLock(() => this.submitLocked(order, signal), signal);
+    try {
+      this.ensureArmed('submit');
+      this.throwIfAborted(signal);
+      validateOrderRequest(order);
+      return await this.withSubmitLock(() => this.submitLocked(order, signal), signal);
+    } catch (error) {
+      if (error instanceof BrokerError && (error.code === 'reject' || error.submitFailureCertainty))
+        throw error;
+      throw tigerSubmitFailure(error, 'definitely-not-sent');
+    }
   }
 
   private async submitLocked(order: OrderRequest, signal?: AbortSignal): Promise<Fill> {
@@ -254,12 +268,6 @@ export class TigerBroker implements Broker {
           'tiger: limit orders require cancelStuckOrders and transport cancellation support',
         );
     }
-    const instrument = await this.instrument(order.symbol, signal);
-    const qtyStep = instrument.qtyStep ?? instrument.minQty;
-    if (!isStepAligned(order.qty, qtyStep) || order.qty < (instrument.minOrderQty ?? qtyStep))
-      throw new BrokerError('precondition', 'tiger: order quantity is off-step or below minimum');
-    if (order.type === 'limit' && !isStepAligned(order.limitPrice, instrument.mintick))
-      throw new BrokerError('precondition', 'tiger: limit price is not aligned to mintick');
     const fingerprint = orderFingerprint(order);
     const cached = this.fills.get(order.clientId);
     if (cached) {
@@ -267,34 +275,56 @@ export class TigerBroker implements Broker {
         throw new BrokerError('precondition', 'tiger: client id was reused with a different order');
       return structuredClone(cached.fill);
     }
+    const retired = this.retiredClientIds.get(order.clientId);
+    if (retired) {
+      if (retired.fingerprint != null && retired.fingerprint !== fingerprint)
+        throw new BrokerError('precondition', 'tiger: client id was reused with a different order');
+      throw new BrokerError('reject', retired.message, {
+        retryable: false,
+        submitFailureCertainty: 'definitely-not-sent',
+      });
+    }
     const pendingFingerprint = this.pending.get(order.clientId);
     if (pendingFingerprint && pendingFingerprint !== fingerprint)
-      throw new BrokerError('precondition', 'tiger: pending client id has a different order');
+      throw tigerSubmitFailure(
+        new BrokerError('precondition', 'tiger: pending client id has a different order'),
+        'possibly-sent',
+      );
     if (!pendingFingerprint && this.pending.size > 0)
       throw new BrokerError(
         'timeout',
         'tiger: another submitted order is still unresolved; refusing a second live correction',
         { retryable: true },
       );
-    const account = await this.ensureAccount(signal);
-    this.throwIfAborted(signal);
+
+    let possiblySent = pendingFingerprint != null;
     let result: TigerOrderResult | undefined;
     try {
+      const instrument = await this.instrument(order.symbol, signal);
+      const qtyStep = instrument.qtyStep ?? instrument.minQty;
+      if (!isStepAligned(order.qty, qtyStep) || order.qty < (instrument.minOrderQty ?? qtyStep))
+        throw new BrokerError('precondition', 'tiger: order quantity is off-step or below minimum');
+      if (order.type === 'limit' && !isStepAligned(order.limitPrice, instrument.mintick))
+        throw new BrokerError('precondition', 'tiger: limit price is not aligned to mintick');
+      const account = await this.ensureAccount(signal);
+      this.throwIfAborted(signal);
       result = await this.options.transport.findOrderByClientId(account.id, order.clientId, signal);
       this.throwIfAborted(signal);
       if (result) {
+        possiblySent = true;
         validateOrderIdentity(result, order);
         if (!isProvenTerminal(result.status)) this.pending.set(order.clientId, fingerprint);
       }
       if (!result && pendingFingerprint) {
         throw new BrokerError('timeout', 'tiger: prior order outcome is still unknown', {
           retryable: true,
+          submitFailureCertainty: 'possibly-sent',
         });
       }
       if (!result) {
-        // Reserve the logical order before transmission. The submit lock makes this check/set
-        // atomic across client ids; the marker survives ambiguous and malformed responses.
+        // Reserve before transmission. From this assignment onward every failure is possibly sent.
         this.pending.set(order.clientId, fingerprint);
+        possiblySent = true;
         result =
           order.type === 'limit'
             ? await this.options.transport.submitLimit!(
@@ -323,9 +353,11 @@ export class TigerBroker implements Broker {
       result = await this.awaitTerminal(account.id, result, order, signal);
     } catch (error) {
       const classified = classifyTigerBrokerError(error, 'submit');
-      if (!classified.retryable) throw classified;
+      if (classified.code === 'reject') throw classified;
+      if (!possiblySent) throw tigerSubmitFailure(classified, 'definitely-not-sent');
       result = undefined;
       try {
+        const account = await this.ensureAccount(signal);
         const recovered = await this.options.transport.findOrderByClientId(
           account.id,
           order.clientId,
@@ -336,16 +368,28 @@ export class TigerBroker implements Broker {
           if (!isProvenTerminal(recovered.status)) this.pending.set(order.clientId, fingerprint);
           result = await this.awaitTerminal(account.id, recovered, order, signal);
         }
-      } catch (recoveryError) {
-        const recovery = classifyTigerBrokerError(recoveryError, 'submit recovery');
-        if (!recovery.retryable) throw recovery;
+      } catch {
+        // A failed bounded recovery read cannot prove absence or permit retransmission.
       }
-      if (!result) throw classified;
+      if (!result) throw tigerSubmitFailure(classified, 'possibly-sent');
     }
-    // Only a proven terminal venue status releases the unresolved-order guard. Unknown or
-    // still-working outcomes retain it so a later bar cannot create a second live correction.
-    if (isProvenTerminal(result.status)) this.pending.delete(order.clientId);
-    const fill = terminalFill(result, order);
+    let fill: Fill;
+    try {
+      fill = terminalFill(result, order);
+    } catch (error) {
+      if (error instanceof BrokerError && error.code === 'reject') {
+        this.retiredClientIds.set(order.clientId, {
+          fingerprint,
+          message: error.message,
+        });
+        this.pending.delete(order.clientId);
+        throw error;
+      }
+      // A malformed or non-terminal response is not proof that the effect is absent. Keep the
+      // pending marker so a bounded lookup miss can never reopen transmission for this client id.
+      throw tigerSubmitFailure(error, 'possibly-sent');
+    }
+    this.pending.delete(order.clientId);
     this.fills.set(order.clientId, { fingerprint, fill });
     return structuredClone(fill);
   }
@@ -443,7 +487,12 @@ export class TigerBroker implements Broker {
         throw new BrokerError('timeout', 'tiger: cancel outcome is still unknown', {
           retryable: true,
         });
+      const pendingFingerprint = this.pending.get(clientId);
       this.pending.delete(clientId);
+      this.retiredClientIds.set(clientId, {
+        ...(pendingFingerprint == null ? {} : { fingerprint: pendingFingerprint }),
+        message: `tiger: order is already terminal (${settled.status})`,
+      });
       return {
         clientId,
         status: settled.status === 'filled' ? 'filled' : 'cancelled',
@@ -652,6 +701,18 @@ function validateOrderIdentity(result: TigerOrderResult, order: OrderRequest): v
   ) {
     throw new BrokerError('precondition', 'tiger: order response identity does not match request');
   }
+}
+
+function tigerSubmitFailure(
+  error: unknown,
+  certainty: 'definitely-not-sent' | 'possibly-sent',
+): BrokerError {
+  const classified = classifyTigerBrokerError(error, 'submit');
+  return new BrokerError(classified.code, classified.message, {
+    retryable: classified.retryable,
+    submitFailureCertainty: certainty,
+    details: classified.details,
+  });
 }
 
 function classifyTigerBrokerError(error: unknown, operation: string): BrokerError {

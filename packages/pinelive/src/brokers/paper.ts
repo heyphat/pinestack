@@ -1,5 +1,5 @@
 import { BrokerError } from '../core/broker.js';
-import type { Broker, Capabilities } from '../core/broker.js';
+import type { Broker, Capabilities, ExactOrderLookupResult } from '../core/broker.js';
 import type { Account, Fill, Instrument, OrderRequest, Position } from '../core/types.js';
 import { isStepAligned, nativeQtyStep } from '../core/units.js';
 
@@ -31,10 +31,9 @@ export function isMarkableBroker(broker: Broker): broker is Broker & MarkableBro
   return typeof (broker as Broker & Partial<MarkableBroker>).mark === 'function';
 }
 
-interface CachedFill {
-  fingerprint: string;
-  fill: Fill;
-}
+type CachedTerminal =
+  | { fingerprint: string; status: 'filled'; fill: Fill }
+  | { fingerprint: string; status: 'rejected'; message: string };
 
 function orderFingerprint(order: OrderRequest): string {
   return `${order.symbol}\u0000${order.side}\u0000${order.qty}\u0000${order.type}\u0000${
@@ -60,7 +59,7 @@ export class PaperBroker implements Broker, MarkableBroker {
   readonly id = 'paper';
   private readonly states = new Map<string, PaperState>();
   private readonly instruments = new Map<string, Instrument>();
-  private readonly fills = new Map<string, CachedFill>();
+  private readonly terminals = new Map<string, CachedTerminal>();
   private readonly initialBalance: number;
   private commissions = 0;
   private orderSequence = 0;
@@ -158,6 +157,19 @@ export class PaperBroker implements Broker, MarkableBroker {
   }
 
   async submit(order: OrderRequest): Promise<Fill> {
+    try {
+      return await this.submitDefinitely(order);
+    } catch (error) {
+      if (!(error instanceof BrokerError) || error.submitFailureCertainty) throw error;
+      throw new BrokerError(error.code, error.message, {
+        retryable: error.retryable,
+        submitFailureCertainty: 'definitely-not-sent',
+        details: error.details,
+      });
+    }
+  }
+
+  private async submitDefinitely(order: OrderRequest): Promise<Fill> {
     if (!order || typeof order !== 'object')
       throw new BrokerError('precondition', 'paper: order must be an object');
     if (typeof order.symbol !== 'string' || !order.symbol.trim())
@@ -171,14 +183,16 @@ export class PaperBroker implements Broker, MarkableBroker {
     if (!Number.isFinite(order.qty) || order.qty <= 0)
       throw new BrokerError('precondition', 'paper: order qty must be positive');
 
-    const prior = this.fills.get(order.clientId);
+    const fingerprint = orderFingerprint(order);
+    const prior = this.terminals.get(order.clientId);
     if (prior) {
-      if (prior.fingerprint !== orderFingerprint(order)) {
+      if (prior.fingerprint !== fingerprint) {
         throw new BrokerError(
           'precondition',
           `paper: client id ${order.clientId} was reused with a different order`,
         );
       }
+      if (prior.status === 'rejected') throw this.rejected(prior.message);
       return structuredClone(prior.fill);
     }
     const instrument = await this.instrument(order.symbol);
@@ -195,21 +209,23 @@ export class PaperBroker implements Broker, MarkableBroker {
           ? order.limitPrice >= state.mark.price
           : order.limitPrice <= state.mark.price;
       if (!marketable)
-        throw new BrokerError(
-          'reject',
+        throw this.rememberRejection(
+          order,
+          fingerprint,
           'paper: resting limit orders are not simulated; limit is not marketable at the mark',
         );
     }
     const rejection = this.options.reject?.(order);
-    if (rejection) throw new BrokerError('reject', rejection);
+    if (rejection) throw this.rememberRejection(order, fingerprint, rejection);
 
     const step = nativeQtyStep(instrument);
     if (!isStepAligned(order.qty, step))
       throw new BrokerError('precondition', 'paper: order quantity is not aligned to its step');
     const qty = order.qty;
     if (qty < (instrument.minOrderQty ?? step)) {
-      throw new BrokerError(
-        'reject',
+      throw this.rememberRejection(
+        order,
+        fingerprint,
         `paper: quantity is below the ${instrument.minOrderQty ?? step} minimum`,
       );
     }
@@ -238,8 +254,19 @@ export class PaperBroker implements Broker, MarkableBroker {
       commissionCurrency: this.options.currency ?? 'USD',
       time: state.mark.time,
     };
-    this.fills.set(order.clientId, { fingerprint: orderFingerprint(order), fill });
+    this.terminals.set(order.clientId, { fingerprint, status: 'filled', fill });
     return structuredClone(fill);
+  }
+
+  async lookupOrder(order: Readonly<OrderRequest>): Promise<ExactOrderLookupResult> {
+    const terminal = this.terminals.get(order.clientId);
+    if (!terminal) return { status: 'not-found' };
+    if (terminal.fingerprint !== orderFingerprint(order)) {
+      return { status: 'ambiguous', detail: 'client id is bound to different order economics' };
+    }
+    return terminal.status === 'filled'
+      ? { status: 'filled', fill: structuredClone(terminal.fill) }
+      : { status: 'rejected', message: terminal.message };
   }
 
   async flatten(symbol: string): Promise<void> {
@@ -264,6 +291,22 @@ export class PaperBroker implements Broker, MarkableBroker {
     const state = this.state(symbol);
     state.qty = qty;
     state.avgPrice = qty === 0 ? undefined : (avgPrice ?? state.mark?.price ?? 0);
+  }
+
+  private rememberRejection(
+    order: OrderRequest,
+    fingerprint: string,
+    message: string,
+  ): BrokerError {
+    this.terminals.set(order.clientId, { fingerprint, status: 'rejected', message });
+    return this.rejected(message);
+  }
+
+  private rejected(message: string): BrokerError {
+    return new BrokerError('reject', message, {
+      retryable: false,
+      submitFailureCertainty: 'definitely-not-sent',
+    });
   }
 
   private validateInstrument(symbol: string, instrument: Instrument): void {

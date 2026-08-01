@@ -21,7 +21,7 @@ export interface SessionEntry {
   exitCode: number | null;
   elapsedMs: number;
   ok: boolean;
-  /** The run id this produced, so the TRADES page can point back at a row. */
+  /** The run id this produced, so the LOGS page can point back at a row. */
   runId: string;
   error?: string;
 }

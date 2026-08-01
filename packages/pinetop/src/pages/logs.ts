@@ -260,7 +260,7 @@ function drawLog(ctx: PageContext, rect: Rect): void {
  * filter. `r` is dropped for the same reason in reverse: TRADES has no command of
  * its own, so advertising the run key would be a promise the page cannot keep.
  */
-const TRADES_HINTS: readonly { key: string; label: string }[] = [
+const LOGS_HINTS: readonly { key: string; label: string }[] = [
   { key: 'tab', label: 'pane' },
   { key: 'j/k', label: 'move' },
   { key: '/', label: 'filter' },
@@ -270,11 +270,11 @@ const TRADES_HINTS: readonly { key: string; label: string }[] = [
   { key: '?', label: 'help' },
 ];
 
-export const tradesPage: Page = {
-  id: 'trades',
+export const logsPage: Page = {
+  id: 'logs',
   minCols: 100,
 
-  hints: () => TRADES_HINTS,
+  hints: () => LOGS_HINTS,
 
   panes: () => [...PANES],
 
@@ -297,10 +297,10 @@ export const tradesPage: Page = {
 
   confirm: (state) => {
     // ↵ on a fill scopes the log to it (§7 P4).
-    if (state.panes.trades.focus !== 'ledger') return undefined;
+    if (state.panes.logs.focus !== 'ledger') return undefined;
     const visible = filterTrades(ledger(state).trades, state.tradeFilter);
     if (visible.length === 0) return undefined;
-    const index = clampCursor(state.panes.trades.cursor['ledger'] ?? 0, visible.length);
+    const index = clampCursor(state.panes.logs.cursor['ledger'] ?? 0, visible.length);
     state.logScope = index;
     return `log scoped to fill ${index + 1} — esc restores`;
   },

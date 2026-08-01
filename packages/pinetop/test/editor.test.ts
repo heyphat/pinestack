@@ -711,7 +711,7 @@ describe('leaving the buffer without leaving normal mode', () => {
     const instance = app();
     instance.onKey({ name: ' ', text: ' ' });
     instance.onKey({ name: '8', text: '8' });
-    expect(state.page).toBe('trades');
+    expect(state.page).toBe('logs');
   });
 
   test('a bare digit is still a count, so 3j and 42G work', () => {

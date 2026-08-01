@@ -46,7 +46,7 @@ import { portfolioPage } from './pages/portfolio.js';
 import { refreshScripts } from './scripts.js';
 import { scanPage } from './pages/scan.js';
 import { selectedCombo, sweepPage } from './pages/sweep.js';
-import { tradesPage } from './pages/trades.js';
+import { logsPage } from './pages/logs.js';
 import { walkforwardPage } from './pages/walkforward.js';
 import { saveFlags } from './persist.js';
 import { Screen } from './render/screen.js';
@@ -68,7 +68,7 @@ export const PAGE_MAP: Record<PageId, Page> = {
   scan: scanPage,
   portfolio: portfolioPage,
   compare: comparePage,
-  trades: tradesPage,
+  logs: logsPage,
 };
 
 /**
@@ -382,7 +382,7 @@ export class App {
       }
       case 'run-dialog': {
         if (this.page.command == null) {
-          state.status = 'TRADES has no command — it shows the loaded run';
+          state.status = 'LOGS has no command — it shows the loaded run';
           break;
         }
         this.openRunDialog(this.page.command);
@@ -485,7 +485,7 @@ export class App {
     // thing on screen and the one `esc` most likely meant.
     if (errorHeight(state) > 0 && state.run != null) {
       state.run.errorDismissed = true;
-      state.status = 'dismissed — the engine log is on TRADES';
+      state.status = 'dismissed — the engine log is on LOGS';
       return;
     }
     if (state.logScope != null) {
@@ -931,7 +931,7 @@ export class App {
 
     try {
       const raw = await this.provider.ask(question, {
-        command: command ?? 'trades',
+        command: command ?? 'logs',
         invocation: model == null ? '' : composeArgv(model).join(' '),
         report: groundReport(state.run?.report),
         inputTitles: titles,

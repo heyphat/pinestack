@@ -170,7 +170,7 @@ export interface AppState {
    * run dialog always number their rows the same way.
    */
   showAdvanced: boolean;
-  /** Fill filter on the TRADES page (`/`). */
+  /** Fill filter on the LOGS page (`/`). */
   tradeFilter: string;
   /** When a fill is selected, the log scopes to it; `esc` unscopes (§7 P4). */
   logScope: number | null;
@@ -205,7 +205,7 @@ export function initialPanes(): Record<PageId, PaneSelection> {
     scan: make('strategies'),
     portfolio: make('strategies'),
     compare: make('strategies'),
-    trades: make('ledger'),
+    logs: make('ledger'),
   };
 }
 

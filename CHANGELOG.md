@@ -78,6 +78,13 @@ libraries to npm remains a possible follow-up.
   have injected offline SDK-facade coverage only; credentialed venue, demo-order,
   cancellation, and fill validation remain intentionally pending.
 
+### Changed
+
+- **pinetop page 8 renamed TRADES → LOGS.** The tab shows the engine log plus
+  the fill ledger for the loaded run, and the old name misread as a trading
+  surface. Keyboard ordinal (`8`), behavior, and panes are unchanged;
+  `--page trades` remains an accepted alias for `--page logs`.
+
 ### Fixed
 
 - **Pinelive safety-audit remediation.** An earlier pass fixed 17 findings across exact Tiger account/order identity, unresolved-order serialization, runtime order validation, Paper quantity handling, tiny quantity grids, futures roots/expiry, replay catch-up, primary and secondary warmup coverage, shutdown drainage, cache partitioning, strict timeframe identity, finer security-history ranges, truthful capabilities, and injective client ids.

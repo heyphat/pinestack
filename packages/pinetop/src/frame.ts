@@ -137,7 +137,7 @@ function drawDirtyBanner(screen: Screen, state: AppState, page: Page, y: number)
 function drawCommandLine(screen: Screen, state: AppState, page: Page, y: number): void {
   const command = page.command;
   if (command == null) {
-    // TRADES has no command of its own; it shows the run that produced the
+    // LOGS has no command of its own; it shows the run that produced the
     // ledger, so the line still reproduces what is on screen.
     const run = state.run;
     const text = run == null ? '$ (no run loaded)' : `$ pinerun ${run.argv.join(' ')}`;

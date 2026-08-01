@@ -100,7 +100,7 @@ describe('P0 — the shell', () => {
     expect(text).toContain('5 SCAN');
     expect(text).toContain('6 PORTFOLIO');
     expect(text).toContain('7 COMPARE');
-    expect(text).toContain('8 TRADES');
+    expect(text).toContain('8 LOGS');
   });
 
   test('a terminal too narrow for eight titles names only the page you are on', () => {
@@ -525,9 +525,9 @@ describe('P3 — SCAN, PORTFOLIO, COMPARE', () => {
   });
 });
 
-describe('P4 — TRADES', () => {
+describe('P4 — LOGS', () => {
   beforeEach(() => {
-    state.page = 'trades';
+    state.page = 'logs';
     state.run = {
       id: '#418',
       command: 'backtest',
@@ -574,7 +574,7 @@ describe('P4 — TRADES', () => {
 
   test('selecting a fill scopes the log, and esc restores it', () => {
     const app = makeApp(state);
-    state.panes.trades.focus = 'ledger';
+    state.panes.logs.focus = 'ledger';
     app.onKey({ name: 'enter' });
     expect(state.logScope).toBe(0);
     expect(screenText(app)).toContain('scoped to fill');
@@ -1127,7 +1127,7 @@ describe('the STRATEGIES pane, on every command page', () => {
       state.page = command;
       expect(screenText(makeApp(state)), command).toContain('STRATEGIES');
     }
-    state.page = 'trades';
+    state.page = 'logs';
     expect(screenText(makeApp(state))).not.toContain('STRATEGIES');
   });
 
@@ -1498,7 +1498,7 @@ describe('run history, per page', () => {
       state.page = command;
       expect(screenText(makeApp(state)), command).toContain('HISTORY');
     }
-    for (const page of ['trades', 'editor'] as const) {
+    for (const page of ['logs', 'editor'] as const) {
       state.page = page;
       expect(screenText(makeApp(state)), page).not.toContain('HISTORY');
     }

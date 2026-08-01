@@ -297,7 +297,7 @@ export function paletteItems(): PaletteItem[] {
     },
     {
       // Dismissing an error should not lose it: `esc` hides the drawer, this
-      // brings it back, and the engine log on TRADES was never gone.
+      // brings it back, and the engine log on LOGS was never gone.
       label: 'show the last error',
       hint: 'reopen the drawer for the loaded run',
       run: (state) => {
@@ -535,7 +535,7 @@ export function runTrouble(state: AppState): RunTrouble | null {
       ),
       lines: errors.length > 0 ? errors : run.error == null ? [] : [run.error],
       style: STYLE.error,
-      hint: 'esc dismiss · the full engine log is on TRADES · r retries',
+      hint: 'esc dismiss · the full engine log is on LOGS · r retries',
     };
   }
 
@@ -617,7 +617,7 @@ export function drawError(screen: Screen, state: AppState, offset = 0): void {
   const hidden = lines.length - shown.length;
   const hint =
     hidden > 0
-      ? `esc dismiss · ${hidden} more ${trouble.kind === 'failed' ? 'in the engine log (TRADES)' : 'not shown'}`
+      ? `esc dismiss · ${hidden} more ${trouble.kind === 'failed' ? 'in the engine log (LOGS)' : 'not shown'}`
       : trouble.hint;
   screen.text(inner.x, inner.y + inner.h - 1, truncate(hint, inner.w), STYLE.muted, inner);
 }

@@ -116,17 +116,17 @@ describe('which file', () => {
     expect(pathToEdit(state)).toBe('strats/swept.pine');
   });
 
-  test('EDITOR and TRADES edit the open buffer', () => {
+  test('EDITOR and LOGS edit the open buffer', () => {
     openFile(state.editor, 'strats/open.pine', io);
     state.page = 'editor';
     expect(pathToEdit(state)).toBe('strats/open.pine');
-    state.page = 'trades';
+    state.page = 'logs';
     expect(pathToEdit(state)).toBe('strats/open.pine');
   });
 
   test('with nothing loaded anywhere it falls back rather than refusing', () => {
     state.flags.backtest.scripts = [];
-    state.page = 'trades';
+    state.page = 'logs';
     // Either discovery found something in this project, or there is nothing to
     // find — both are correct; what must not happen is a throw.
     expect(() => pathToEdit(state)).not.toThrow();

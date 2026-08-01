@@ -9,6 +9,8 @@ It adds no analytics of its own. Every number it shows comes from
 `pinerun --json`; piner remains the sole authority for fills, timestamps, and
 metrics.
 
+![The BACKTEST page: strategies, config, and history on the left; price, equity, and drawdown charts with the full tearsheet beside them; monthly returns and trades below](../../docs/assets/pinetop-backtest.png)
+
 See [design.md](./design.md) for the decisions behind it.
 
 ## Install
@@ -200,6 +202,8 @@ owns the keyboard. `?` there shows both keyboards side by side.
 Page 1 is a vim-modal editor for the `.pine` itself: the project's scripts and
 the open one's `input()` titles in the sidebar, the buffer in the wide middle
 with a line-number gutter and Pine syntax colouring from your terminal's palette.
+
+![The EDITOR page: project scripts and the open script's inputs in the sidebar, the .pine buffer with vim-modal editing in the middle](../../docs/assets/pinetop-editor.png)
 
 It opens on the strategy you already have loaded. `tab` (or `↵` on a file in
 FILES) enters the buffer; from there it is vim:

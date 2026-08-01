@@ -10,25 +10,17 @@
 
 import { sparkline } from '@heyphat/pinerun';
 import type { Pair } from '../flags/model.js';
-import { axisValues, comboCount } from '../flags/model.js';
 import { schemaFor } from '../flags/schema.js';
 import { compactMoney, duration, int, num } from '../render/format.js';
 import { drawPane, truncate, type Rect } from '../render/screen.js';
-import {
-  drawHeader,
-  drawLeader,
-  drawRow,
-  fitColumns,
-  type Column,
-  type Row,
-} from '../render/table.js';
+import { drawHeader, drawRow, fitColumns, type Column, type Row } from '../render/table.js';
 import { STYLE } from '../render/theme.js';
 import { scriptLabel } from '../scripts.js';
 import type { AppState } from '../state.js';
 import { buildHeatmap, heatmapLegend } from '../views/heatmap.js';
 import type { SweepJson, SweepRankedJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
-import { declaredInputs, drawInputsPane, type InputRow } from './inputs-pane.js';
+import { axisRows, beginAxisEdit, drawAxisPane } from './inputs-pane.js';
 import {
   STRATEGIES_PANE,
   drawStrategiesPane,
@@ -169,75 +161,6 @@ function drawRanked(ctx: PageContext, rect: Rect): void {
   }
 }
 
-/**
- * Every `input()` the selected script declares, with the ones being swept marked
- * and carrying their grid. This is the pane the AXES pane used to be, widened
- * from "the axes you set" to "the axes you could set" — you cannot choose a grid
- * for inputs you cannot see, and the names here are exactly what `--input` is
- * validated against before a run (§4.5.e).
- *
- * An axis whose name the script does not declare is still listed, in warn style:
- * `pinerun` will reject it, and a row that quietly vanished would hide why.
- */
-export function inputRows(state: AppState): InputRow[] {
-  const model = state.flags.sweep;
-  const axes = (model.values['input'] as Pair[] | undefined) ?? [];
-  const grids = new Map(axes.map((axis) => [axis.name, axis.value]));
-  const edit = state.edit?.origin === 'axis' && state.edit.command === 'sweep' ? state.edit : null;
-
-  const declared = declaredInputs(state, model.scripts[0]);
-  const rows: InputRow[] = declared.map((title) => ({
-    title,
-    value: grids.get(title),
-    marked: grids.has(title),
-    editing: edit?.input === title ? edit.buffer : undefined,
-  }));
-
-  for (const axis of axes) {
-    if (declared.includes(axis.name)) continue;
-    rows.push({
-      title: axis.name,
-      value: axis.value,
-      marked: true,
-      unknown: true,
-      editing: edit?.input === axis.name ? edit.buffer : undefined,
-    });
-  }
-  return rows;
-}
-
-function drawInputs(ctx: PageContext, rect: Rect): void {
-  const { state } = ctx;
-  const model = state.flags.sweep;
-  const axes = (model.values['input'] as Pair[] | undefined) ?? [];
-  const combos = comboCount(axes);
-  const cap = typeof model.values['max-combos'] === 'number' ? model.values['max-combos'] : 5000;
-  const rows = inputRows(state);
-
-  // With no axes yet the count of what is on offer is the useful fact; once there
-  // are axes, the grid size is — it is the number `--max-combos` is measured
-  // against. Either way the legend says there is more than the pane can show.
-  const legend =
-    axes.length === 0
-      ? rows.length > 0
-        ? String(rows.length)
-        : undefined
-      : `${axes.length} ${axes.length === 1 ? 'axis' : 'axes'} · ${int(combos)} combos`;
-
-  drawInputsPane(ctx, rect, {
-    paneId: 'inputs',
-    rows,
-    legend,
-    empty:
-      model.scripts[0] == null || model.scripts[0] === ''
-        ? 'load a strategy above'
-        : 'this script declares no input()',
-    hint: '↵ set a grid · empty removes it',
-    // The guard the CLI enforces, enforced here before the spawn (§7 P2).
-    warning: combos > cap ? `over --max-combos ${int(cap)}` : undefined,
-  });
-}
-
 function drawHeatmap(ctx: PageContext, rect: Rect): void {
   const { screen, state } = ctx;
   const data = report(state);
@@ -305,7 +228,7 @@ export const sweepPage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === STRATEGIES_PANE) return strategyRowCount();
-    if (paneId === 'inputs') return inputRows(state).length;
+    if (paneId === 'inputs') return axisRows(state, 'sweep').length;
     if (paneId === 'config') return configRowCount(state, 'sweep');
     if (paneId === 'ranked') return rankedRows(state).length;
     return 0;
@@ -331,22 +254,8 @@ export const sweepPage: Page = {
 
   confirm: (state) => {
     if (state.panes.sweep.focus === STRATEGIES_PANE) return loadStrategy(state, 'sweep');
-    // ↵ on an input opens that one axis for typing. Each axis is its own row and
-    // its own edit, which is what `--input` being a single config field prevented.
-    if (state.panes.sweep.focus === 'inputs') {
-      const list = inputRows(state);
-      if (list.length === 0) return 'no input() to sweep — load a strategy that declares some';
-      const row = list[clampCursor(state.panes.sweep.cursor['inputs'] ?? 0, list.length)];
-      if (row == null) return undefined;
-      state.edit = {
-        command: 'sweep',
-        index: -1,
-        origin: 'axis',
-        input: row.title,
-        buffer: row.value ?? '',
-      };
-      return `${row.title}: a grid like 5,10,20 or 30:100:10 · ↵ accept · empty drops it`;
-    }
+    // ↵ on an input opens that one axis for typing — see `beginAxisEdit`.
+    if (state.panes.sweep.focus === 'inputs') return beginAxisEdit(state, 'sweep');
     // ↵ on a ranked row loads that combo into BACKTEST as fixed inputs — the
     // sweep → backtest deep-dive edge (§2, §4.2).
     if (state.panes.sweep.focus !== 'ranked') return undefined;
@@ -389,7 +298,7 @@ export const sweepPage: Page = {
     ];
 
     drawStrategiesPane(ctx, stratRect, { command: 'sweep' });
-    drawInputs(ctx, inputsRect);
+    drawAxisPane(ctx, inputsRect, 'sweep');
     drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'WF w', 'ASK a'] });
     drawRanked(ctx, rankedCol);
     if (heatH > 0) drawHeatmap(ctx, bottom);

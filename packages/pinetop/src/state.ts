@@ -32,8 +32,16 @@ export interface RunState {
   log: LogLine[];
   elapsedMs?: number;
   error?: string;
+  /** The process's exit status. `null` when it never started or was signalled. */
+  exitCode?: number | null;
   argv: string[];
   startedAt: number;
+  /**
+   * Set once the user has dismissed this run's failure drawer. It lives on the
+   * run rather than in `AppState` so a new run cannot inherit an acknowledgement
+   * of an older one's error — the next failure announces itself.
+   */
+  errorDismissed?: boolean;
 }
 
 /** One AI turn: what was asked, what came back (§4.5.b). */

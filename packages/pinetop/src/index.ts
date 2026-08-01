@@ -189,11 +189,14 @@ export type { PaletteItem } from './overlays.js';
 export {
   askHeight,
   drawAsk,
+  drawError,
   drawFilter,
   drawHelp,
   drawPalette,
   drawRunDialog,
   drawWelcome,
+  errorHeight,
+  errorLines,
   filterPalette,
   paletteItems,
 } from './overlays.js';

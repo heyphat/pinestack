@@ -255,9 +255,14 @@ correctness bug, not a style choice.
   all of them do. TRADES has none, because it has no command and a script picker there would
   imply it could run something (§4.2.b); EDITOR's FILES pane is the sibling, where `↵` opens
   a buffer instead of loading an argument.
-- **SWEEP's INPUTS pane lists every `input()` the selected script declares**, marking the
-  ones being swept and showing their grid. It replaces the AXES pane, which listed only the
-  axes you had already set — you cannot choose a grid for inputs you cannot see, and these
+- **SWEEP and WALKFORWARD both carry an INPUTS pane listing every `input()` the selected
+  script declares**, marking the ones being swept and showing their grid. Both, because they
+  share one `--input` grammar: the flag is in the `axes` group on both, walkforward's own
+  help says "same grammar as sweep", and `validate` applies the same "at least one axis" rule
+  and the same `--max-combos` cap to each. Walkforward has the stronger claim, in fact — an
+  axis is *mandatory* there, so it was the one page where a required flag could only be set
+  by retyping. On SWEEP it replaces the AXES pane, which listed only the axes you had already
+  set — you cannot choose a grid for inputs you cannot see, and these
   are exactly the names `--input` is validated against (§4.5.e). Same renderer as EDITOR's
   INPUTS, differing only in what sits beside a row. An axis whose name the script does not
   declare is still listed, in warn style: `pinerun` will reject it, and a row that quietly
@@ -517,6 +522,16 @@ anticipate, each because the alternative was a screen that lied:
 
 - Mirror `pinerun`'s own engine log in the TRADES page: resolve, fetch/cache, warmup,
   fills, artifact writes, with levels (`INFO` / `WARN` / `ERR`).
+- **A non-zero exit gets a drawer of its own**, not a line in the status strip. As built,
+  half the failure was being kept: the last error line went to the status bar, where the
+  hints truncated it, and the rest sat in the engine log on a page you had to know to open —
+  and the exit code was not retained at all. A run that fails is the thing the user most
+  needs to read, so it announces itself: every `error`-level line the engine emitted, the
+  exit code (or "did not start", when the process never ran), and the elapsed time. It
+  displaces the page rather than covering it, like the Ask drawer and for the same reason
+  (§4.5.a) — width is scarce, and a panel that costs columns when nothing has failed is a
+  panel that costs columns always. `esc` dismisses it; the dismissal is recorded on the
+  `RunState`, so it cannot be inherited by the next failure, and the palette reopens it.
 - Surface `fetchErrors` per symbol rather than swallowing them — `scan` and `portfolio`
   both report and continue, and the UI must show that distinction.
 - Record every spawned invocation with its exit code and duration in a session log, so a

@@ -18,11 +18,13 @@ import { resolve, type Action } from './keymap.js';
 import {
   askHeight,
   drawAsk,
+  drawError,
   drawFilter,
   drawHelp,
   drawPalette,
   drawRunDialog,
   drawWelcome,
+  errorHeight,
   filterPalette,
   paletteItems,
 } from './overlays.js';
@@ -142,8 +144,11 @@ export class App {
     const page = this.page;
     this.state.widthWarning = widthWarning(page, cols);
 
+    // Both drawers displace the page rather than covering it: an error you have
+    // to move something to read is an error you will misread.
     const askRows = askHeight(this.state);
-    const body = drawFrame(screen, this.state, page, askRows);
+    const errorRows = errorHeight(this.state);
+    const body = drawFrame(screen, this.state, page, askRows + errorRows);
 
     const focus = this.focusId();
     page.render({
@@ -158,6 +163,8 @@ export class App {
       screen.text(1, body.y + body.h - 1, this.state.widthWarning, '33');
     }
 
+    // Above the Ask drawer, which keeps the bottom row it has always had.
+    drawError(screen, this.state, askRows);
     if (this.state.ask.open) {
       drawAsk(
         screen,
@@ -466,6 +473,13 @@ export class App {
       state.ask.open = false;
       return;
     }
+    // The failure drawer outranks the filter and the log scope: it is the newest
+    // thing on screen and the one `esc` most likely meant.
+    if (state.run?.status === 'failed' && state.run.errorDismissed !== true) {
+      state.run.errorDismissed = true;
+      state.status = 'error dismissed — the engine log is on TRADES';
+      return;
+    }
     if (state.logScope != null) {
       state.logScope = null;
       state.status = 'log unscoped';
@@ -770,6 +784,7 @@ export class App {
     run.log = outcome.log;
     run.elapsedMs = outcome.elapsedMs;
     run.error = outcome.error;
+    run.exitCode = outcome.exitCode;
     run.progress = '';
 
     state.history.push(run);

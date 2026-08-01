@@ -19,6 +19,7 @@ import {
   type CommandId,
 } from './flags/schema.js';
 import { BINDINGS, EDITOR_KEYS, type Action } from './keymap.js';
+import { duration } from './render/format.js';
 import { displayWidth, drawPane, truncate, type Rect, type Screen } from './render/screen.js';
 import { drawLeader } from './render/table.js';
 import { STYLE, type Style } from './render/theme.js';
@@ -295,6 +296,17 @@ export function paletteItems(): PaletteItem[] {
       },
     },
     {
+      // Dismissing an error should not lose it: `esc` hides the drawer, this
+      // brings it back, and the engine log on TRADES was never gone.
+      label: 'show the last error',
+      hint: 'reopen the failure drawer for the loaded run',
+      run: (state) => {
+        if (state.run?.status !== 'failed') return 'the loaded run did not fail';
+        state.run.errorDismissed = false;
+        return undefined;
+      },
+    },
+    {
       label: 'clear filter',
       hint: 'drop the fill filter',
       run: (state) => {
@@ -463,6 +475,93 @@ export function drawFilter(screen: Screen, state: AppState): void {
   screen.text(2 + displayWidth(state.overlay.buffer), y, '█', STYLE.accent);
   const hint = '↵ apply · esc clear';
   screen.text(screen.cols - 1 - hint.length, y, hint, STYLE.muted);
+}
+
+// ————————————————————————————————————————————————————————— the failure drawer
+
+/**
+ * The lines worth showing when a run fails.
+ *
+ * `pinerun`'s own error-level stderr, which is the engine speaking for itself,
+ * and only that — falling back to the one-line summary the spawn layer derived
+ * when the process said nothing gradeable (a bad `--json`, an empty stdout, a
+ * binary that would not start).
+ */
+export function errorLines(state: AppState): string[] {
+  const run = state.run;
+  if (run == null || run.status !== 'failed') return [];
+  const errors = run.log.filter((line) => line.level === 'error').map((line) => line.text);
+  if (errors.length > 0) return errors;
+  return run.error == null ? [] : [run.error];
+}
+
+/** Rows the failure drawer needs, so the frame can reserve them. */
+export function errorHeight(state: AppState): number {
+  const run = state.run;
+  if (run == null || run.status !== 'failed' || run.errorDismissed === true) return 0;
+  // Border, the lines (capped), and the footer.
+  return Math.min(9, 3 + Math.max(1, errorLines(state).length));
+}
+
+/**
+ * A failed run, stated where it happened.
+ *
+ * §8 says failures are surfaced rather than swallowed, and until now this one was
+ * only half kept: the last error line went to the status strip, where it was
+ * truncated to whatever space the hints left, and the rest sat in the engine log
+ * on a page you had to know to open. A run that exits non-zero is the one thing
+ * the user most needs to read, so it gets a drawer of its own — over the bottom
+ * of the frame like the Ask drawer (§4.5.a), for the same reason: width is scarce
+ * and a permanent panel would cost columns even when nothing has failed.
+ *
+ * It appears on its own, because an error you have to ask for is an error you
+ * will miss, and it stays until `esc` — unlike the read-only overlays, which any
+ * key dismisses.
+ */
+export function drawError(screen: Screen, state: AppState, offset = 0): void {
+  const height = errorHeight(state);
+  const run = state.run;
+  if (height === 0 || run == null) return;
+
+  const rect: Rect = { x: 0, y: screen.rows - 2 - offset - height, w: screen.cols, h: height };
+  clear(screen, rect);
+
+  const legend = [
+    run.exitCode == null ? 'did not start' : `exit ${run.exitCode}`,
+    run.elapsedMs == null ? undefined : duration(run.elapsedMs),
+    `run ${run.id}`,
+  ]
+    .filter((part): part is string => part != null)
+    .join(' · ');
+
+  const inner = drawPane(screen, rect, {
+    // `drawPane` supplies the ◆ for a focused pane; a second one here was a
+    // stutter in the title.
+    title: `${run.command.toUpperCase()} FAILED`,
+    focused: true,
+    legend,
+  });
+  if (inner.h <= 0) return;
+
+  const lines = errorLines(state);
+  const room = Math.max(1, inner.h - 1);
+  // The tail, not the head: the last thing the engine said before giving up is
+  // the thing that explains it.
+  const shown = lines.slice(Math.max(0, lines.length - room));
+
+  for (let i = 0; i < shown.length && i < room; i++) {
+    screen.text(inner.x, inner.y + i, truncate(shown[i]!, inner.w), STYLE.error, inner);
+  }
+  if (lines.length === 0) {
+    screen.text(inner.x, inner.y, 'no error output — see the engine log', STYLE.muted, inner);
+  }
+
+  const hidden = lines.length - shown.length;
+  const hint =
+    hidden > 0
+      ? `esc dismiss · ${hidden} earlier line${hidden === 1 ? '' : 's'} in the engine log (TRADES)`
+      : 'esc dismiss · the full engine log is on TRADES · r retries';
+  screen.text(inner.x, inner.y + inner.h - 1, truncate(hint, inner.w), STYLE.muted, inner);
 }
 
 /** Rows the Ask drawer needs, so the frame can reserve them (§4.5.a). */

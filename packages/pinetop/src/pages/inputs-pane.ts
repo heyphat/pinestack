@@ -1,20 +1,25 @@
 /**
  * The INPUTS pane — the `input()` titles a script declares.
  *
- * EDITOR grew it first, as an outline of the buffer. SWEEP needs the same list
- * for a different reason: you cannot choose axes for a grid you cannot see, and
- * the axis names are validated against exactly these titles before anything runs
- * (§4.5.e). So it is one renderer, and the two pages differ only in what they put
- * beside a row — nothing on EDITOR, the axis grid on SWEEP.
+ * EDITOR grew it first, as an outline of the buffer. SWEEP and WALKFORWARD need
+ * the same list for a different reason: you cannot choose axes for a grid you
+ * cannot see, and the axis names are validated against exactly these titles before
+ * anything runs (§4.5.e). So it is one renderer, and the pages differ only in what
+ * they put beside a row — nothing on EDITOR, the axis grid on the other two.
  *
- * On SWEEP the pane is also the *editor* for the grid. `--input` is one repeatable
- * flag, which the config pane can only show as a single space-joined field: adding
- * a second axis meant retyping the first. Here each axis is its own row with its
- * own `↵`, which is the whole reason a sweep of more than one input was awkward.
+ * On those two the pane is also the *editor* for the grid. `--input` is one
+ * repeatable flag, which the config pane can only show as a single space-joined
+ * field: adding a second axis meant retyping the first. Here each axis is its own
+ * row with its own `↵`, which is the whole reason a multi-axis run was awkward —
+ * and WALKFORWARD is the sharper case, because `validate` refuses a run there
+ * without at least one axis.
  */
 
+import { comboCount, type Pair } from '../flags/model.js';
 import { inputTitles } from '../flags/pine-inputs.js';
+import type { CommandId } from '../flags/schema.js';
 import { bufferText } from '../editor/buffer.js';
+import { int } from '../render/format.js';
 import { drawPane, truncate, type Rect } from '../render/screen.js';
 import { drawLeader } from '../render/table.js';
 import { STYLE } from '../render/theme.js';
@@ -60,6 +65,118 @@ export function declaredInputs(state: AppState, path: string | undefined): strin
   const buffer = state.editor.buffer;
   if (buffer != null && buffer.path === path) return inputTitles(bufferText(buffer));
   return cachedInputTitles(path);
+}
+
+/**
+ * The swept axes of a command that has them.
+ *
+ * `sweep` and `walkforward` share one `--input` grammar — the flag sits in the
+ * `axes` group on both, `validate` applies the same "at least one axis" rule and
+ * the same `--max-combos` cap to both, and walkforward's own help says "same
+ * grammar as sweep". So they share the pane, and the three functions below are
+ * parameterised by command rather than written twice.
+ */
+function axesOf(state: AppState, command: CommandId): Pair[] {
+  return (state.flags[command].values['input'] as Pair[] | undefined) ?? [];
+}
+
+/**
+ * Every `input()` the loaded script declares, with the swept ones marked and
+ * carrying their grid.
+ *
+ * An axis whose name the script does not declare is appended in warn style rather
+ * than dropped: `pinerun` will reject it, and a row that quietly vanished would
+ * hide the reason.
+ */
+export function axisRows(state: AppState, command: CommandId): InputRow[] {
+  const axes = axesOf(state, command);
+  const grids = new Map(axes.map((axis) => [axis.name, axis.value]));
+  const edit = state.edit?.origin === 'axis' && state.edit.command === command ? state.edit : null;
+
+  const declared = declaredInputs(state, state.flags[command].scripts[0]);
+  const rows: InputRow[] = declared.map((title) => ({
+    title,
+    value: grids.get(title),
+    marked: grids.has(title),
+    editing: edit?.input === title ? edit.buffer : undefined,
+  }));
+
+  for (const axis of axes) {
+    if (declared.includes(axis.name)) continue;
+    rows.push({
+      title: axis.name,
+      value: axis.value,
+      marked: true,
+      unknown: true,
+      editing: edit?.input === axis.name ? edit.buffer : undefined,
+    });
+  }
+  return rows;
+}
+
+/** The pane, for a command whose `--input` is a swept grid. */
+export function drawAxisPane(
+  ctx: PageContext,
+  rect: Rect,
+  command: CommandId,
+  paneId = 'inputs',
+): void {
+  const { state } = ctx;
+  const model = state.flags[command];
+  const axes = axesOf(state, command);
+  const combos = comboCount(axes);
+  const cap = typeof model.values['max-combos'] === 'number' ? model.values['max-combos'] : 5000;
+  const rows = axisRows(state, command);
+
+  // With no axes yet, the count of what is on offer is the useful fact; once
+  // there are axes, the grid size is — it is the number `--max-combos` measures.
+  const legend =
+    axes.length === 0
+      ? rows.length > 0
+        ? String(rows.length)
+        : undefined
+      : `${axes.length} ${axes.length === 1 ? 'axis' : 'axes'} · ${int(combos)} combos`;
+
+  drawInputsPane(ctx, rect, {
+    paneId,
+    rows,
+    legend,
+    empty:
+      model.scripts[0] == null || model.scripts[0] === ''
+        ? 'load a strategy above'
+        : 'this script declares no input()',
+    hint: '↵ set a grid · empty removes it',
+    // The guard the CLI enforces, enforced here before the spawn (§7 P2).
+    warning: combos > cap ? `over --max-combos ${int(cap)}` : undefined,
+  });
+}
+
+/**
+ * `↵` on an axis row: open that one axis for typing, prefilled with its grid.
+ *
+ * One axis at a time is the whole point — `--input` is repeatable, and the config
+ * pane can only render it as a single space-joined field, so adding a second axis
+ * meant retyping the first.
+ */
+export function beginAxisEdit(
+  state: AppState,
+  command: CommandId,
+  paneId = 'inputs',
+): string | undefined {
+  const rows = axisRows(state, command);
+  if (rows.length === 0) return 'no input() to sweep — load a strategy that declares some';
+
+  const row = rows[clampCursor(state.panes[command].cursor[paneId] ?? 0, rows.length)];
+  if (row == null) return undefined;
+
+  state.edit = {
+    command,
+    index: -1,
+    origin: 'axis',
+    input: row.title,
+    buffer: row.value ?? '',
+  };
+  return `${row.title}: a grid like 5,10,20 or 30:100:10 · ↵ accept · empty drops it`;
 }
 
 export function drawInputsPane(ctx: PageContext, rect: Rect, opts: InputsPaneOptions): void {

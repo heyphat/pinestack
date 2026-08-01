@@ -128,8 +128,8 @@ One tab per command, numbered in workflow order.
 | 7   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
 | 8   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
 
-**SWEEP has an INPUTS pane** below STRATEGIES, listing every `input()` the loaded
-script declares — the same pane EDITOR shows, plus the grid beside each swept
+**SWEEP and WALKFORWARD have an INPUTS pane** below STRATEGIES, listing every
+`input()` the loaded script declares — the same pane EDITOR shows, plus the grid beside each swept
 one. `↵` on a row opens that axis for typing (`7,14,21`, or `30:100:10`), prefilled
 if it is already set; clearing it drops that axis and leaves the rest untouched.
 The legend counts the axes and the combos they make, and turns red when the grid
@@ -137,8 +137,10 @@ goes over `--max-combos`.
 
 That per-row editing is the point: `--input` is a repeatable flag, so the config
 pane can only show it as one space-joined field, and adding a second axis meant
-retyping the first. Names the script does not declare still appear, in warn
-colour, because `pinerun` will reject them and a row that vanished would hide why.
+retyping the first. Walkforward gets it for the same reason and then some — it
+takes the same axis grammar, and a run there is _refused_ without at least one
+axis. Names the script does not declare still appear, in warn colour, because
+`pinerun` will reject them and a row that vanished would hide why.
 
 All six command pages carry the same **STRATEGIES** pane above their config, first
 in the focus ring, because all six take a `.pine` as their first argument — `↵`
@@ -303,6 +305,11 @@ worth it.
   `FlagModel`. If the line on screen would not run, that is a bug.
 - **Nothing runs without a keypress.** Editing a flag never schedules a spawn; a
   sweep can cost minutes and a keystroke should not spend them.
+- **A failed run announces itself.** When `pinerun` exits non-zero, a drawer opens
+  over the bottom of the frame with every error line the engine printed, the exit
+  code, and how long it took — not one truncated line in the status bar. `esc`
+  dismisses it, `:` → `show the last error` brings it back, and the complete
+  engine log is on TRADES either way.
 - **No scrolling.** Content that exceeds the frame truncates, the way a terminal
   truncates. Each page declares a min-width and degrades by dropping the right
   rail before truncating a table — and says what it dropped.

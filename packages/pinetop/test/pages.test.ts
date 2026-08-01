@@ -5,8 +5,9 @@ import { cachedScripts, refreshScripts } from '../src/scripts.js';
 import { BINDINGS } from '../src/keymap.js';
 import { hiddenFlagCount, isRunRow, runRowCount, visibleFlags } from '../src/pages/config-pane.js';
 import { composeArgv, type Pair } from '../src/flags/model.js';
+import { paletteItems } from '../src/overlays.js';
 import { stripAnsi } from '../src/render/screen.js';
-import { initialState, resetRunIds, type AppState } from '../src/state.js';
+import { initialState, resetRunIds, type AppState, type RunState } from '../src/state.js';
 import type { Key, Terminal, TerminalSize } from '../src/terminal.js';
 import {
   backtestReport,
@@ -1184,18 +1185,24 @@ describe('the STRATEGIES pane, on every command page', () => {
   });
 });
 
-describe('SWEEP — choosing axes from the script’s own inputs', () => {
+describe('choosing axes from the script’s own inputs', () => {
   const script = 'examples/rsi-mean-reversion.pine';
+  // Both pages take `--input` in the `axes` group, and `validate` applies the same
+  // "at least one axis" rule and the same --max-combos cap to both. One pane, so
+  // one test — a page that grew its own copy would show up here as a failure.
+  const AXIS_PAGES = ['sweep', 'walkforward'] as const;
 
-  beforeEach(() => {
+  const axes = (command: (typeof AXIS_PAGES)[number]): Pair[] =>
+    (state.flags[command].values['input'] as Pair[] | undefined) ?? [];
+
+  function focusInputs(command: (typeof AXIS_PAGES)[number]): void {
     refreshScripts();
-    state.page = 'sweep';
-    state.flags.sweep.scripts = [script];
-    state.panes.sweep.focus = 'inputs';
-    state.panes.sweep.cursor['inputs'] = 0;
-  });
-
-  const axes = (): Pair[] => (state.flags.sweep.values['input'] as Pair[] | undefined) ?? [];
+    state.page = command;
+    state.flags[command].scripts = [script];
+    state.flags[command].values['input'] = undefined;
+    state.panes[command].focus = 'inputs';
+    state.panes[command].cursor['inputs'] = 0;
+  }
 
   /** Open the row under the cursor, type a grid, accept. */
   function setGrid(app: App, grid: string): void {
@@ -1204,48 +1211,63 @@ describe('SWEEP — choosing axes from the script’s own inputs', () => {
     app.onKey({ name: 'enter' });
   }
 
-  test('the pane lists every input the script declares, before any are swept', () => {
-    const text = screenText(makeApp(state));
-    expect(text).toContain('INPUTS');
-    for (const title of ['length', 'oversold', 'overbought']) expect(text).toContain(title);
+  test('both pages list every input the script declares, before any are swept', () => {
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      const text = screenText(makeApp(state));
+      expect(text, command).toContain('INPUTS');
+      for (const title of ['length', 'oversold', 'overbought']) {
+        expect(text, `${command}/${title}`).toContain(title);
+      }
+    }
   });
 
   test('a second axis does not disturb the first — the point of per-row editing', () => {
-    const app = makeApp(state);
-    setGrid(app, '7,14,21');
-    expect(axes()).toEqual([{ name: 'length', value: '7,14,21' }]);
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      const app = makeApp(state);
+      setGrid(app, '7,14,21');
+      expect(axes(command), command).toEqual([{ name: 'length', value: '7,14,21' }]);
 
-    state.panes.sweep.cursor['inputs'] = 1;
-    setGrid(app, '20:35:5');
-    expect(axes()).toEqual([
-      { name: 'length', value: '7,14,21' },
-      { name: 'oversold', value: '20:35:5' },
-    ]);
+      state.panes[command].cursor['inputs'] = 1;
+      setGrid(app, '20:35:5');
+      expect(axes(command), command).toEqual([
+        { name: 'length', value: '7,14,21' },
+        { name: 'oversold', value: '20:35:5' },
+      ]);
 
-    // And the composed line carries both, repeated as the CLI expects.
-    const argv = composeArgv(state.flags.sweep);
-    expect(argv.filter((a) => a === '--input')).toHaveLength(2);
-    expect(argv.join(' ')).toContain('--input length=7,14,21 --input oversold=20:35:5');
+      // And the composed line carries both, repeated as the CLI expects.
+      const argv = composeArgv(state.flags[command]);
+      expect(
+        argv.filter((a) => a === '--input'),
+        command,
+      ).toHaveLength(2);
+      expect(argv.join(' '), command).toContain('--input length=7,14,21 --input oversold=20:35:5');
+    }
   });
 
   test('editing a swept input prefills its grid, and clearing it drops that axis', () => {
-    const app = makeApp(state);
-    setGrid(app, '7,14');
-    state.panes.sweep.cursor['inputs'] = 1;
-    setGrid(app, '20,30');
-    expect(axes()).toHaveLength(2);
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      const app = makeApp(state);
+      setGrid(app, '7,14');
+      state.panes[command].cursor['inputs'] = 1;
+      setGrid(app, '20,30');
+      expect(axes(command), command).toHaveLength(2);
 
-    // Re-open the first row: the buffer starts from what is already set.
-    state.panes.sweep.cursor['inputs'] = 0;
-    app.onKey({ name: 'enter' });
-    expect(state.edit?.buffer).toBe('7,14');
-    app.onKey({ name: 'ctrl-u' });
-    app.onKey({ name: 'enter' });
+      // Re-open the first row: the buffer starts from what is already set.
+      state.panes[command].cursor['inputs'] = 0;
+      app.onKey({ name: 'enter' });
+      expect(state.edit?.buffer, command).toBe('7,14');
+      app.onKey({ name: 'ctrl-u' });
+      app.onKey({ name: 'enter' });
 
-    expect(axes()).toEqual([{ name: 'oversold', value: '20,30' }]);
+      expect(axes(command), command).toEqual([{ name: 'oversold', value: '20,30' }]);
+    }
   });
 
   test('swept inputs are marked and carry their grid; the rest stay plain', () => {
+    focusInputs('sweep');
     setGrid(makeApp(state), '7,14,21');
     const text = screenText(makeApp(state));
     expect(text).toContain('▌length');
@@ -1254,20 +1276,112 @@ describe('SWEEP — choosing axes from the script’s own inputs', () => {
   });
 
   test('the legend counts the axes and the grid they make', () => {
+    focusInputs('walkforward');
     const app = makeApp(state);
     setGrid(app, '7,14,21');
-    state.panes.sweep.cursor['inputs'] = 1;
+    state.panes.walkforward.cursor['inputs'] = 1;
     setGrid(app, '20,25,30,35');
     expect(screenText(makeApp(state))).toContain('2 axes · 12 combos');
   });
 
   test('an axis the script does not declare is still shown, so the reason is visible', () => {
+    focusInputs('sweep');
     state.flags.sweep.values['input'] = [{ name: 'notAnInput', value: '1,2' }];
     expect(screenText(makeApp(state))).toContain('notAnInput');
   });
 
   test('with no script loaded the pane says what to do rather than sitting empty', () => {
-    state.flags.sweep.scripts = [];
-    expect(screenText(makeApp(state))).toContain('load a strategy above');
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      state.flags[command].scripts = [];
+      expect(screenText(makeApp(state)), command).toContain('load a strategy above');
+    }
+  });
+});
+
+describe('a run that exits non-zero', () => {
+  function fail(overrides: Partial<RunState> = {}): void {
+    state.run = {
+      id: '#401',
+      command: 'backtest',
+      status: 'failed',
+      progress: '',
+      log: [
+        { level: 'info', text: 'resolving NOPE-PERP @ 1h', at: 4 },
+        { level: 'error', text: 'binance: no such symbol NOPE-PERP', at: 120 },
+        { level: 'error', text: '  set --provider, or check the ticker', at: 121 },
+      ],
+      argv: ['backtest', 'x.pine'],
+      startedAt: 0,
+      elapsedMs: 812,
+      exitCode: 2,
+      error: 'binance: no such symbol NOPE-PERP',
+      ...overrides,
+    };
+  }
+
+  test('the drawer appears on its own, with the exit code and every error line', () => {
+    fail();
+    const text = screenText(makeApp(state));
+    expect(text).toContain('BACKTEST FAILED');
+    expect(text).toContain('exit 2');
+    // Not just the last line, which is all the status strip ever carried.
+    expect(text).toContain('binance: no such symbol NOPE-PERP');
+    expect(text).toContain('set --provider, or check the ticker');
+    // Engine narration is not an error and belongs on TRADES, not here.
+    expect(text).not.toContain('resolving NOPE-PERP');
+  });
+
+  test('it displaces the page instead of covering it', () => {
+    fail();
+    const clean = screenText(makeApp(state), 168, 46);
+    state.run!.errorDismissed = true;
+    const dismissed = screenText(makeApp(state), 168, 46);
+    // The monthly strip is the bottom-most pane; it survives, just higher up.
+    expect(clean).toContain('MONTHLY RETURNS');
+    expect(dismissed).toContain('MONTHLY RETURNS');
+    expect(clean).not.toBe(dismissed);
+  });
+
+  test('esc dismisses it, and the palette brings it back', () => {
+    fail();
+    const app = makeApp(state);
+    app.onKey({ name: 'escape' });
+    expect(state.run!.errorDismissed).toBe(true);
+    expect(screenText(makeApp(state))).not.toContain('BACKTEST FAILED');
+
+    const item = paletteItems().find((i) => i.label === 'show the last error')!;
+    item.run(state);
+    expect(screenText(makeApp(state))).toContain('BACKTEST FAILED');
+  });
+
+  test('a dismissal does not carry to the next failure', () => {
+    fail({ errorDismissed: true });
+    expect(screenText(makeApp(state))).not.toContain('BACKTEST FAILED');
+    // A fresh run is a fresh RunState, so the flag cannot be inherited.
+    fail();
+    expect(screenText(makeApp(state))).toContain('BACKTEST FAILED');
+  });
+
+  test('a process that never started says so rather than claiming an exit code', () => {
+    fail({ exitCode: null, log: [], error: 'could not spawn pinerun: ENOENT' });
+    const text = screenText(makeApp(state));
+    expect(text).toContain('did not start');
+    expect(text).toContain('could not spawn pinerun');
+  });
+
+  test('a successful run draws no drawer at all', () => {
+    state.run = {
+      id: '#402',
+      command: 'backtest',
+      status: 'ok',
+      progress: '',
+      log: [],
+      argv: [],
+      startedAt: 0,
+      exitCode: 0,
+      report: backtestReport(),
+    };
+    expect(screenText(makeApp(state))).not.toContain('FAILED');
   });
 });

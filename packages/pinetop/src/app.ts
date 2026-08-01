@@ -475,9 +475,9 @@ export class App {
     }
     // The failure drawer outranks the filter and the log scope: it is the newest
     // thing on screen and the one `esc` most likely meant.
-    if (state.run?.status === 'failed' && state.run.errorDismissed !== true) {
+    if (errorHeight(state) > 0 && state.run != null) {
       state.run.errorDismissed = true;
-      state.status = 'error dismissed — the engine log is on TRADES';
+      state.status = 'dismissed — the engine log is on TRADES';
       return;
     }
     if (state.logScope != null) {

@@ -310,6 +310,11 @@ worth it.
   code, and how long it took — not one truncated line in the status bar. `esc`
   dismisses it, `:` → `show the last error` brings it back, and the complete
   engine log is on TRADES either way.
+- **A run that lost symbols says so too.** `scan` and `portfolio` report and
+  continue past a symbol whose history will not fetch, and `sweep` past a combo
+  that errored. The same drawer opens in warn colour — `SCAN — INCOMPLETE`, the
+  symbols and their reasons — because the point is not the list, which the page
+  already shows, but that the numbers beside it were computed over what was left.
 - **No scrolling.** Content that exceeds the frame truncates, the way a terminal
   truncates. Each page declares a min-width and degrades by dropping the right
   rail before truncating a table — and says what it dropped.

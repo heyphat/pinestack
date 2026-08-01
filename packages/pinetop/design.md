@@ -532,6 +532,12 @@ anticipate, each because the alternative was a screen that lied:
   (§4.5.a) — width is scarce, and a panel that costs columns when nothing has failed is a
   panel that costs columns always. `esc` dismisses it; the dismissal is recorded on the
   `RunState`, so it cannot be inherited by the next failure, and the palette reopens it.
+- **A run that exits zero but lost symbols gets the same drawer, in warn style.** `scan` and
+  `portfolio` report and continue when a symbol's history cannot be fetched, and `sweep` does
+  the same for a combo that errored — the pages list those, but a list beside a tearsheet
+  does not say the thing that matters, which is that **the report was computed over what was
+  left**. `SCAN — INCOMPLETE` says it. The distinction from a failure is kept in the colour
+  and the title: exit 0 is not an error, and calling it one would be its own kind of lie.
 - Surface `fetchErrors` per symbol rather than swallowing them — `scan` and `portfolio`
   both report and continue, and the UI must show that distinction.
 - Record every spawned invocation with its exit code and duration in a session log, so a

@@ -1385,3 +1385,80 @@ describe('a run that exits non-zero', () => {
     expect(screenText(makeApp(state))).not.toContain('FAILED');
   });
 });
+
+describe('a run that succeeded but not for every symbol', () => {
+  function partial(report: unknown): void {
+    state.page = 'scan';
+    state.run = {
+      id: '#403',
+      command: 'scan',
+      status: 'ok',
+      progress: '',
+      log: [],
+      argv: ['scan', 'x.pine'],
+      startedAt: 0,
+      elapsedMs: 4210,
+      exitCode: 0,
+      report,
+    };
+  }
+
+  const withFailures = (): unknown => ({
+    ranked: [{ symbol: 'BTCUSDT', value: 1200 }],
+    fetchErrors: [
+      { symbol: 'LUNAUSDT', error: 'binance: symbol delisted' },
+      { symbol: 'FTTUSDT', error: 'binance: no klines in range' },
+    ],
+    errors: [{ symbol: 'DOGEUSDT', error: 'runtime: division by zero' }],
+  });
+
+  test('fetch failures and per-symbol errors both reach the drawer', () => {
+    partial(withFailures());
+    const text = screenText(makeApp(state));
+    expect(text).toContain('SCAN — INCOMPLETE');
+    expect(text).toContain('LUNAUSDT: binance: symbol delisted');
+    expect(text).toContain('FTTUSDT: binance: no klines in range');
+    expect(text).toContain('DOGEUSDT: runtime: division by zero');
+    expect(text).toContain('3 produced no result');
+  });
+
+  test('it says the numbers exclude them, which the per-page list does not', () => {
+    partial(withFailures());
+    expect(screenText(makeApp(state))).toContain('the numbers on this page exclude these');
+  });
+
+  test('it is a warning, not a failure — exit 0 is not an error', () => {
+    partial(withFailures());
+    expect(screenText(makeApp(state))).not.toContain('FAILED');
+    const raw = makeApp(state).render(168, 46).join('\n');
+    expect(raw).toContain('\x1b[33m'); // warn, not the error red
+  });
+
+  test('a clean run draws nothing, and neither do reports without the fields', () => {
+    partial({ ranked: [{ symbol: 'BTCUSDT', value: 1200 }] });
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+
+    partial({ ranked: [], fetchErrors: [], errors: [] });
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+
+    // backtest reports carry neither field; reading them must not throw.
+    state.page = 'backtest';
+    state.run!.command = 'backtest';
+    state.run!.report = backtestReport();
+    expect(() => screenText(makeApp(state))).not.toThrow();
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+  });
+
+  test('esc dismisses it, and the palette says so when there is nothing to reopen', () => {
+    partial(withFailures());
+    makeApp(state).onKey({ name: 'escape' });
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+
+    const item = paletteItems().find((i) => i.label === 'show the last error')!;
+    expect(item.run(state)).toBeUndefined();
+    expect(screenText(makeApp(state))).toContain('INCOMPLETE');
+
+    partial({ ranked: [] });
+    expect(item.run(state)).toContain('no errors');
+  });
+});

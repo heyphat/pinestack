@@ -23,7 +23,7 @@ import { duration } from './render/format.js';
 import { displayWidth, drawPane, truncate, type Rect, type Screen } from './render/screen.js';
 import { drawLeader } from './render/table.js';
 import { STYLE, type Style } from './render/theme.js';
-import type { AppState } from './state.js';
+import type { AppState, RunState } from './state.js';
 import { overridesFor } from './state.js';
 import { visibleFlags } from './pages/config-pane.js';
 import { ensureEditorFile } from './pages/editor.js';
@@ -299,11 +299,12 @@ export function paletteItems(): PaletteItem[] {
       // Dismissing an error should not lose it: `esc` hides the drawer, this
       // brings it back, and the engine log on TRADES was never gone.
       label: 'show the last error',
-      hint: 'reopen the failure drawer for the loaded run',
+      hint: 'reopen the drawer for the loaded run',
       run: (state) => {
-        if (state.run?.status !== 'failed') return 'the loaded run did not fail';
-        state.run.errorDismissed = false;
-        return undefined;
+        const run = state.run;
+        if (run == null) return 'no run loaded';
+        run.errorDismissed = false;
+        return runTrouble(state) == null ? 'the loaded run reported no errors' : undefined;
       },
     },
     {
@@ -480,27 +481,92 @@ export function drawFilter(screen: Screen, state: AppState): void {
 // ————————————————————————————————————————————————————————— the failure drawer
 
 /**
- * The lines worth showing when a run fails.
+ * The per-symbol failures inside a report that otherwise succeeded.
  *
- * `pinerun`'s own error-level stderr, which is the engine speaking for itself,
- * and only that — falling back to the one-line summary the spawn layer derived
- * when the process said nothing gradeable (a bad `--json`, an empty stdout, a
- * binary that would not start).
+ * `scan` and `portfolio` report and continue when a symbol's history cannot be
+ * fetched, and `sweep` does the same for a combo that errored — §8 says that
+ * distinction must be shown, not swallowed. Only three report shapes carry these
+ * fields; the rest read as absent, which is why this narrows `unknown` rather
+ * than switching on the command.
  */
-export function errorLines(state: AppState): string[] {
-  const run = state.run;
-  if (run == null || run.status !== 'failed') return [];
-  const errors = run.log.filter((line) => line.level === 'error').map((line) => line.text);
-  if (errors.length > 0) return errors;
-  return run.error == null ? [] : [run.error];
+interface PartialReport {
+  fetchErrors?: { symbol: string; error: string }[];
+  errors?: { symbol?: string; id?: string; error?: string }[];
 }
 
-/** Rows the failure drawer needs, so the frame can reserve them. */
-export function errorHeight(state: AppState): number {
+export function partialFailures(run: RunState | null | undefined): string[] {
+  const report = run?.report as PartialReport | undefined;
+  if (report == null) return [];
+  return [
+    ...(report.fetchErrors ?? []).map((e) => `${e.symbol}: ${e.error}`),
+    ...(report.errors ?? []).map(
+      (e) => `${e.symbol ?? e.id ?? '—'}: ${e.error ?? 'the run errored'}`,
+    ),
+  ];
+}
+
+/** What the drawer is announcing, or null when there is nothing to announce. */
+export interface RunTrouble {
+  /** `failed` — the process; `incomplete` — it finished, but parts of it did not. */
+  kind: 'failed' | 'incomplete';
+  title: string;
+  legend: string;
+  lines: string[];
+  style: Style;
+  hint: string;
+}
+
+export function runTrouble(state: AppState): RunTrouble | null {
   const run = state.run;
-  if (run == null || run.status !== 'failed' || run.errorDismissed === true) return 0;
+  if (run == null || run.errorDismissed === true) return null;
+  const elapsed = run.elapsedMs == null ? undefined : duration(run.elapsedMs);
+  const tail = [elapsed, `run ${run.id}`].filter((part): part is string => part != null);
+
+  if (run.status === 'failed') {
+    // `pinerun`'s own error-level stderr, which is the engine speaking for
+    // itself — falling back to the summary the spawn layer derived when the
+    // process said nothing gradeable (bad JSON, empty stdout, no binary).
+    const errors = run.log.filter((line) => line.level === 'error').map((line) => line.text);
+    return {
+      kind: 'failed',
+      title: `${run.command.toUpperCase()} FAILED`,
+      legend: [run.exitCode == null ? 'did not start' : `exit ${run.exitCode}`, ...tail].join(
+        ' · ',
+      ),
+      lines: errors.length > 0 ? errors : run.error == null ? [] : [run.error],
+      style: STYLE.error,
+      hint: 'esc dismiss · the full engine log is on TRADES · r retries',
+    };
+  }
+
+  if (run.status !== 'ok') return null;
+  const lines = partialFailures(run);
+  if (lines.length === 0) return null;
+
+  return {
+    kind: 'incomplete',
+    title: `${run.command.toUpperCase()} — INCOMPLETE`,
+    legend: [`${lines.length} produced no result`, ...tail].join(' · '),
+    lines,
+    style: STYLE.warn,
+    // The part that matters and that a per-page error list does not say: the
+    // report on screen was computed over what is left, so the numbers are for a
+    // smaller universe than the one that was asked for.
+    hint: 'esc dismiss · the numbers on this page exclude these',
+  };
+}
+
+/** Kept as the narrow question the drawer used to answer: what will it print? */
+export function errorLines(state: AppState): string[] {
+  return runTrouble(state)?.lines ?? [];
+}
+
+/** Rows the drawer needs, so the frame can reserve them. */
+export function errorHeight(state: AppState): number {
+  const trouble = runTrouble(state);
+  if (trouble == null) return 0;
   // Border, the lines (capped), and the footer.
-  return Math.min(9, 3 + Math.max(1, errorLines(state).length));
+  return Math.min(9, 3 + Math.max(1, trouble.lines.length));
 }
 
 /**
@@ -519,38 +585,30 @@ export function errorHeight(state: AppState): number {
  * key dismisses.
  */
 export function drawError(screen: Screen, state: AppState, offset = 0): void {
+  const trouble = runTrouble(state);
   const height = errorHeight(state);
-  const run = state.run;
-  if (height === 0 || run == null) return;
+  if (trouble == null || height === 0) return;
 
   const rect: Rect = { x: 0, y: screen.rows - 2 - offset - height, w: screen.cols, h: height };
   clear(screen, rect);
 
-  const legend = [
-    run.exitCode == null ? 'did not start' : `exit ${run.exitCode}`,
-    run.elapsedMs == null ? undefined : duration(run.elapsedMs),
-    `run ${run.id}`,
-  ]
-    .filter((part): part is string => part != null)
-    .join(' · ');
-
   const inner = drawPane(screen, rect, {
     // `drawPane` supplies the ◆ for a focused pane; a second one here was a
     // stutter in the title.
-    title: `${run.command.toUpperCase()} FAILED`,
+    title: trouble.title,
     focused: true,
-    legend,
+    legend: trouble.legend,
   });
   if (inner.h <= 0) return;
 
-  const lines = errorLines(state);
+  const { lines } = trouble;
   const room = Math.max(1, inner.h - 1);
-  // The tail, not the head: the last thing the engine said before giving up is
-  // the thing that explains it.
+  // The tail, not the head: the last thing said before giving up is the thing
+  // that explains it, and the last symbols to fail are the newest news.
   const shown = lines.slice(Math.max(0, lines.length - room));
 
   for (let i = 0; i < shown.length && i < room; i++) {
-    screen.text(inner.x, inner.y + i, truncate(shown[i]!, inner.w), STYLE.error, inner);
+    screen.text(inner.x, inner.y + i, truncate(shown[i]!, inner.w), trouble.style, inner);
   }
   if (lines.length === 0) {
     screen.text(inner.x, inner.y, 'no error output — see the engine log', STYLE.muted, inner);
@@ -559,8 +617,8 @@ export function drawError(screen: Screen, state: AppState, offset = 0): void {
   const hidden = lines.length - shown.length;
   const hint =
     hidden > 0
-      ? `esc dismiss · ${hidden} earlier line${hidden === 1 ? '' : 's'} in the engine log (TRADES)`
-      : 'esc dismiss · the full engine log is on TRADES · r retries';
+      ? `esc dismiss · ${hidden} more ${trouble.kind === 'failed' ? 'in the engine log (TRADES)' : 'not shown'}`
+      : trouble.hint;
   screen.text(inner.x, inner.y + inner.h - 1, truncate(hint, inner.w), STYLE.muted, inner);
 }
 

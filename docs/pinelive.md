@@ -42,6 +42,32 @@ Pine `alert()` delivery to webhook channels is documented separately in
 [pinelive alerts](./pinelive-alerts.md); the `alerts` config section is shared
 by v1 and v2 and dispatches only on fresh authoritative bar closes.
 
+## Operational limits
+
+Run **one pinelive process per broker account per instrument**. The execution
+lease scopes one ledger namespace, not the account: two runs with different
+ledger paths pointed at the same account and contract will both start and
+fight each other's positions. Nothing detects or prevents that today —
+process coordination is an operator responsibility.
+
+Restart limits, stated plainly:
+
+- **Paper account state does not survive a restart.** Schema-v3 recovery
+  restores decision/order/scheduler state exactly, but the PaperBroker account
+  itself (position, basis, realized PnL) starts fresh in every process; a
+  recovered ledger whose last position was nonzero will surface as a position
+  mismatch rather than silently resuming. Treat every Paper process as a new
+  account, or keep runs bounded to one process lifetime.
+- **v1 restarts re-warm from history and trust the broker's position.** There
+  is no v1 crash-recovery replay; `reconcileOnStart` exists for explicit,
+  separately-ledgered startup correction.
+- **Armed Tiger restart remains unsafe** until durable transmission state and
+  stale-contract/exposure preflight exist, as stated throughout.
+
+There is no automatic crash recovery, no stateless restart, and no
+multi-process safety claim anywhere in this release. Recovery is fail-closed:
+anything ambiguous latches and waits for the operator.
+
 ## Canonical v1 compatibility run config
 
 ```json

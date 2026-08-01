@@ -26,6 +26,14 @@ deliberately conservative distribution posture:
 - Its version is bumped in lockstep with the other workspace packages, so a
   checkout's four manifests never disagree.
 
+**Operational limits:** run one pinelive process per broker account per
+instrument — the lease scopes a ledger namespace, not the account, and nothing
+coordinates exposure across processes. Paper account state does not survive a
+restart (schema-v3 recovery restores scheduler/order state, not the simulated
+account). There is no automatic crash recovery or stateless restart: recovery
+is fail-closed and anything ambiguous waits for the operator. See
+[Operational limits](../../docs/pinelive.md#operational-limits).
+
 `PaperBroker` is the safe default. The Tiger market-data and execution adapters
 have extensive offline tests against injected SDK facades, but no credentialed
 quote/history, entitlement, demo/live order, cancellation, or fill validation.

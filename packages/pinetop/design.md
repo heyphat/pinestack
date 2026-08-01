@@ -67,12 +67,14 @@ makes the loop, and therefore this tool, worth building.
 - **NG2** — ~~Not a broker or live-trading surface. `pinelive` stays a separate program:
   streaming state has no run boundary and no final number, so it does not fit the
   report-page shape this app is built around. No LIVE page, now or later.~~
-  **Revised: a read-only LIVE page is in scope; the trading-surface prohibition
-  stands in full.** What changed is not this app's shape but `pinelive`'s: it now
-  writes a durable ledger, registers running instances in a discoverable runs
-  registry, and will expose a one-shot `pinelive status --json` verb — a finite
-  child returning one JSON payload, which is exactly the report-page shape this
-  app is built around (§2, NG1's spawn-and-render discipline). "Streaming state
+  **Revised: a read-only LIVE page is in scope (not yet built); the
+  trading-surface prohibition stands in full.** What changed is not this app's
+  shape but `pinelive`'s: it now writes a durable ledger, and its observability
+  design plans a discoverable runs registry plus a one-shot
+  `pinelive status --json` verb — a finite child returning one JSON payload,
+  which is exactly the report-page shape this app is built around (§2, NG1's
+  spawn-and-render discipline). The LIVE page lands only after that status
+  contract exists; nothing here describes shipped behavior. "Streaming state
   has no final number" is answered by observing snapshots, not by streaming.
   What NG2 still rules out stands, and is now stated more precisely: `pinetop`
   computes no trading state, submits/cancels/flattens nothing, and — in the

@@ -183,10 +183,13 @@ cd packages/pinetop && bun run build:bin && cd -   # → dist/pinetop
 ./dist/pinetop --version                       # line 1: "pinetop X.Y.Z (<sha>)" — the NEW version
                                                # line 2: the pinerun it found on PATH
 ./dist/pinetop --check-flags                   # schema still agrees with pinerun --help
+
+cd packages/pinelive && bun run build:bin && cd -   # → dist/pinelive
+./dist/pinelive --version                      # "pinelive X.Y.Z (<sha>)" — the NEW version
 ```
 
 The `--version` checks are the guard against a forgotten bump: each binary
-reports whatever its own manifest said at compile time, so check both. Run a quick
+reports whatever its own manifest said at compile time, so check all three. Run a quick
 smoke too (`./dist/pinerun scan examples/rsi.pine --symbols BTCUSDT --tf 1h
 --limit 50 --rank "last(rsi)"`).
 
@@ -389,6 +392,7 @@ single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 [ ] bun run build:bin && ./dist/pinerun --version reports the NEW version
 [ ] (pinetop) cd packages/pinetop && bun run build:bin; ./dist/pinetop --version
 [ ] (pinetop) ./dist/pinetop --check-flags agrees with this release's CLI flags
+[ ] (pinelive) cd packages/pinelive && bun run build:bin; ./dist/pinelive --version
 [ ] chore(release): X.Y.Z committed on main
 [ ] git tag vX.Y.Z on main, pushed
 [ ] release.yml green; gh release view shows 15 binaries + checksums.txt

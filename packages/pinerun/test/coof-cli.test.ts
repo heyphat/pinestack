@@ -6,7 +6,11 @@
  * tests (backtest on/off, walk-forward per-window marker) activate on the
  * dependency bump — same capability gate as coof-override.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
+
+// Every test here spawns `bun src/cli.ts`, which transpiles the whole CLI
+// module graph per spawn — seconds on a cold CI runner, past the 5s default.
+setDefaultTimeout(30_000);
 import { StrategyBroker } from '@heyphat/piner';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

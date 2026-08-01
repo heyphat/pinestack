@@ -1,4 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
+
+// Every test here spawns `bun src/cli.ts`, which transpiles the whole CLI
+// module graph per spawn — seconds on a cold CI runner, past the 5s default.
+setDefaultTimeout(30_000);
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

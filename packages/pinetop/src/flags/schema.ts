@@ -127,6 +127,15 @@ const DATA: FlagSpec[] = [
     help: 'Assert absent bars inside an authenticated record span mean no trades',
   },
   {
+    name: 'tiger-profile',
+    kind: 'string',
+    group: 'data',
+    advanced: true,
+    // Optional even when Tiger is selected (TG: symbols work without --provider),
+    // so no revealWhen: the SDK falls back to ./ or ~/.tigeropen discovery.
+    help: 'Tiger credential properties file for --provider tiger / TG: symbols',
+  },
+  {
     name: 'no-security',
     kind: 'bool',
     group: 'data',
@@ -238,9 +247,9 @@ const RANKING: FlagSpec[] = [
 const CHART: FlagSpec[] = [{ name: 'no-chart', kind: 'bool', group: 'display' }];
 
 /**
- * The eight pages, in workflow order (§4.2). EDITOR and TRADES are views, not
- * commands: the loop starts at the source and ends at the fills, and neither end
- * spawns anything.
+ * The eight pages, in workflow order (§4.2). EDITOR and LOGS are views, not
+ * commands: the loop starts at the source and ends at the fills and the log,
+ * and neither end spawns anything.
  */
 export const PAGES = [
   'editor',
@@ -250,16 +259,16 @@ export const PAGES = [
   'scan',
   'portfolio',
   'compare',
-  'trades',
+  'logs',
 ] as const;
 
 export type PageId = (typeof PAGES)[number];
 /** The pages that are not a `pinerun` command. */
-export type ViewId = 'editor' | 'trades';
+export type ViewId = 'editor' | 'logs';
 /** The six pages that spawn something. */
 export type CommandId = Exclude<PageId, ViewId>;
 
-const VIEWS: readonly string[] = ['editor', 'trades'];
+const VIEWS: readonly string[] = ['editor', 'logs'];
 
 export const COMMANDS: readonly CommandId[] = PAGES.filter(
   (p): p is CommandId => !VIEWS.includes(p),
@@ -287,7 +296,7 @@ export const PAGE_TITLES: Record<PageId, string> = {
   scan: 'SCAN',
   portfolio: 'PORTFOLIO',
   compare: 'COMPARE',
-  trades: 'TRADES',
+  logs: 'LOGS',
 };
 
 /** The docs' own verb for each page (§4.2). */
@@ -299,7 +308,7 @@ export const PAGE_PURPOSE: Record<PageId, string> = {
   scan: 'screen — one script across N symbols',
   portfolio: 'combine — N symbols, one pot',
   compare: 'compare — two strategies, same bars',
-  trades: 'the fills and the engine log for the loaded run',
+  logs: 'the engine log and the fills for the loaded run',
 };
 
 export interface CommandSchema {

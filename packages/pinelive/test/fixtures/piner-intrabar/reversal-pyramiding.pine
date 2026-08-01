@@ -1,0 +1,7 @@
+//@version=6
+strategy("reversal pyramiding", calc_on_every_tick=true, process_orders_on_close=true, pyramiding=2, default_qty_type=strategy.fixed, default_qty_value=1)
+if close >= 110
+    strategy.entry("L", strategy.long)
+if close <= 90
+    strategy.entry("S", strategy.short)
+plot(strategy.position_size, "position")

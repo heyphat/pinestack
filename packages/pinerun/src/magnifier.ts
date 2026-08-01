@@ -15,6 +15,7 @@ import {
   planHistoryAcquisition,
   resolveHistorySource,
   snapshotHistorySessionCalendar,
+  snapshotResolvedHistorySource,
   unixMillisecond,
   unixSecond,
   utcTimeframeAnchor,
@@ -84,7 +85,14 @@ export function createMagnifierResolutionScope(): MagnifierResolutionScope {
   return { acquisitions: new Map() };
 }
 
-export interface ResolveBarMagnifierOptions {
+export interface BarMagnifierBudgetOptions {
+  /** Maximum resolved target-grid rows. Omitted means no pinerun target cap. */
+  readonly maxMagnifierTargetBars?: number;
+  /** Maximum source-grid rows acquired before target aggregation. Omitted means no raw cap. */
+  readonly maxMagnifierRawBars?: number;
+}
+
+interface ResolveBarMagnifierCommonOptions extends BarMagnifierBudgetOptions {
   readonly adapter?: PinerCapabilityAdapter;
   /** Explicit host/provider chart closes in UNIX seconds. */
   readonly chartCloseTimesSec?: readonly number[];
@@ -95,6 +103,22 @@ export interface ResolveBarMagnifierOptions {
   /** Command/fold-local reuse. Never persist this scope across refresh cycles. */
   readonly scope?: MagnifierResolutionScope;
 }
+
+/**
+ * A supplied source is bound to the original requested symbol explicitly: a
+ * normalized provider symbol cannot safely be reverse-mapped to host spelling.
+ */
+export type ResolveBarMagnifierOptions = ResolveBarMagnifierCommonOptions &
+  (
+    | {
+        readonly resolvedSource?: undefined;
+        readonly resolvedSourceSymbol?: never;
+      }
+    | {
+        readonly resolvedSource: ResolvedHistorySource;
+        readonly resolvedSourceSymbol: string;
+      }
+  );
 
 export interface MagnifierResolution {
   readonly preflight: MagnifierPreflight;
@@ -209,7 +233,12 @@ export async function resolveBarMagnifier(
   if (!preflight.requested) return { preflight };
 
   assertStaticSecurityForBarMagnifier(job.source, preflight.securityDependencies);
-  const source = await resolveHistorySource(provider, job.symbol);
+  const source = await resolveMagnifierChartSource(
+    provider,
+    job.symbol,
+    options.resolvedSource,
+    options.resolvedSourceSymbol,
+  );
   const alignmentEvidence = snapshotMagnifierAlignmentEvidence(source.capabilities);
   const intervals = chartIntervals(
     job.bars,
@@ -298,8 +327,56 @@ export async function resolveBarMagnifier(
     }
   }
   const dataset = await pending;
+  assertBarMagnifierBudgets(dataset, options);
   job.magnifier = dataset;
   return { preflight, dataset };
+}
+
+/** Enforce host resource policy without imposing a new pinerun default cap. */
+export function assertBarMagnifierBudgets(
+  dataset: Pick<ResolvedMagnifierDataset, 'barsMs' | 'rawBarCount'>,
+  options: BarMagnifierBudgetOptions = {},
+): void {
+  assertBarBudget(
+    'target',
+    dataset.barsMs.length,
+    options.maxMagnifierTargetBars,
+    'maxMagnifierTargetBars',
+  );
+  assertBarBudget('raw', dataset.rawBarCount, options.maxMagnifierRawBars, 'maxMagnifierRawBars');
+}
+
+function assertBarBudget(
+  kind: 'target' | 'raw',
+  actual: number,
+  limit: number | undefined,
+  option: 'maxMagnifierTargetBars' | 'maxMagnifierRawBars',
+): void {
+  if (!Number.isSafeInteger(actual) || actual < 0) {
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: `bar-magnifier-${kind}-bar-count-invalid`,
+      message: `Resolved Bar Magnifier ${kind} bar count is not a nonnegative safe integer`,
+      details: { actual },
+    });
+  }
+  if (limit === undefined) return;
+  if (!Number.isSafeInteger(limit) || limit < 0) {
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: `bar-magnifier-${kind}-bar-budget-invalid`,
+      message: `${option} must be a nonnegative safe integer when supplied`,
+      details: { option, limit },
+    });
+  }
+  if (actual > limit) {
+    throw new BarMagnifierError({
+      kind: 'provider-limited',
+      code: `bar-magnifier-${kind}-bar-budget-exceeded`,
+      message: `Resolved Bar Magnifier ${kind} bars (${actual}) exceed ${option} (${limit})`,
+      details: { option, limit, actual },
+    });
+  }
 }
 
 export interface MagnifierAcquisitionKeyInput {
@@ -365,6 +442,7 @@ export type MagnifierDatasetAcquisitionKeyInput = Pick<
   | 'targetPineTf'
   | 'targetCanonicalTf'
   | 'sourceCanonicalTf'
+  | 'rawBarCount'
   | 'chartOpenTimesMs'
   | 'chartCloseTimesMs'
   | 'chartIntervalSource'
@@ -381,7 +459,7 @@ export type MagnifierDatasetAcquisitionKeyInput = Pick<
  * strong target-bar digest, so the stored string alone is never accepted.
  */
 export function magnifierDatasetAcquisitionKey(input: MagnifierDatasetAcquisitionKeyInput): string {
-  return `magnifier-dataset-acquisition-v4:${canonicalDigest({
+  return `magnifier-dataset-acquisition-v5:${canonicalDigest({
     cacheIdentity: input.provenance.cacheIdentity,
     normalizedSymbol: input.provenance.normalizedSymbol,
     requestedSymbol: input.requestedSymbol,
@@ -389,6 +467,7 @@ export function magnifierDatasetAcquisitionKey(input: MagnifierDatasetAcquisitio
     targetPineTf: input.targetPineTf,
     targetCanonicalTf: input.targetCanonicalTf,
     sourceCanonicalTf: input.sourceCanonicalTf,
+    rawBarCount: input.rawBarCount,
     chartIntervals: input.chartOpenTimesMs.map((open, index) => [
       open,
       input.chartCloseTimesMs[index],
@@ -816,6 +895,55 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+async function resolveMagnifierChartSource(
+  provider: HistoryProvider,
+  requestedSymbol: string,
+  supplied: ResolvedHistorySource | undefined,
+  suppliedSymbol: string | undefined,
+): Promise<ResolvedHistorySource> {
+  if (supplied && suppliedSymbol !== requestedSymbol) {
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: 'resolved-history-source-symbol-mismatch',
+      message: 'The supplied resolved history source is not bound to this chart symbol',
+      details: { expected: requestedSymbol, actual: suppliedSymbol },
+    });
+  }
+
+  const candidate = supplied ?? (await resolveHistorySource(provider, requestedSymbol));
+  if (
+    !candidate ||
+    !candidate.provider ||
+    typeof candidate.normalizedSymbol !== 'string' ||
+    candidate.normalizedSymbol.length === 0 ||
+    typeof candidate.cacheIdentity !== 'string' ||
+    candidate.cacheIdentity.length === 0 ||
+    !candidate.capabilities ||
+    typeof candidate.history !== 'function'
+  ) {
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: 'resolved-history-source-invalid',
+      message: 'The resolved chart history source has an incomplete exact identity',
+    });
+  }
+
+  try {
+    // Capture the complete source identity before any static-security await.
+    // acquireExactHistory later authenticates returned provenance against this
+    // frozen snapshot, so cache/symbol/capability drift fails closed.
+    return snapshotResolvedHistorySource(candidate);
+  } catch (error) {
+    if (error instanceof ExactHistoryError || error instanceof BarMagnifierError) throw error;
+    throw new BarMagnifierError({
+      kind: 'malformed',
+      code: 'resolved-history-source-invalid',
+      message: 'The resolved chart history source could not be snapshotted safely',
+      details: { reason: error instanceof Error ? error.message : String(error) },
+    });
+  }
+}
+
 function snapshotMagnifierAlignmentEvidence(
   capabilities: HistoryCapabilities,
 ): ResolvedMagnifierAlignmentEvidence {
@@ -1176,7 +1304,31 @@ async function acquireAndConvert(
   intervals: ChartIntervalsSec,
   alignmentEvidence: ResolvedMagnifierAlignmentEvidence,
 ): Promise<ResolvedMagnifierDataset> {
-  const acquisition = await acquireExactHistory(source, {
+  let rawBarCount = 0;
+  const countedSource = snapshotResolvedHistorySource({
+    ...source,
+    async history(request) {
+      const raw = await source.history(request);
+      if (!Array.isArray(raw?.bars)) {
+        throw new BarMagnifierError({
+          kind: 'malformed',
+          code: 'bar-magnifier-raw-bar-count-invalid',
+          message: 'Exact history returned no countable raw source-bar array',
+        });
+      }
+      const next = rawBarCount + raw.bars.length;
+      if (!Number.isSafeInteger(next)) {
+        throw new BarMagnifierError({
+          kind: 'malformed',
+          code: 'bar-magnifier-raw-bar-count-invalid',
+          message: 'Exact history raw source-bar count exceeds the safe integer range',
+        });
+      }
+      rawBarCount = next;
+      return raw;
+    },
+  });
+  const acquisition = await acquireExactHistory(countedSource, {
     targetTimeframe: targetCanonicalTf,
     requested,
   });
@@ -1186,6 +1338,7 @@ async function acquireAndConvert(
     preflight,
     targetCanonicalTf,
     sourceCanonicalTf,
+    rawBarCount,
     intervals,
     alignmentEvidence,
   );
@@ -1197,6 +1350,7 @@ function convertAcquisition(
   preflight: MagnifierPreflight,
   targetCanonicalTf: string,
   sourceCanonicalTf: string,
+  rawBarCount: number,
   intervals: ChartIntervalsSec,
   alignmentEvidence: ResolvedMagnifierAlignmentEvidence,
 ): ResolvedMagnifierDataset {
@@ -1252,6 +1406,7 @@ function convertAcquisition(
     targetPineTf: preflight.targetPineTf!,
     targetCanonicalTf,
     sourceCanonicalTf,
+    rawBarCount,
     barsMs,
     chartOpenTimesMs,
     chartCloseTimesMs,

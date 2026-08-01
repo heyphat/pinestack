@@ -10,8 +10,8 @@
  * Only the compiled binary self-updates: from a source checkout `process.execPath`
  * is the bun executable itself, which must never be overwritten.
  *
- * Shared by every binary in the family (`pinerun`, `pinetop`) via the `binary`
- * option. It is deliberately one implementation: checksum verification and an
+ * Shared by every binary in the family (`pinerun`, `pinetop`, `pinelive`) via
+ * the `binary` option. It is deliberately one implementation: checksum verification and an
  * atomic swap over a running executable are the parts that must not be
  * reimplemented per-tool and drift.
  */
@@ -26,7 +26,7 @@ const RELEASES = `https://github.com/${REPO}/releases`;
 const COMPILED = import.meta.url.includes('/$bunfs/') || import.meta.url.includes('~BUN');
 
 /** Binaries this release publishes, and which can therefore self-update. */
-export type UpgradableBinary = 'pinerun' | 'pinetop';
+export type UpgradableBinary = 'pinerun' | 'pinetop' | 'pinelive';
 
 /**
  * The release asset name for this platform, or null when no prebuilt exists.

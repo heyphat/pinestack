@@ -159,8 +159,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case '--page': {
         const value = next();
-        if (value != null && (PAGES as readonly string[]).includes(value))
-          out.page = value as PageId;
+        // 'trades' was page 8's name through 0.8.0; keep it as an alias.
+        const name = value === 'trades' ? 'logs' : value;
+        if (name != null && (PAGES as readonly string[]).includes(name)) out.page = name as PageId;
         break;
       }
       case '--pinerun':

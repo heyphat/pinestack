@@ -1,0 +1,5 @@
+//@version=6
+strategy("superseded forming order", calc_on_every_tick=true, default_qty_type=strategy.fixed, default_qty_value=1)
+if close >= 110 and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+plot(strategy.position_size, "position")

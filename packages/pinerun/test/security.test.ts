@@ -178,6 +178,38 @@ plot(close - b, "spread")`;
   expect(spxFetches).toHaveLength(1);
 });
 
+test('plain cross-symbol lower-timeframe request fetches the requested base and resolves', async () => {
+  const chart = hourly(2, 100);
+  const y5: Bar[] = Array.from({ length: 24 }, (_, i) => ({
+    time: DAY1 + i * 300,
+    open: 1000 + i,
+    high: 1000 + i,
+    low: 1000 + i,
+    close: 1000 + i,
+    volume: 1,
+  }));
+  const provider = new CountingProvider(new StaticProvider({ 'X|1h': chart, 'Y|5m': y5 }));
+  const src = `//@version=6
+indicator("x")
+y = request.security("Y", "5", close)
+plot(y, "y")`;
+
+  const report = await scan({
+    source: src,
+    symbols: ['X'],
+    timeframe: '1h',
+    provider,
+    rank: 'last(y)',
+    runner: new LocalRunner(),
+  });
+
+  expect(report.errors).toHaveLength(0);
+  expect(provider.calls).toContain('Y@5m');
+  expect(provider.calls).not.toContain('Y@1h');
+  const y = report.results[0]!.plots.find((p) => p.title === 'y')!.data;
+  expect(y.some((value) => !Number.isNaN(value))).toBe(true);
+});
+
 // ── self lower_tf (intrabar) ─────────────────────────────────
 test('request.security_lower_tf(syminfo.tickerid) buckets injected intrabars per chart bar', async () => {
   const chart: Bar[] = [0, 1].map((b) => {
@@ -297,6 +329,72 @@ test('classifyRequests splits self / cross / lower_tf; self plain non-chart TF i
   expect(cls.crossLtf).toEqual([{ symbol: 'MSFT', rawTf: '5' }]);
   expect(cls.selfLtfRawTfs).toEqual(['1']);
   expect(cls.selfPlainRawTfs).toEqual(['D']); // 'D' fetched; the identity '60' request is skipped
+});
+
+test('plans preserve raw cross-symbol identities while legacy fetching chooses the finest base', async () => {
+  const source = `//@version=6
+indicator("finest")
+plot(request.security("Y", "D", close))
+plot(request.security("Y", "15", close))
+plot(request.security("Y", "5", close))`;
+  const runtime = classifyRequests(
+    [
+      { symbol: 'Y', timeframe: 'D', lowerTf: false },
+      { symbol: 'Y', timeframe: '15', lowerTf: false },
+      { symbol: 'Y', timeframe: '5', lowerTf: false },
+    ],
+    '1h',
+  );
+  const staticallyPlanned = planFromStatic(compilerDependencies(source), '1h');
+  const identities = [
+    { symbol: 'Y', rawTf: 'D' },
+    { symbol: 'Y', rawTf: '15' },
+    { symbol: 'Y', rawTf: '5' },
+  ];
+
+  expect(runtime.crossHtf).toEqual(['Y']);
+  expect(runtime.crossPlain).toEqual(identities);
+  expect(staticallyPlanned).toEqual(runtime);
+
+  const provider = new CountingProvider(new StaticProvider({ 'Y|5m': hourly(2, 200) }));
+  const jobs: Job[] = [{ source, symbol: 'X', timeframe: '60', bars: hourly(2, 100) }];
+  await resolveSecurity(source, jobs, '1h', '60', provider, { concurrency: 1 });
+
+  expect(provider.calls.filter((call) => call.startsWith('Y@'))).toEqual(['Y@5m']);
+  expect(jobs[0]!.securityBars?.Y).toBeDefined();
+});
+
+test('limit-only ordinary finer feeds use the loaded chart envelope', async () => {
+  const source = `//@version=6
+indicator("ranges")
+plot(request.security("Y", "5", close))
+plot(request.security("Z", "D", close))`;
+  const chart = hourly(2, 100);
+  const calls: Array<{ symbol: string; timeframe: string; range?: HistoryRange }> = [];
+  const provider: HistoryProvider = {
+    id: 'range-recorder',
+    async history(symbol, timeframe, range) {
+      calls.push({ symbol, timeframe, range });
+      return hourly(2, symbol === 'Y' ? 200 : 300);
+    },
+  };
+  const jobs = [{ source, symbol: 'X', timeframe: '60', bars: chart }];
+
+  await resolveSecurity(source, jobs, '1h', '60', provider, {
+    concurrency: 1,
+    range: { limit: 2 },
+  });
+
+  expect(calls.find((call) => call.symbol === 'Y')).toEqual({
+    symbol: 'Y',
+    timeframe: '5m',
+    range: { from: DAY1, to: DAY1 + 2 * 3_600 - 1 },
+  });
+  expect(calls.find((call) => call.symbol === 'Z')).toEqual({
+    symbol: 'Z',
+    timeframe: '1h',
+    range: { limit: 2 },
+  });
 });
 
 test('jobHash is sensitive to injected securityBars', () => {
@@ -427,6 +525,28 @@ test('a dynamic timeframe falls back to a discovery run and still resolves', asy
   const r = await resolveSecurity(src, jobs, '1h', '60', provider, { concurrency: 4 });
   expect(r.discovered).toBe(true); // dynamic tf → discovery run
   expect(jobs[0]!.securityBars?.AAPL).toBeDefined();
+});
+
+test('a dynamic lower timeframe falls back to discovery and uses the same plain fetch plan', async () => {
+  const src =
+    '//@version=6\nindicator("x")\ntf = input.string("5", "tf")\nplot(request.security("AAPL", tf, close))';
+  const aapl5: Bar[] = Array.from({ length: 12 }, (_, i) => ({
+    time: DAY1 + i * 300,
+    open: 200 + i,
+    high: 200 + i,
+    low: 200 + i,
+    close: 200 + i,
+    volume: 1,
+  }));
+  const provider = new CountingProvider(
+    new StaticProvider({ BTC: hourly(48, 100), 'AAPL|5m': aapl5 }),
+  );
+  const jobs = [{ source: src, symbol: 'BTC', timeframe: '60', bars: hourly(48, 100) }];
+  const r = await resolveSecurity(src, jobs, '1h', '60', provider, { concurrency: 4 });
+  expect(r.discovered).toBe(true); // dynamic tf → discovery run
+  expect(provider.calls).toContain('AAPL@5m');
+  expect(provider.calls).not.toContain('AAPL@1h');
+  expect(jobs[0]!.securityBars?.AAPL).toEqual(aapl5); // plain requests retain the bare symbol key
 });
 
 // ── Bar Magnifier exact-v1 static identity gate ─────────────────────────────
@@ -957,7 +1077,7 @@ plot(request.security("AAPL", "5", close))`;
   );
   const legacyJob: Job = { ...exactJob, bars: hourly(2, 100) };
   await resolveSecurity(source, [legacyJob], '1h', '60', legacyProvider, { concurrency: 1 });
-  expect(legacyProvider.calls).toContain('AAPL@1h');
+  expect(legacyProvider.calls).toContain('AAPL@5m');
   expect(legacyJob.securityBars?.AAPL).toBeDefined();
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "@heyphat/pinery",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Data layer for the piner engine: OHLCV history providers (Binance, static) + a Node on-disk cache. Implements piner's DataFeed contract.",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -40,5 +40,8 @@
   },
   "engines": {
     "bun": ">=1.1"
+  },
+  "dependencies": {
+    "@tigeropenapi/tigeropen": "0.5.4"
   }
 }

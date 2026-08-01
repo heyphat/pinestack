@@ -126,7 +126,7 @@ One tab per command, numbered in workflow order.
 | 5   | SCAN        | `pinerun scan`              | Screen — one script across N symbols               |
 | 6   | PORTFOLIO   | `pinerun portfolio`         | Combine — N symbols, one pot                       |
 | 7   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
-| 8   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
+| 8   | LOGS        | (ledger of the current run) | The engine log and the fills                       |
 
 **SWEEP and WALKFORWARD have an INPUTS pane** below STRATEGIES, listing every
 `input()` the loaded script declares — the same pane EDITOR shows, plus the grid beside each swept
@@ -152,7 +152,7 @@ All six command pages carry the same **STRATEGIES** pane above their config, fir
 in the focus ring, because all six take a `.pine` as their first argument — `↵`
 loads the selected script into that page's command. `compare` takes two, so it
 marks them `A` and `B`, and `↵` fills the first free slot before it starts
-replacing A. TRADES has no picker: it has no command of its own.
+replacing A. LOGS has no picker: it has no command of its own.
 
 The workflow between them is navigation, not documentation: `w` on SWEEP carries
 the grid into WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed
@@ -315,7 +315,7 @@ worth it.
   over the bottom of the frame with every error line the engine printed, the exit
   code, and how long it took — not one truncated line in the status bar. `esc`
   dismisses it, `:` → `show the last error` brings it back, and the complete
-  engine log is on TRADES either way.
+  engine log is on LOGS either way.
 - **A run that lost symbols says so too.** `scan` and `portfolio` report and
   continue past a symbol whose history will not fetch, and `sweep` past a combo
   that errored. The same drawer opens in warn colour — `SCAN — INCOMPLETE`, the

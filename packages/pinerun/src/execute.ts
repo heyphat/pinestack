@@ -19,14 +19,20 @@ import type { Bar, Job, ResolvedMagnifierDataset } from './job.js';
 import { jobId } from './job.js';
 import { marketDataDigest } from './digest.js';
 import {
+  assertBarMagnifierBudgets,
   exchangeCalendarChartOpensAligned,
   isResolverIssuedMagnifierDataset,
   magnifierDatasetAcquisitionKey,
-  preflightCompiledBarMagnifier,
+  preflightBarMagnifier,
   utcFixedChartOpensAligned,
+  type BarMagnifierBudgetOptions,
   type MagnifierPreflight,
 } from './magnifier.js';
-import { compilePinerSource, pinerCapabilities } from './piner-capabilities.js';
+import {
+  compilePinerSource,
+  pinerCapabilities,
+  type PinerCapabilityAdapter,
+} from './piner-capabilities.js';
 import { assertResolvedSecurityForBarMagnifier } from './security.js';
 import type {
   BarMagnifierSummary,
@@ -74,41 +80,7 @@ export async function executeJob(job: Job): Promise<RunResult> {
   }
 
   const adapter = pinerCapabilities();
-  let magnifierPreflight;
-  let magnifierDataset: ResolvedMagnifierDataset | undefined;
-  try {
-    magnifierPreflight = preflightCompiledBarMagnifier(
-      job.source,
-      job.timeframe,
-      job.useBarMagnifier,
-      compiled,
-      adapter,
-    );
-    if (magnifierPreflight.requested) {
-      magnifierDataset = assertResolvedMagnifierDatasetForJob(job, magnifierPreflight);
-      assertResolvedSecurityForBarMagnifier(
-        job.source,
-        magnifierPreflight.securityDependencies,
-        job,
-      );
-    }
-  } catch (error) {
-    if (error instanceof BarMagnifierError) {
-      return permanentFailure(base, error, started);
-    }
-    return { ...base, error: errorMessage(error), elapsedMs: Date.now() - started };
-  }
-
-  if (job.calcOnOrderFills != null && !ENGINE_SUPPORTS_COOF) {
-    return {
-      ...base,
-      error:
-        'calc_on_order_fills override: the loaded @heyphat/piner engine does not ' +
-        'model calc_on_order_fills (needs a release newer than 0.9.0) — remove ' +
-        'the override or upgrade the engine',
-      elapsedMs: Date.now() - started,
-    };
-  }
+  let preparation: PinerEnginePreparation | undefined;
 
   try {
     // Host overrides are added only when defined; omission preserves the source
@@ -116,7 +88,9 @@ export async function executeJob(job: Job): Promise<RunResult> {
     // against old piner declarations that do not yet name useBarMagnifier.
     const strategyOverride: Record<string, unknown> = {};
     if (job.minQty != null) strategyOverride.minQty = job.minQty;
-    if (job.calcOnOrderFills != null) strategyOverride.calcOnOrderFills = job.calcOnOrderFills;
+    if (job.calcOnOrderFills != null && ENGINE_SUPPORTS_COOF) {
+      strategyOverride.calcOnOrderFills = job.calcOnOrderFills;
+    }
     if (job.useBarMagnifier != null) strategyOverride.useBarMagnifier = job.useBarMagnifier;
 
     const engine = new Engine(compiled, new ArrayFeed(toPinerBars(job.bars)), {
@@ -127,19 +101,17 @@ export async function executeJob(job: Job): Promise<RunResult> {
         : undefined,
     });
 
-    if (job.securityBars) {
-      for (const [key, bars] of Object.entries(job.securityBars)) {
-        engine.ctx.securityBars.set(key, toPinerBars(bars));
-      }
-    }
+    preparation = preparePinerEngineForRun(engine, job, { adapter });
 
-    // Dedicated channel, already in milliseconds. This wrapper allocates no bar
-    // or close-time array and never reconverts the resolver-owned 200k payload.
-    if (magnifierDataset) {
-      adapter.injectMagnifierData(
-        engine as unknown as { ctx: Record<string, unknown> },
-        toPinerBarMagnifierData(magnifierDataset),
-      );
+    if (job.calcOnOrderFills != null && !ENGINE_SUPPORTS_COOF) {
+      return {
+        ...base,
+        error:
+          'calc_on_order_fills override: the loaded @heyphat/piner engine does not ' +
+          'model calc_on_order_fills (needs a release newer than 0.9.0) — remove ' +
+          'the override or upgrade the engine',
+        elapsedMs: Date.now() - started,
+      };
     }
 
     await engine.run({ symbol: job.symbol, timeframe: job.timeframe, mintick: job.mintick });
@@ -170,7 +142,7 @@ export async function executeJob(job: Job): Promise<RunResult> {
       const effectiveCoof = (broker.settings as { calcOnOrderFills?: boolean }).calcOnOrderFills;
       const barMagnifier = projectAuthoritativeBarMagnifierReport(
         report as unknown,
-        magnifierPreflight.requested,
+        preparation.preflight.requested,
       );
       strategy = {
         calcOnOrderFills: effectiveCoof === true || undefined,
@@ -227,7 +199,7 @@ export async function executeJob(job: Job): Promise<RunResult> {
   } catch (error) {
     if (error instanceof BarMagnifierError) return permanentFailure(base, error, started);
     const message = errorMessage(error);
-    if (magnifierPreflight.requested && /bar magnifier/i.test(message)) {
+    if (preparation?.preflight.requested && /bar magnifier/i.test(message)) {
       return permanentFailure(
         base,
         new BarMagnifierError({
@@ -239,6 +211,141 @@ export async function executeJob(job: Job): Promise<RunResult> {
       );
     }
     return { ...base, error: message, elapsedMs: Date.now() - started };
+  }
+}
+
+export interface PreparedMagnifierSourceIdentity {
+  readonly requestedSymbol: string;
+  readonly normalizedSymbol: string;
+  readonly cacheIdentity: string;
+}
+
+/** Authenticated facts Pinelive can persist beside its own run binding. */
+export interface PreparedMagnifierBinding {
+  readonly sourceIdentity: PreparedMagnifierSourceIdentity;
+  readonly targetPineTf: string;
+  readonly targetCanonicalTf: string;
+  readonly sourceCanonicalTf: string;
+  readonly targetBarCount: number;
+  readonly rawBarCount: number;
+  readonly acquisitionKey: string;
+  readonly barsDigest: string;
+  readonly coverage: ResolvedMagnifierDataset['coverage'];
+  readonly chartOpenTimesMs: ResolvedMagnifierDataset['chartOpenTimesMs'];
+  readonly chartCloseTimesMs: ResolvedMagnifierDataset['chartCloseTimesMs'];
+}
+
+export interface PinerEnginePreparation {
+  readonly preflight: MagnifierPreflight;
+  readonly magnifier?: PreparedMagnifierBinding;
+  readonly securityKeys: readonly string[];
+}
+
+export interface PreparePinerEngineForRunOptions extends BarMagnifierBudgetOptions {
+  readonly adapter?: PinerCapabilityAdapter;
+}
+
+/**
+ * Authenticate, convert, and bind every pre-resolved exact input to an Engine.
+ * The Engine is never run here. All validation and budgets complete before the
+ * first mutation, and no returned fact can mint resolver authority. The Job
+ * must describe the source/options used to construct the Engine; its effective
+ * Bar Magnifier setting is independently checked below.
+ */
+export function preparePinerEngineForRun(
+  engine: Engine,
+  job: Job,
+  options: PreparePinerEngineForRunOptions = {},
+): PinerEnginePreparation {
+  const adapter = options.adapter ?? pinerCapabilities();
+  const preflight = preflightBarMagnifier(job.source, job.timeframe, job.useBarMagnifier, adapter);
+  assertEngineMagnifierSetting(engine, preflight, adapter);
+  let dataset: ResolvedMagnifierDataset | undefined;
+  if (preflight.requested) {
+    dataset = assertResolvedMagnifierDatasetForJob(job, preflight);
+    assertResolvedSecurityForBarMagnifier(job.source, preflight.securityDependencies, job);
+    assertBarMagnifierBudgets(dataset, options);
+  }
+
+  // Stage every conversion before mutating the already-created Engine.
+  const securityEntries = Object.entries(job.securityBars ?? {}).map(
+    ([key, bars]) => [key, toPinerBars(bars)] as const,
+  );
+
+  if (dataset) {
+    try {
+      adapter.injectMagnifierData(
+        engine as unknown as { ctx: Record<string, unknown> },
+        toPinerBarMagnifierData(dataset),
+      );
+    } catch (error) {
+      throw new BarMagnifierError({
+        kind: 'malformed',
+        code: 'invalid-injected-bar-magnifier-data',
+        message: errorMessage(error),
+      });
+    }
+  }
+  for (const [key, bars] of securityEntries) engine.ctx.securityBars.set(key, bars);
+
+  const securityKeys = Object.freeze(securityEntries.map(([key]) => key).sort());
+  const magnifier = dataset
+    ? Object.freeze({
+        sourceIdentity: Object.freeze({
+          requestedSymbol: dataset.requestedSymbol,
+          normalizedSymbol: dataset.provenance.normalizedSymbol,
+          cacheIdentity: dataset.provenance.cacheIdentity,
+        }),
+        targetPineTf: dataset.targetPineTf,
+        targetCanonicalTf: dataset.targetCanonicalTf,
+        sourceCanonicalTf: dataset.sourceCanonicalTf,
+        targetBarCount: dataset.barsMs.length,
+        rawBarCount: dataset.rawBarCount,
+        acquisitionKey: dataset.acquisitionKey,
+        barsDigest: dataset.barsDigest,
+        coverage: dataset.coverage,
+        chartOpenTimesMs: dataset.chartOpenTimesMs,
+        chartCloseTimesMs: dataset.chartCloseTimesMs,
+      })
+    : undefined;
+  return Object.freeze({
+    preflight,
+    ...(magnifier ? { magnifier } : {}),
+    securityKeys,
+  });
+}
+
+function assertEngineMagnifierSetting(
+  engine: Engine,
+  preflight: MagnifierPreflight,
+  adapter: PinerCapabilityAdapter,
+): void {
+  const broker = engine.ctx.strategyBroker as unknown as {
+    readonly settings?: { readonly useBarMagnifier?: unknown };
+  };
+  const effective = broker.settings?.useBarMagnifier;
+  if (typeof effective === 'boolean') {
+    if (effective !== preflight.requested) {
+      throw new BarMagnifierError({
+        kind: 'malformed',
+        code: 'bar-magnifier-engine-setting-mismatch',
+        message:
+          'The already-created Engine Bar Magnifier setting does not match the effective pinerun preflight',
+        details: {
+          preflightRequested: preflight.requested,
+          engineRequested: effective,
+        },
+      });
+    }
+    return;
+  }
+  if (adapter.capable) {
+    throw new BarMagnifierError({
+      kind: 'unsupported',
+      code: 'piner-bar-magnifier-engine-setting-unavailable',
+      message:
+        'The loaded capable piner Engine does not expose its effective Bar Magnifier setting',
+    });
   }
 }
 
@@ -268,6 +375,13 @@ export function assertResolvedMagnifierDatasetForJob(
     dataset.barsDigest !== marketDataDigest(dataset.barsMs)
   ) {
     mismatch('bars-digest');
+  }
+  if (
+    !Number.isSafeInteger(dataset.rawBarCount) ||
+    !Array.isArray(dataset.barsMs) ||
+    dataset.rawBarCount < dataset.barsMs.length
+  ) {
+    mismatch('raw-bar-count');
   }
   const alignmentEvidence = magnifierAlignmentEvidence(dataset.alignmentEvidence);
   if (!alignmentEvidence) mismatch('alignment-evidence');

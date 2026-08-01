@@ -1,0 +1,7 @@
+//@version=6
+strategy("calc on order fills", calc_on_every_tick=true, calc_on_order_fills=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
+if close >= 110 and strategy.position_size <= 0
+    strategy.entry("L", strategy.long)
+if close <= 90 and strategy.position_size > 0
+    strategy.close("L")
+plot(strategy.position_size, "position")

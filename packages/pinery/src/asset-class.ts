@@ -13,9 +13,17 @@ export type AssetClass = 'equities' | 'crypto' | 'futures' | 'forex';
 export const ASSET_CLASSES = ['equities', 'crypto', 'futures', 'forex'] as const;
 
 /** The data providers pinery ships adapters for. */
-export type DataProvider = 'binance' | 'okx' | 'kraken' | 'alpaca' | 'massive' | 'csv';
+export type DataProvider = 'binance' | 'okx' | 'kraken' | 'alpaca' | 'massive' | 'csv' | 'tiger';
 
-export const DATA_PROVIDERS = ['binance', 'okx', 'kraken', 'alpaca', 'massive', 'csv'] as const;
+export const DATA_PROVIDERS = [
+  'binance',
+  'okx',
+  'kraken',
+  'alpaca',
+  'massive',
+  'csv',
+  'tiger',
+] as const;
 
 export interface ProviderAssetClassDeclaration {
   /** Used when a caller names this provider but no asset class. */
@@ -38,6 +46,7 @@ export const ASSET_CLASS_REGISTRY: Record<DataProvider, ProviderAssetClassDeclar
   alpaca: { defaultAssetClass: 'equities', assetClasses: ['equities'] },
   massive: { defaultAssetClass: 'equities', assetClasses: ['equities'] },
   csv: { defaultAssetClass: 'crypto', assetClasses: ['crypto', 'futures', 'equities', 'forex'] },
+  tiger: { defaultAssetClass: 'futures', assetClasses: ['futures'] },
 };
 
 export function isDataProvider(value: unknown): value is DataProvider {
@@ -67,7 +76,10 @@ export function supportsPair(provider: DataProvider, assetClass: AssetClass): bo
  * substituting the provider's default for anything invalid or unserved. Never
  * throws, so CLI flags and stored values degrade gracefully.
  */
-export function coerceAssetClass(value: string | null | undefined, provider: DataProvider): AssetClass {
+export function coerceAssetClass(
+  value: string | null | undefined,
+  provider: DataProvider,
+): AssetClass {
   return isAssetClass(value) && supportsPair(provider, value)
     ? value
     : defaultAssetClassForProvider(provider);
@@ -85,6 +97,7 @@ const PROVIDER_PREFIXES: Record<string, DataProvider> = {
   AL: 'alpaca',
   MA: 'massive',
   CSV: 'csv',
+  TG: 'tiger',
 };
 
 const ASSET_CLASS_CODES = {
@@ -100,6 +113,7 @@ export function providerPrefix(provider: DataProvider): string {
   if (provider === 'kraken') return 'KR';
   if (provider === 'alpaca') return 'AL';
   if (provider === 'csv') return 'CSV';
+  if (provider === 'tiger') return 'TG';
   return 'MA';
 }
 

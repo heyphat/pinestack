@@ -13,8 +13,10 @@ import type {
   HistoryRange,
   HistoryRequest,
   InstrumentInfo,
+  MarketDataProvider,
   ResolvedHistorySource,
 } from './provider.js';
+import { isMarketDataProvider, supportsLiveBars } from './provider.js';
 import { resolveHistorySource } from './acquisition.js';
 import {
   snapshotHistoryCapabilities,
@@ -22,9 +24,22 @@ import {
   historyCapabilityRecordSpan,
   validateHistoryAcquisition,
 } from './coverage.js';
+import type { ProviderConfig } from './factory.js';
+import { assertProviderConfig, createMarketDataProvider } from './factory.js';
+import { CsvProvider } from './adapters/csv.js';
+import { ReplayProvider } from './adapters/replay.js';
+import type { TigerMarketDataTransport } from './adapters/tiger.js';
+import { createOfficialTigerMarketDataTransport } from './adapters/tiger-official.js';
 
 export * from './index.js';
 export { CsvProvider, type CsvProviderOptions } from './adapters/csv.js';
+export {
+  OfficialTigerMarketDataTransport,
+  createOfficialTigerMarketDataTransport,
+  resolveTigerProfilePath,
+  type OfficialTigerMarketDataOptions,
+  type OfficialTigerQuoteClient,
+} from './adapters/tiger-official.js';
 
 export interface DiskCacheOptions {
   /** Cache directory. Default `.pinery-cache` under the current working directory. */
@@ -62,10 +77,14 @@ interface ExactHistoryPayload {
 }
 
 /** Wrap a provider so identical requests are served from disk. */
+export function cached(provider: MarketDataProvider, opts?: DiskCacheOptions): MarketDataProvider;
+export function cached(provider: HistoryProvider, opts?: DiskCacheOptions): HistoryProvider;
 export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): HistoryProvider {
   const dir = opts.dir ?? join(process.cwd(), '.pinery-cache');
+  const cacheIdentity = provider.cacheIdentity ?? provider.id;
   const wrapped: HistoryProvider = {
     id: `${provider.id}+cache`,
+    cacheIdentity,
     ...(provider.assetClass ? { assetClass: provider.assetClass } : {}),
 
     async history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
@@ -179,6 +198,20 @@ export function cached(provider: HistoryProvider, opts: DiskCacheOptions = {}): 
       if (info) writeJsonAtomic(file, { ...identity, info });
       return info;
     };
+  }
+  if (isMarketDataProvider(provider)) {
+    const live = provider;
+    const liveWrapped = wrapped as MarketDataProvider;
+    liveWrapped.resolve = (symbol, options) => live.resolve(symbol, options);
+    liveWrapped.historyResolved = (instrument, timeframe, range, signal) =>
+      live.historyResolved(instrument, timeframe, range, signal);
+    liveWrapped.closedBars = (instrument, timeframe, options) =>
+      live.closedBars(instrument, timeframe, options);
+    if (supportsLiveBars(live)) {
+      liveWrapped.liveBars = (instrument, timeframe, options) =>
+        live.liveBars(instrument, timeframe, options);
+    }
+    if (live.disconnect) liveWrapped.disconnect = () => live.disconnect!();
   }
   return wrapped;
 }
@@ -308,4 +341,88 @@ function stableStringify(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(String(value));
+}
+
+export interface TigerMarketDataCredentials {
+  tigerId?: string;
+  privateKey?: string;
+  account?: string;
+  license?: string;
+  token?: string;
+}
+
+export interface NodeMarketDataFactoryOptions {
+  tigerCredentials?: Readonly<TigerMarketDataCredentials>;
+}
+
+export type TigerTransportFactory = (
+  config: Extract<ProviderConfig, { provider: 'tiger' }>,
+  credentials: Readonly<TigerMarketDataCredentials>,
+) => TigerMarketDataTransport;
+
+let tigerTransportFactory: TigerTransportFactory | undefined;
+
+/** Override the built-in official Tiger OpenAPI market-data transport. */
+export function registerTigerMarketDataTransport(factory: TigerTransportFactory): void {
+  tigerTransportFactory = factory;
+}
+
+export function createNodeMarketDataProvider(
+  input: ProviderConfig,
+  options: NodeMarketDataFactoryOptions = {},
+): MarketDataProvider {
+  const config = assertProviderConfig(input);
+  if (config.provider === 'csv') {
+    const source = new CsvProvider({ dir: config.dataDir });
+    return new ReplayProvider(source, {
+      cutoverTime: config.cutoverTime,
+      paceMs: config.paceMs,
+      instrument: {
+        mintick: config.mintick,
+        qtyStep: config.qtyStep,
+        minOrderQty: config.minOrderQty,
+        pointValue: config.pointValue,
+        exchange: config.exchange,
+        expiry: config.expiry,
+      },
+    });
+  }
+  if (config.provider === 'tiger' && !config.transport) {
+    const credentials = options.tigerCredentials ?? {
+      tigerId: process.env.TIGEROPEN_TIGER_ID ?? process.env.TIGER_ID,
+      privateKey: process.env.TIGEROPEN_PRIVATE_KEY ?? process.env.TIGER_PRIVATE_KEY,
+      account: process.env.TIGEROPEN_ACCOUNT ?? process.env.TIGER_ACCOUNT,
+      license: process.env.TIGEROPEN_LICENSE,
+      token: process.env.TIGEROPEN_TOKEN,
+    };
+    const credentialSlice: TigerMarketDataCredentials = {
+      tigerId: optionalTigerCredential(credentials.tigerId, 'tigerId'),
+      privateKey: optionalTigerCredential(credentials.privateKey, 'privateKey'),
+      account: optionalTigerCredential(credentials.account, 'account'),
+      license: optionalTigerCredential(credentials.license, 'license'),
+      token: optionalTigerCredential(credentials.token, 'token'),
+    };
+    const factory =
+      tigerTransportFactory ??
+      ((
+        tigerConfig: Extract<ProviderConfig, { provider: 'tiger' }>,
+        value: TigerMarketDataCredentials,
+      ) =>
+        createOfficialTigerMarketDataTransport({
+          ...value,
+          propertiesFilePath: tigerConfig.profile,
+          serverUrl: tigerConfig.baseUrl,
+        }));
+    return createMarketDataProvider({
+      ...config,
+      transport: factory(config, credentialSlice),
+    });
+  }
+  return createMarketDataProvider(config);
+}
+
+function optionalTigerCredential(value: unknown, name: string): string | undefined {
+  if (value != null && typeof value !== 'string')
+    throw new Error(`pinery: Tiger credential ${name} must be a string`);
+  return value as string | undefined;
 }

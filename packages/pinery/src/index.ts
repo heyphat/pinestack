@@ -31,6 +31,15 @@ export type {
   ResolvedHistorySource,
   ExactHistoryFailureKind,
   ExactHistoryFailure,
+  ResolvedDataInstrument,
+  ResolveDataInstrumentOptions,
+  ClosedBarsOptions,
+  BarUpdate,
+  LiveSourcePolicy,
+  LiveBarsOptions,
+  MarketDataProvider,
+  LiveBarsProvider,
+  MarketDataErrorCode,
 } from './provider.js';
 export {
   ExactHistoryError,
@@ -50,7 +59,39 @@ export {
   applyRange,
   applyExactQueryRange,
   dropUnclosedBars,
+  barCloseTime,
+  normalizeBars,
+  normalizeExpiryDate,
+  assertResolvedDataInstrument,
+  MarketDataError,
+  isMarketDataProvider,
+  supportsLiveBars,
 } from './provider.js';
+export type {
+  BarUpdateValidationOptions,
+  ExactChildAggregationOptions,
+  ExactChildBucket,
+  RecoverLiveBarUpdatesOptions,
+  BufferLiveBarUpdatesOptions,
+  ConformLiveBarUpdatesOptions,
+} from './live/index.js';
+export {
+  BarUpdateValidator,
+  DEFAULT_FINAL_DEDUPE_BARS,
+  DEFAULT_LIVE_TEARDOWN_TIMEOUT_MS,
+  DEFAULT_MAX_FORMING_BARS,
+  DEFAULT_MAX_PENDING_FINALS,
+  ExactChildBarAggregator,
+  LiveBarUpdateBuffer,
+  aggregateExactChildBarUpdates,
+  bufferLiveBarUpdates,
+  conformLiveBarUpdates,
+  equivalentFinalBarUpdate,
+  liveTimeframeSeconds,
+  recoverLiveBarUpdates,
+  snapshotLiveSourcePolicy,
+  validateBarUpdate,
+} from './live/index.js';
 export type {
   Timeframe,
   ExactTimeframeFailureKind,
@@ -70,6 +111,8 @@ export {
   canonicalTimeframeToPineExact,
   canonicalTimeframeSecondsExact,
   selectLargestExactDivisor,
+  resolveLowerFetchTf,
+  resolveSameSymbolFetchTf,
 } from './timeframe.js';
 export type {
   HistoryAcquisitionPlan,
@@ -138,6 +181,10 @@ export {
   type CreateProviderOptions,
   type InstrumentRouterOptions,
   type ResolvedInstrument,
+  type ProviderConfig,
+  assertProviderConfig,
+  createMarketDataProvider,
+  assertLiveSymbolMatchesConfig,
 } from './factory.js';
 export {
   normalizeOkxSpot,
@@ -162,3 +209,20 @@ export {
   type StaticProviderSeed,
   type StaticProviderOptions,
 } from './adapters/static.js';
+
+export {
+  ReplayProvider,
+  type ReplayProviderOptions,
+  type ReplayBarUpdateTrace,
+  type ReplayBarUpdateTraces,
+  type ReplayLowerBarBucketContext,
+  type ReplayLowerBarsOptions,
+} from './adapters/replay.js';
+export {
+  TigerProvider,
+  type TigerProviderOptions,
+  type TigerMarketDataTransport,
+  type TigerFutureContract,
+  type TigerBarsRequest,
+  type TigerBarsResult,
+} from './adapters/tiger.js';

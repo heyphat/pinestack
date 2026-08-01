@@ -33,11 +33,18 @@ export { formatFillModel } from './fill-model.js';
 export { jobHash } from './hash.js';
 export {
   executeJob,
+  preparePinerEngineForRun,
   assertResolvedMagnifierDatasetForJob,
   toPinerBarMagnifierData,
   projectAuthoritativeBarMagnifierReport,
 } from './execute.js';
-export type { PinerBarMagnifierDataLike } from './execute.js';
+export type {
+  PinerBarMagnifierDataLike,
+  PreparedMagnifierSourceIdentity,
+  PreparedMagnifierBinding,
+  PinerEnginePreparation,
+  PreparePinerEngineForRunOptions,
+} from './execute.js';
 export type { Runner, RunAllOptions } from './runner.js';
 export { LocalRunner, fanOut } from './runner.js';
 export type { Aggregate, RankSpec, RankedResult, RankOptions } from './rank.js';
@@ -169,13 +176,16 @@ export type {
   MagnifierAcquisitionKeyInput,
   MagnifierDatasetAcquisitionKeyInput,
   MagnifierResolutionScope,
+  BarMagnifierBudgetOptions,
 } from './magnifier.js';
 export {
   createMagnifierResolutionScope,
+  assertBarMagnifierBudgets,
   magnifierMetadataKey,
   magnifierAcquisitionKey,
   magnifierDatasetAcquisitionKey,
   preflightBarMagnifier,
+  preflightCompiledBarMagnifier,
   resolveBarMagnifier,
 } from './magnifier.js';
 

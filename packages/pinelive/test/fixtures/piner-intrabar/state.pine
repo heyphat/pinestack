@@ -1,0 +1,17 @@
+//@version=6
+strategy("intrabar state", calc_on_every_tick=true)
+ordinary = nz(close[1], -1)
+var int rollback = 0
+varip int intrabar = 0
+rollback += 1
+intrabar += 1
+plot(ordinary, "ordinary")
+plot(rollback, "var")
+plot(intrabar, "varip")
+plot(barstate.isnew ? 1 : 0, "isnew")
+plot(barstate.isrealtime ? 1 : 0, "isrealtime")
+plot(barstate.isconfirmed ? 1 : 0, "isconfirmed")
+if close >= 110
+    alert("entry", alert.freq_all)
+if close <= 90
+    alert("close", alert.freq_all)

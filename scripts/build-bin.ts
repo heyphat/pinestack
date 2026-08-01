@@ -49,7 +49,7 @@ interface Product {
   readonly revisionDefine: string;
   /** Env var that overrides the --install directory. */
   readonly installEnv: string;
-  /** Only pinerun bundles the engine, so only pinerun can swap it for a checkout. */
+  /** pinerun and pinelive bundle the engine, so only they can swap it for a checkout. */
   readonly supportsLocalPiner: boolean;
 }
 
@@ -77,6 +77,18 @@ const PRODUCTS: Record<string, Product> = {
     revisionDefine: 'PINETOP_REVISION',
     installEnv: 'PINETOP_INSTALL_DIR',
     supportsLocalPiner: false,
+  },
+  pinelive: {
+    name: 'pinelive',
+    // No worker: the forward runner is one async process. (security.ts's
+    // "worker" is an in-process concurrency helper, not a spawned module.)
+    entrypoints: [join(ROOT, 'packages/pinelive/src/cli.ts')],
+    versionDefine: 'PINELIVE_VERSION',
+    revisionDefine: 'PINELIVE_REVISION',
+    installEnv: 'PINELIVE_INSTALL_DIR',
+    // pinelive runs piner in-process (compile + engine ticks), so like pinerun
+    // it bundles the engine and can build against a sibling checkout.
+    supportsLocalPiner: true,
   },
 };
 

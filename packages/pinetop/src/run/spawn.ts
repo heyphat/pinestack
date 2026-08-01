@@ -8,7 +8,7 @@
  *
  * stdout carries the `--json` report. stderr carries the engine's own
  * narration (resolve, fetch/cache, warmup, fills, artifact writes) — that is
- * the TRADES page log (§8), not noise to be swallowed.
+ * the LOGS page log (§8), not noise to be swallowed.
  */
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process';

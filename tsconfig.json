@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/pinery" },
     { "path": "./packages/pinerun" },
-    { "path": "./packages/pinetop" }
+    { "path": "./packages/pinetop" },
+    { "path": "./packages/pinelive" }
   ]
 }

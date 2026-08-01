@@ -267,7 +267,7 @@ export const EDITOR_KEYS: readonly { display: string; description: string }[] = 
  *
  * Seven items is what fits an 80-column strip with room left for the status text
  * on the right, so this is a chosen seven and not everything. `/ filter` is not
- * here because it only does anything on TRADES, which supplies its own strip
+ * here because it only does anything on LOGS, which supplies its own strip
  * through `Page.hints` — the same hook EDITOR uses.
  */
 export const HINTS: readonly { key: string; label: string }[] = [

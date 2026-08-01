@@ -2,7 +2,7 @@
 
 **Name:** `pinetop` — confirmed
 **Author:** Design · **Status:** Built — see §7 and [README](./README.md)
-**Created:** 2026-07-31 · **Last Updated:** 2026-07-31 (v1.3)
+**Created:** 2026-07-31 · **Last Updated:** 2026-08-01 (v1.5)
 **Prototype:** `Tessera Backtester TUI.dc.html` (file name pending rename) (interactive, keyboard-driven)
 **Upstream:** `pinestack/packages/pinerun`, `pinestack/docs/*.md`
 
@@ -64,9 +64,26 @@ makes the loop, and therefore this tool, worth building.
 ### Non-Goals
 
 - **NG1** — Not a new engine. No metric, fill, or equity value is computed in `pinetop`.
-- **NG2** — Not a broker or live-trading surface. `pinelive` stays a separate program:
+- **NG2** — ~~Not a broker or live-trading surface. `pinelive` stays a separate program:
   streaming state has no run boundary and no final number, so it does not fit the
-  report-page shape this app is built around. No LIVE page, now or later.
+  report-page shape this app is built around. No LIVE page, now or later.~~
+  **Revised: a read-only LIVE page is in scope (not yet built); the
+  trading-surface prohibition stands in full.** What changed is not this app's
+  shape but `pinelive`'s: it now writes a durable ledger, and its observability
+  design plans a discoverable runs registry plus a one-shot
+  `pinelive status --json` verb — a finite child returning one JSON payload,
+  which is exactly the report-page shape this app is built around (§2, NG1's
+  spawn-and-render discipline). The LIVE page lands only after that status
+  contract exists; nothing here describes shipped behavior. "Streaming state
+  has no final number" is answered by observing snapshots, not by streaming.
+  What NG2 still rules out stands, and is now stated more precisely: `pinetop`
+  computes no trading state, submits/cancels/flattens nothing, and — in the
+  first LIVE version — takes **no action against a pinelive process at all**:
+  no launch, no stop, no arm, no acknowledge. Signaling a PID read from a
+  registry file is unsafe (PID reuse); control belongs to a later phase with
+  verified process identity, starting with *attached* launches whose child
+  handle `pinetop` itself owns. `pinelive` remains a separate program that this
+  app spawns and reads, exactly as it treats `pinerun`.
 - **NG3** — Not a web app. No browser, no server, no remote state.
 - **NG4** — ~~Not a Pine editor. Scripts are edited in the user's editor; `pinetop` reloads
   them.~~ **Revised (as built): page 1 is a vim-modal editor for the `.pine`.** The
@@ -132,15 +149,15 @@ One tab per command, numbered, in workflow order:
 | 5 | SCAN | `pinerun scan` | Screen — one script across N symbols |
 | 6 | PORTFOLIO | `pinerun portfolio` | Combine — N symbols, one pot |
 | 7 | COMPARE | `pinerun compare` | Compare — two strategies, same bars |
-| 8 | TRADES | (ledger of the current run) | The fills and the engine log |
+| 8 | LOGS | (ledger + engine log of the current run) | The engine log and the fills |
 
 **Decision 4.2.a — Tabs are commands, not topics.** An earlier prototype had topical tabs
 (BACKTEST / TRADES / OPTIMIZE / LOGS). It broke down as soon as more commands arrived:
 users think in commands because that is what they type. Number keys `1`–`8` map to the
 same ordinal the tab shows.
 
-**Decision 4.2.b — TRADES is the exception and is justified.** It is not a command; it is
-the ledger plus engine log for whichever run is loaded. It exists because `--trades`
+**Decision 4.2.b — LOGS (né TRADES, renamed v1.5) is the exception and is justified.** It is
+not a command; it is the engine log plus fill ledger for whichever run is loaded. It exists because `--trades`
 output is consumed differently from a tearsheet — you scan rows, then interrogate one.
 
 **Decision 4.2.d — EDITOR is the other exception, and it goes first.** It is not a command
@@ -252,7 +269,7 @@ correctness bug, not a style choice.
   coming back. Every command takes a `.pine` as its first positional argument, so every
   command page owes you a way to pick one. One renderer (`strategies-pane.ts`), for the same
   reason the config pane is one renderer — a page must not invent its own dialect for a thing
-  all of them do. TRADES has none, because it has no command and a script picker there would
+  all of them do. LOGS has none, because it has no command and a script picker there would
   imply it could run something (§4.2.b); EDITOR's FILES pane is the sibling, where `↵` opens
   a buffer instead of loading an argument.
 - **SWEEP and WALKFORWARD both carry an INPUTS pane listing every `input()` the selected
@@ -525,7 +542,7 @@ anticipate, each because the alternative was a screen that lied:
 
 ## 8. Observability & Monitoring
 
-- Mirror `pinerun`'s own engine log in the TRADES page: resolve, fetch/cache, warmup,
+- Mirror `pinerun`'s own engine log in the LOGS page: resolve, fetch/cache, warmup,
   fills, artifact writes, with levels (`INFO` / `WARN` / `ERR`).
 - **A non-zero exit gets a drawer of its own**, not a line in the status strip. As built,
   half the failure was being kept: the last error line went to the status bar, where the
@@ -636,7 +653,7 @@ anticipate, each because the alternative was a screen that lied:
 | **Status** | Built — P0–P7 in `packages/pinetop/` | Not yet a release artifact; built from a checkout |
 | **Owner (DRI)** | [TODO] | Single accountable person, not a team |
 | **Open Questions** | 2 of 4 remain (§10.3 run-history depth, §10.4 `--watch`) | Flag-schema drift is now caught by `--check-flags` rather than prevented |
-| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built · v1.3 — NG4 revised: EDITOR is page 1 (§4.8), the eight ordinals replace seven | 2026-07-31 |
+| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built · v1.3 — NG4 revised: EDITOR is page 1 (§4.8), the eight ordinals replace seven · v1.4 — NG2 revised: read-only LIVE page in scope (observation only — no launch/stop/arm; `pinelive status --json` is the report-page-shaped contract); trading-surface prohibition unchanged · v1.5 — page 8 renamed TRADES → LOGS (the tab shows the engine log plus the fill ledger; the old name read as a trading surface, which NG2 forbids); `--page trades` remains an alias | 2026-08-01 |
 
 ---
 

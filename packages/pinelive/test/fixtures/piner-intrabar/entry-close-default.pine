@@ -1,0 +1,9 @@
+//@version=6
+strategy("entry close default", calc_on_every_tick=true, default_qty_type=strategy.fixed, default_qty_value=1)
+entrySignal = close >= 110
+closeSignal = close <= 90
+if entrySignal and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+if closeSignal and strategy.position_size > 0
+    strategy.close("L")
+plot(strategy.position_size, "position")

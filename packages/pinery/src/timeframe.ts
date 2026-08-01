@@ -33,12 +33,22 @@ export interface CalendarCanonicalTimeframe {
 
 export type ParsedCanonicalTimeframe = FixedCanonicalTimeframe | CalendarCanonicalTimeframe;
 
-const UNIT_SECONDS: Record<FixedCanonicalTimeframe['unit'], number> = {
+type TimeframeUnit = 'm' | 'h' | 'd' | 'w' | 'M';
+
+const FIXED_UNIT_SECONDS: Readonly<Record<FixedCanonicalTimeframe['unit'], number>> = {
   s: 1,
   m: 60,
   h: 3600,
   d: 86400,
   w: 604800,
+};
+
+const LEGACY_UNIT_SECONDS: Readonly<Record<TimeframeUnit, number>> = {
+  m: 60,
+  h: 3600,
+  d: 86400,
+  w: 604800,
+  M: 2592000, // 30d nominal — only used for non-exact ordering/paging heuristics
 };
 
 /** Strict canonical parser used only by exact acquisition. */
@@ -68,12 +78,12 @@ export function parseCanonicalTimeframeExact(
   if (unit === 'M') {
     return { kind: 'ok', value: { domain: 'calendar', count, unit, canonical } };
   }
-  const seconds = count * UNIT_SECONDS[unit];
+  const seconds = count * FIXED_UNIT_SECONDS[unit];
   if (!Number.isSafeInteger(seconds)) {
     return malformed(
       input,
       'timeframe-duration-overflow',
-      `pinery: timeframe duration overflows safe seconds`,
+      'pinery: timeframe duration overflows safe seconds',
     );
   }
   return { kind: 'ok', value: { domain: 'fixed', count, unit, canonical, seconds } };
@@ -173,36 +183,32 @@ export function selectLargestExactDivisor(
   return { kind: 'ok', value: selected };
 }
 
-/** Legacy canonical parser. Kept unchanged for non-magnifier callers. */
-export function parseTimeframe(tf: Timeframe): { n: number; unit: 'm' | 'h' | 'd' | 'w' | 'M' } {
-  const m = /^(\d+)\s*([mhdwM])$/.exec(tf.trim());
-  if (!m)
+/** Parse a legacy/public canonical timeframe into its numeric value and unit. */
+export function parseTimeframe(tf: Timeframe): { n: number; unit: TimeframeUnit } {
+  const match = /^(\d+)\s*([mhdwM])$/.exec(tf.trim());
+  if (!match)
     throw new Error(`pinery: unrecognized timeframe "${tf}" (use e.g. 1m, 15m, 1h, 4h, 1d, 1w)`);
-  return { n: Number(m[1]), unit: m[2] as 'm' | 'h' | 'd' | 'w' | 'M' };
+  const n = Number(match[1]);
+  if (!Number.isSafeInteger(n) || n <= 0)
+    throw new RangeError(`pinery: timeframe "${tf}" magnitude must be a positive safe integer`);
+  return { n, unit: match[2] as TimeframeUnit };
 }
 
-/** Legacy nominal duration helper. Kept unchanged for non-magnifier callers. */
+/** Parse a canonical timeframe into nominal seconds for non-exact callers. */
 export function timeframeSeconds(tf: Timeframe): number {
-  const legacySeconds: Record<string, number> = {
-    m: 60,
-    h: 3600,
-    d: 86400,
-    w: 604800,
-    M: 2592000,
-  };
-  const m = /^(\d+)\s*([mhdwM])$/.exec(tf.trim());
-  if (!m)
-    throw new Error(`pinery: unrecognized timeframe "${tf}" (use e.g. 1m, 15m, 1h, 4h, 1d, 1w)`);
-  const n = Number(m[1]);
-  return n * legacySeconds[m[2]!]!;
+  const { n, unit } = parseTimeframe(tf);
+  const seconds = n * LEGACY_UNIT_SECONDS[unit];
+  if (!Number.isSafeInteger(seconds) || seconds <= 0)
+    throw new RangeError(`pinery: timeframe "${tf}" duration must be a positive safe integer`);
+  return seconds;
 }
 
 /** Legacy canonical → piner converter. */
 export function toPinerTimeframe(tf: Timeframe): string {
-  const m = /^(\d+)\s*([mhdwM])$/.exec(tf.trim());
-  if (!m) return tf;
-  const n = Number(m[1]);
-  switch (m[2]) {
+  if (!/^(\d+)\s*([mhdwM])$/.test(tf.trim())) return tf;
+  const { n, unit } = parseTimeframe(tf);
+  timeframeSeconds(tf);
+  switch (unit) {
     case 'm':
       return String(n);
     case 'h':
@@ -213,13 +219,11 @@ export function toPinerTimeframe(tf: Timeframe): string {
       return n === 1 ? 'W' : `${n}W`;
     case 'M':
       return n === 1 ? 'M' : `${n}M`;
-    default:
-      return tf;
   }
 }
 
 /** Minutes → canonical token, for the round trip out of piner's minute-based tf strings. */
-const MINUTES_TO_CANONICAL: Record<number, Timeframe> = {
+const MINUTES_TO_CANONICAL: Readonly<Record<number, Timeframe>> = {
   1: '1m',
   3: '3m',
   5: '5m',
@@ -234,22 +238,44 @@ const MINUTES_TO_CANONICAL: Record<number, Timeframe> = {
 };
 
 /**
- * Legacy inverse converter. Its seconds→1m clamp intentionally remains for
- * existing request.security callers; exact acquisition uses the strict helper above.
+ * Inverse of `toPinerTimeframe`: map a piner timeframe string back to a canonical
+ * pinery token so it can be fetched from a provider. Handles minute counts
+ * (`"1"`, `"60"`), day/week/month letters (`"D"`, `"1W"`, `"3M"`), and clamps
+ * sub-minute/seconds (`"1S"`) to `"1m"` (pinery's finest). Returns `null` for an
+ * empty/auto timeframe or an unsafe magnitude. Used to resolve shared data
+ * dependencies; exact acquisition uses the strict helpers above.
  */
 export function pinerTimeframeToCanonical(pinerTf: string): Timeframe | null {
   const tf = pinerTf.trim();
   if (tf === '') return null;
-  if (/^\d*S$/i.test(tf)) return '1m';
+  const seconds = /^(\d*)S$/i.exec(tf);
+  if (seconds) {
+    const n = seconds[1] ? Number(seconds[1]) : 1;
+    return Number.isSafeInteger(n) && n > 0 ? '1m' : null;
+  }
   const letter = /^(\d*)([DWM])$/.exec(tf);
   if (letter) {
     const n = letter[1] ? Number(letter[1]) : 1;
+    if (!Number.isSafeInteger(n) || n <= 0) return null;
     const unit = letter[2] === 'D' ? 'd' : letter[2] === 'W' ? 'w' : 'M';
-    return `${n}${unit}`;
+    const canonical = `${n}${unit}`;
+    try {
+      timeframeSeconds(canonical);
+      return canonical;
+    } catch {
+      return null;
+    }
   }
   if (/^\d+$/.test(tf)) {
-    const min = Number(tf);
-    return MINUTES_TO_CANONICAL[min] ?? `${min}m`;
+    const minutes = Number(tf);
+    if (!Number.isSafeInteger(minutes) || minutes <= 0) return null;
+    const canonical = MINUTES_TO_CANONICAL[minutes] ?? `${minutes}m`;
+    try {
+      timeframeSeconds(canonical);
+      return canonical;
+    } catch {
+      return null;
+    }
   }
   return null;
 }
@@ -281,4 +307,50 @@ function unsupportedTick(input: string): ExactTimeframeResult<never> {
 
 function malformed(input: string, code: string, message: string): ExactTimeframeResult<never> {
   return { kind: 'malformed', code, input, message };
+}
+
+/**
+ * Resolve a `request.security_lower_tf` timeframe to the canonical TF to fetch: the
+ * finer TF strictly below the chart TF; clamps sub-minute to `1m`; returns null when
+ * the chart is already at the finest TF (the request degrades to []).
+ *
+ * Shared by every host that resolves piner's data dependencies (pinerun's scans and
+ * pinelive's forward runner) so backtest and live plan identical fetches.
+ */
+export function resolveLowerFetchTf(rawPinerTf: string, chartTf: Timeframe): Timeframe | null {
+  const canon = pinerTimeframeToCanonical(rawPinerTf) ?? '1m';
+  const chartSec = timeframeSeconds(chartTf);
+  let sec: number;
+  try {
+    sec = timeframeSeconds(canon);
+  } catch {
+    return chartSec > 60 ? '1m' : null;
+  }
+  if (sec < chartSec) return canon;
+  return chartSec > 60 ? '1m' : null;
+}
+
+/** Fixed-duration aliases compare by seconds; calendar months compare only to calendar months. */
+function sameTimeframe(a: Timeframe, b: Timeframe): boolean {
+  const left = parseTimeframe(a);
+  const right = parseTimeframe(b);
+  if (left.unit === 'M' || right.unit === 'M')
+    return left.unit === right.unit && left.n === right.n;
+  return timeframeSeconds(a) === timeframeSeconds(b);
+}
+
+/**
+ * Resolve a plain same-symbol `request.security` timeframe to the canonical TF to fetch, or null
+ * when it is the chart's own TF (piner passes it through) or unknown. Unlike `resolveLowerFetchTf`,
+ * this returns the exact requested TF (finer or higher) with no clamping, so the real series is
+ * fetched instead of resampling the chart's own bars.
+ */
+export function resolveSameSymbolFetchTf(rawPinerTf: string, chartTf: Timeframe): Timeframe | null {
+  const canon = pinerTimeframeToCanonical(rawPinerTf);
+  if (!canon) return null;
+  try {
+    return sameTimeframe(canon, chartTf) ? null : canon;
+  } catch {
+    return null;
+  }
 }

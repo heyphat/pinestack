@@ -47,7 +47,10 @@ jobs:
       - name: Build all pinetop target binaries
         run: bun scripts/build-bin.ts all --product pinetop
 
-      - name: Verify both binaries self-report this tag
+      - name: Build all pinelive target binaries
+        run: bun scripts/build-bin.ts all --product pinelive
+
+      - name: Verify every binary self-reports this tag
         # The runner is linux-x64, so the cross-built asset for that target is
         # directly executable — no need to rebuild a host copy. Catches a missed
         # version bump before anything is published, which is the one release
@@ -55,7 +58,7 @@ jobs:
         run: |
           set -eu
           tag="${GITHUB_REF_NAME#v}"
-          for bin in pinerun pinetop; do
+          for bin in pinerun pinetop pinelive; do
             got=$("./dist/$bin-linux-x64" --version | head -1)
             echo "$got"
             case "$got" in
@@ -68,9 +71,9 @@ jobs:
 
       - name: Checksums
         working-directory: dist
-        # One manifest covering both binaries — `<bin> upgrade` resolves its own
+        # One manifest covering every binary — `<bin> upgrade` resolves its own
         # asset from this file, so an asset missing here cannot self-update.
-        run: sha256sum pinerun-* pinetop-* > checksums.txt
+        run: sha256sum pinerun-* pinetop-* pinelive-* > checksums.txt
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -78,5 +81,6 @@ jobs:
           files: |
             dist/pinerun-*
             dist/pinetop-*
+            dist/pinelive-*
             dist/checksums.txt
           generate_release_notes: true

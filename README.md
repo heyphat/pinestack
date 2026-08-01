@@ -1,16 +1,17 @@
 # pinestack
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](./LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/AGPL_v3-blue.svg)](./LICENSE)
 
-A programmable, parallel execution surface for the [piner](https://github.com/heyphat/piner)
-Pine Script v6 engine. Where TradingView keeps Pine locked inside one chart, one
-symbol, one timeframe, pinestack turns the engine into a headless fan-out you can
-script: scan one indicator or strategy across hundreds of symbols, backtest a
-strategy into a full tearsheet, and sweep parameter grids — all off the
-deterministic piner core.
+A programmable, parallel execution surface for the
+[piner](https://github.com/heyphat/piner) Pine Script v6 engine. Where
+TradingView keeps Pine inside one chart, one symbol, and one timeframe,
+pinestack turns the engine into a headless stack for scanning universes,
+backtesting strategies, sweeping parameters, validating walk-forward windows,
+combining portfolios, and replaying strategies toward broker execution.
 
 This is the "terminal" layer around the engine. piner stays a pure, browser-safe
-library; pinestack adds the data, orchestration, and interactive rings on top.
+library; pinestack adds the data, orchestration, interactive, and
+forward-execution rings on top.
 
 Two ways to drive it: `pinerun`, the one-shot CLI, and `pinetop`, a terminal UI
 over that CLI for when you are iterating on the same script and want the source
@@ -50,22 +51,31 @@ against the release's `checksums.txt`, and swaps the executable atomically
 
 `pinetop` spawns `pinerun` for every number it shows, so keep both current.
 
+> **Pinelive is not installed by default.** Releases also carry a standalone
+> `pinelive` binary (the forward runner), but the installer only fetches it with
+> an explicit opt-in — `PINESTACK_BINS="pinerun pinetop pinelive"` — because its
+> Tiger adapters are offline-tested only and not sandbox- or production-approved.
+> Paper is its default broker. See the
+> [quick start](./packages/pinelive/README.md#paper-quick-start).
+
 Prefer to build them yourself? See [Getting started](#getting-started) below, then
 `bun run build:bin --install`.
 
 ## Packages
 
-| Package                                  | Role                                                                                                                                                                                                                                                | Entry points                                                                |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| [`@heyphat/pinery`](./packages/pinery)   | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache.                                 | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                    |
-| [`@heyphat/pinerun`](./packages/pinerun) | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI) |
-| [`@heyphat/pinetop`](./packages/pinetop) | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command plus a vim editor for the `.pine`, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload. | `@heyphat/pinetop`, `pinetop` (TUI)                                         |
+| Package                                    | Role                                                                                                                                                                                                                                                | Entry points                                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| [`@heyphat/pinery`](./packages/pinery)     | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache.                                 | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                                     |
+| [`@heyphat/pinerun`](./packages/pinerun)   | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI)                  |
+| [`@heyphat/pinetop`](./packages/pinetop)   | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command plus a vim editor for the `.pine`, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload. | `@heyphat/pinetop`, `pinetop` (TUI)                                                          |
+| [`@heyphat/pinelive`](./packages/pinelive) | **Forward-execution layer.** Closed-bar runner, exact broker position mirror, PaperBroker, Tiger execution adapters, JSONL ledger, parity, and broker conformance utilities.                                                                        | `@heyphat/pinelive`, `@heyphat/pinelive/node`, `@heyphat/pinelive/testing`, `pinelive` (CLI) |
 
 ```
 piner            (engine — separate repo, pure, browser-safe)
   ▲   ▲
   │   └── @heyphat/pinery   depends on piner (implements DataFeed / Bar)
-  │            ▲
+  │            ▲    ▲
+  │            │    └── @heyphat/pinelive   depends on piner + pinery (forward execution)
   └────────────┴── @heyphat/pinerun   depends on piner + pinery (orchestrates)
                        ▲        ▲
                        │        └── @heyphat/pinetop   spawns the pinerun CLI
@@ -73,11 +83,12 @@ piner            (engine — separate repo, pure, browser-safe)
                        └── consumers: the pinerun CLI, a charting frontend, your scripts
 ```
 
-`piner` is declared a **peer dependency** of all three packages, so there is only
+`piner` is declared a **peer dependency** of all four packages, so there is only
 ever one engine copy in a consumer's tree. The `@heyphat/pinery`,
-`@heyphat/pinerun` and `@heyphat/pinetop` names describe workspace/API entry
-points; pinestack's release artifacts are the self-contained `pinerun` and
-`pinetop` binaries above, not separately published npm workspace packages.
+`@heyphat/pinerun`, `@heyphat/pinetop` and `@heyphat/pinelive` names describe
+workspace/API entry points; pinestack's release artifacts are the self-contained
+`pinerun` and `pinetop` binaries above, not separately published npm workspace
+packages.
 
 `pinetop` deliberately does **not** link the engine: it builds argv, spawns
 `pinerun … --json`, and renders the result. That keeps one execution path, so the
@@ -85,93 +96,37 @@ numbers on screen and the numbers from the printed command cannot disagree.
 
 ## Repository layout
 
-```
+```text
 pinestack/
 ├── package.json              workspaces root (packages/*)
+├── bun.lock                  exact dependency + workspace metadata
 ├── tsconfig.base.json        shared compiler options (strict, ES2022, bundler res)
 ├── tsconfig.json             solution file: references every package (tsc -b)
-├── examples/
-│   ├── rsi.pine              sample indicator used by the scan demo
-│   ├── sma-cross-param.pine  MA crossover, parameterized (scan + sweep demo)
-│   ├── rsi-mean-reversion.pine   RSI mean-reversion strategy (parameterized)
-│   ├── bollinger-breakout.pine   Bollinger-band breakout strategy (parameterized)
-│   ├── macd.pine             MACD crossover strategy (parameterized)
-│   └── rs-vs-eth.pine        cross-symbol request.security demo
+├── scripts/
+│   └── install.sh            release installer (pinerun + pinetop)
+├── examples/                 .pine strategies + checked-in CSV replay fixtures
+├── docs/                     command, portfolio, and forward-testing guides
 └── packages/
-    ├── pinery/               @heyphat/pinery  — data layer
-    │   ├── src/
-    │   │   ├── index.ts          browser-safe barrel
-    │   │   ├── provider.ts       HistoryProvider contract, toDataFeed, applyRange
-    │   │   ├── timeframe.ts       canonical timeframe parsing + piner mapping
-    │   │   ├── http.ts            shared retrying JSON GET
-    │   │   ├── symbols.ts         crypto pair normalization (OKX/Kraken)
-    │   │   ├── node.ts            @heyphat/pinery/node — on-disk cache
-    │   │   └── adapters/
-    │   │       ├── binance.ts     Binance spot + USDⓈ-M futures klines
-    │   │       ├── okx.ts         OKX spot + swap candles
-    │   │       ├── kraken.ts      Kraken spot OHLC
-    │   │       ├── alpaca.ts      Alpaca US-equities bars (key + secret)
-    │   │       ├── massive.ts     Massive US-equities aggregates (api key)
-    │   │       ├── static.ts      in-memory provider + barsFromCsv
-    │   │       └── csv.ts         local CSV-file provider (Node-only, /node entry)
-    │   └── README.md
-    ├── pinerun/              @heyphat/pinerun — orchestration layer
-    │   ├── src/
-    │   │   ├── index.ts          browser-safe barrel
-    │   │   ├── job.ts            Job model
-    │   │   ├── result.ts         RunResult contract
-    │   │   ├── hash.ts           jobHash — determinism key
-    │   │   ├── execute.ts        executeJob — the pure run primitive
-    │   │   ├── runner.ts         Runner interface, fanOut, LocalRunner
-    │   │   ├── rank.ts           extractor/ranker grammar
-    │   │   ├── scan.ts           the scan fan-out
-    │   │   ├── params.ts         sweep axis grammar (cartesian input expansion)
-    │   │   ├── sweep.ts          the parameter-sweep fan-out
-    │   │   ├── backtest.ts       single-strategy deep run (tearsheet data)
-    │   │   ├── walkforward.ts    out-of-sample / walk-forward validation
-    │   │   ├── chart.ts          braille price/equity/drawdown builders
-    │   │   ├── tearsheet.ts      monthly grids, top drawdowns, histogram
-    │   │   ├── export.ts         CSV + equity/drawdown plot builders
-    │   │   ├── scaffold.ts       `init` starter-strategy source builders
-    │   │   ├── pool.ts           WorkerPoolRunner (node:worker_threads)
-    │   │   ├── worker-entry.ts   worker thread entry
-    │   │   ├── node.ts           @heyphat/pinerun/node barrel
-    │   │   └── cli.ts            the `pinerun` CLI
-    │   ├── test/
-    │   └── README.md
-    └── pinetop/              @heyphat/pinetop — interactive layer (TUI)
-        ├── src/
-        │   ├── index.ts          public barrel
-        │   ├── cli.ts            the `pinetop` entry point
-        │   ├── app.ts            router, event loop, the only spawn site
-        │   ├── state.ts          AppState (pages, flags, overrides, run, ask)
-        │   ├── keymap.ts         the normative keymap; `?` is generated from it
-        │   ├── terminal.ts       alt screen, raw mode, key decoding
-        │   ├── frame.ts          tab bar, breadcrumb, command line, hints
-        │   ├── overlays.ts       help, run dialog, palette, filter, ask drawer
-        │   ├── scripts.ts        .pine discovery for the STRATEGIES pane
-        │   ├── persist.ts        per-project flag state (.pinetop/)
-        │   ├── flags/            flag schema, FlagModel → argv, Pine input titles
-        │   ├── render/           cell grid, panes, tables, theme, formatters
-        │   ├── run/              spawn pinerun --json, engine log, session log
-        │   ├── views/            report JSON → renderable rows
-        │   ├── pages/            one module per page (7)
-        │   └── ask/              the {answer, proposal, action} contract
-        ├── test/
-        ├── design.md            the design document behind it
-        └── README.md
+    ├── pinery/               @heyphat/pinery   — providers in src/adapters/, cache behind /node
+    ├── pinerun/              @heyphat/pinerun  — jobs, runners, commands, the pinerun CLI
+    ├── pinelive/             @heyphat/pinelive — core mirror/ledger, Paper + Tiger brokers
+    └── pinetop/              @heyphat/pinetop  — TUI pages, flag schema, spawns pinerun --json
 ```
+
+The detailed public APIs live in each package README; this tree shows ownership
+boundaries rather than every source file.
 
 ## Requirements
 
-- [Bun](https://bun.sh) ≥ 1.2 (used for install, test, build, and running the CLI).
-- `piner` (`@heyphat/piner`) available as a peer — installed from the npm
-  registry by the workspace root (`bun install`).
+Source development uses **Bun 1.2.5**, matching the exact mainline CI and release
+toolchain. The workspace installs `@heyphat/piner` from the npm registry as a
+peer dependency.
 
-## Getting started
+The standalone `pinerun` binary does not require Bun, Node, or npm at runtime.
 
-With `pinerun` on your PATH (see [Install](#install)), scaffold a starter strategy
-and backtest it on one symbol — no API key needed for crypto:
+## Getting started with `pinerun`
+
+Scaffold a starter strategy and backtest it on hourly BTC data:
 
 ```bash
 pinerun init strategy.pine
@@ -226,14 +181,27 @@ pinetop      # 1–8 pages · tab panes · ↵ edit a flag · r ↵ run · ? key
              # page 1: the source, vim keys — i inserts, :w writes, tab leaves
 ```
 
+## Paper forward replay
+
+Pinelive can replay the checked-in BTC CSV through PaperBroker without contacting
+a data or brokerage service. From a source checkout, follow the
+[Paper quick start](./packages/pinelive/README.md#paper-quick-start): it uses
+`examples/rsi-mean-reversion.pine`, `examples/data`, a 20-bar warmup, and the
+source CLI.
+
+Tiger adapters are covered by offline injected-facade tests only. No
+credentialed data, entitlement, order, cancellation, or fill workflow has been
+validated, and the adapters are not sandbox- or production-approved.
+
 ### Developing from source
 
-Requires [Bun](https://bun.sh) ≥ 1.2.
+Requires [Bun](https://bun.sh) 1.2.5, matching CI and the release toolchain.
 
 ```bash
-bun install        # links workspaces + the piner peer
-bun test           # runs every package's test suite
-bun run typecheck  # tsc -b across every package
+bun install --frozen-lockfile   # links workspaces + the piner peer
+bun test                        # runs every package's test suite
+bun run typecheck               # tsc -b across every package
+bun packages/pinelive/src/cli.ts --help   # the forward CLI (also builds standalone)
 ```
 
 Build a standalone binary from your checkout and drop it on your PATH with
@@ -243,20 +211,36 @@ anywhere).
 
 ## Design principles
 
-1. **piner stays pure.** No I/O, no orchestration leaks into the engine. pinery,
-   pinerun and pinetop are the rings around it.
-2. **Determinism is the moat.** A piner run is a pure function of
+1. **piner stays pure.** Parsing, code generation, strategy semantics, and the
+   broker model remain in the engine; I/O and orchestration stay in pinestack.
+2. **Data has one owner.** Pinery supplies historical and resolved forward data.
+   Pinerun and pinelive consume its contracts instead of maintaining parallel
+   fetch/replay implementations.
+3. **Determinism is the moat.** A piner run is a pure function of
    `(source, bars, inputs, backend)`. That makes runs cacheable (`jobHash`),
-   reproducible, and trivially parallel — the things TradingView can't offer.
-3. **Browser-safe core, Node extras behind `/node`.** pinery and pinerun keep Node
-   built-ins out of a browser bundle; filesystem cache and worker threads live in
-   the separate `/node` entry. The same `scan` runs in the CLI (worker threads)
-   or later in a browser (Web Workers) over the identical `Runner` contract.
-4. **One engine copy.** `piner` is a peer dependency everywhere.
-5. **One execution path.** The UI does not re-implement the engine or the CLI: it
+   reproducible, and trivially parallel. Forward execution adds durable binding,
+   order identity, and ledger evidence around the deterministic strategy state.
+4. **Browser-safe cores, Node extras behind `/node`.** Filesystem caching, CSV
+   construction, worker threads, JSONL, and official SDK adapters stay out of
+   browser entry points.
+5. **One engine copy.** `piner` is a peer dependency everywhere.
+6. **One execution path.** The UI does not re-implement the engine or the CLI: it
    spawns `pinerun --json` and reuses the CLI's own chart and table renderers.
    A number can therefore never differ between what pinetop shows and what the
    command it prints would produce.
+7. **Execution fails closed.** Exact instrument identity, arming, metadata,
+   secondary-feed health, and unresolved-order state are checked before broker
+   correction.
+
+## Documentation
+
+- [CLI command reference](./docs/README.md)
+- [Pinery data API](./packages/pinery/README.md)
+- [Pinerun analysis API](./packages/pinerun/README.md)
+- [Pinetop TUI](./packages/pinetop/README.md)
+- [Pinelive source quick start](./packages/pinelive/README.md)
+- [Forward-testing guide](./docs/pinelive.md)
+- [Release runbook](./RELEASING.md)
 
 ## License
 

@@ -49,7 +49,15 @@ coverage/
 .claude/worktrees/
 .claude/settings.local.json
 
+
 # internal design/planning docs — not part of the public release
 # (promote individual files back into git when ready to publish them)
 dev-docs/
+
+# pinelive local ledgers and credential-bearing config
+.pinelive/
+pinelive*.local.*
+
 semantic-review
+.tigeropen
+tiger_openapi_config.properties

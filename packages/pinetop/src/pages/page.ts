@@ -25,7 +25,7 @@ export interface PageContext {
 
 export interface Page {
   id: PageId;
-  /** The command this page spawns; absent for TRADES, which is a view (§4.2.b). */
+  /** The command this page spawns; absent for LOGS, which is a view (§4.2.b). */
   command?: CommandId;
   /** Focus ring order for `tab` / `shift-tab`. */
   panes: (state: AppState) => string[];

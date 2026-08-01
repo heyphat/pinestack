@@ -263,4 +263,45 @@ test('a bar with an unresolved logical order is never pruned', async () => {
   expect(
     targetScheduler.state.unresolvedLogicalOrderIds[0]!.startsWith('unresolved-decision'),
   ).toBe(true);
+  // The protected bar is an explicit exception, not a blocker: only it plus the newest
+  // configured retention-window bar remain in memory.
+  expect(targetScheduler.state.retainedBars).toBeLessThanOrEqual(2);
+  expect(targetScheduler.state.retainedDecisions).toBeLessThanOrEqual(2);
+});
+
+test('restart immediately compacts resolved history to the configured retention window', async () => {
+  const broker = paper();
+  const memory = new MemoryLedger();
+  const first = scheduler(broker, memory, { retainBars: 1 });
+
+  for (let barIndex = 1; barIndex <= 5; barIndex++) {
+    broker.mark('X', 100 + barIndex, barIndex * 60);
+    const result = await first.schedule({
+      target: barIndex % 2,
+      context: { ...context(barIndex * 60), sequence: barIndex },
+      cursor: barIndex * 60,
+      update: intrabarUpdate(`restart-final-${barIndex}`, 1, true),
+      decisionId: `restart-decision-${barIndex}`,
+    });
+    expect(result.status).toBe('completed');
+  }
+
+  const recovery = recoverLedger(memory.events);
+  expect(recovery.decisions.size).toBe(5); // Durable history remains complete.
+
+  const restarted = scheduler(paper(), new MemoryLedger(), { recovery, retainBars: 1 });
+  expect(restarted.state.retainedBars).toBe(1);
+  expect(restarted.state.retainedDecisions).toBe(1);
+
+  // Compaction must preserve the latest stream admission gate, so an evicted stale duplicate
+  // fails closed rather than being re-journaled with a reused durable identity.
+  await expect(
+    restarted.schedule({
+      target: 1,
+      context: { ...context(60), sequence: 99 },
+      cursor: 60,
+      update: intrabarUpdate('restart-final-1', 1, true),
+      decisionId: 'restart-decision-1',
+    }),
+  ).rejects.toThrow('authoritative final for the same or newer bar');
 });

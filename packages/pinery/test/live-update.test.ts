@@ -858,3 +858,26 @@ test('ReplayProvider return bounds a pending public liveBars read', async () => 
   });
   await expect(pendingRead).resolves.toMatchObject({ done: true });
 });
+
+test('BarUpdateValidator applies volume tolerance directly to duplicate finals', () => {
+  const summedVolume = [0.1, 0.2, 0.1, 0.2, 0.1].reduce((sum, value) => sum + value, 0);
+  expect(summedVolume).not.toBe(0.7);
+
+  const tolerant = new BarUpdateValidator({ timeframe: '1m', source: native });
+  tolerant.accept(update(0, 1, true, 1_000, { volume: summedVolume }));
+  expect(tolerant.accept(update(0, 1, true, 1_001, { volume: 0.7 }))).toBeUndefined();
+  expect(() => tolerant.accept(update(0, 2, true, 1_002, { volume: 0.8 }))).toThrow(
+    'conflicting authoritative finals',
+  );
+
+  const nearZero = new BarUpdateValidator({ timeframe: '1m', source: native });
+  nearZero.accept(update(0, 1, true, 2_000, { volume: 1e-12 }));
+  expect(nearZero.accept(update(0, 1, true, 2_001, { volume: 1e-12 + 1e-21 }))).toBeUndefined();
+
+  const zero = new BarUpdateValidator({ timeframe: '1m', source: native });
+  zero.accept(update(0, 1, true, 3_000, { volume: 0 }));
+  expect(zero.accept(update(0, 1, true, 3_001, { volume: 0 }))).toBeUndefined();
+  expect(() => zero.accept(update(0, 2, true, 3_002, { volume: Number.MIN_VALUE }))).toThrow(
+    'conflicting authoritative finals',
+  );
+});

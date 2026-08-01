@@ -671,33 +671,78 @@ export async function runIntrabarServer(
   return result;
 }
 
-interface ComputeDecisionJournalOptions {
+export interface ComputeDecisionJournalOptions {
   readonly writer: SequencedLedger;
   readonly lease?: ExecutionLease;
   readonly leaseRecorded: boolean;
   readonly recovery: LedgerRecoveryState;
   readonly binding: RunInstrumentBinding;
   readonly strategyId: string;
+  readonly retainBars?: number;
 }
 
-class ComputeDecisionJournal {
+/** Internal compute-only durable dedupe journal; exported from this module for focused tests. */
+export class ComputeDecisionJournal {
   readonly perBar = new Map<string, RecoveredBarCounters>();
   readonly decisionIds = new Set<string>();
   initialized = false;
+  private readonly writer: SequencedLedger;
+  private readonly lease?: ExecutionLease;
+  private readonly binding: RunInstrumentBinding;
+  private readonly strategyId: string;
+  private readonly retainBars: number;
+  private readonly recoveryLastSequence: number;
+  private readonly recoveryLastFinalCursor?: LedgerRecoveryState['lastFinalCursor'];
+  private readonly recoveryUnresolvedLogicalOrderIds: string[];
+  private readonly recoveryBindingRecorded: boolean;
   private leaseRecorded: boolean;
   /** Bounded retention (in-memory only; the durable ledger is never pruned). */
   private readonly barDecisions = new Map<string, Set<string>>();
   private readonly barTimes: number[] = [];
+  private prunedThroughBarTime?: number;
 
-  constructor(private readonly options: ComputeDecisionJournalOptions) {
+  constructor(options: ComputeDecisionJournalOptions) {
+    this.writer = options.writer;
+    this.lease = options.lease;
+    this.binding = options.binding;
+    this.strategyId = options.strategyId;
+    this.retainBars = options.retainBars ?? DEFAULT_DECISION_RETENTION_BARS;
+    if (!Number.isSafeInteger(this.retainBars) || this.retainBars <= 0)
+      throw new RangeError('compute journal retainBars must be a positive safe integer');
     this.leaseRecorded = options.leaseRecorded;
+    this.recoveryLastSequence = options.recovery.lastSequence;
+    this.recoveryLastFinalCursor = options.recovery.lastFinalCursor;
+    this.recoveryUnresolvedLogicalOrderIds = [...options.recovery.unresolvedIntents.keys()].sort();
+    this.recoveryBindingRecorded = options.recovery.binding != null;
+
     for (const [key, value] of options.recovery.perBar) this.perBar.set(key, { ...value });
-    for (const key of options.recovery.decisions.keys()) this.decisionIds.add(key);
+    for (const [decisionId, decision] of options.recovery.decisions) {
+      const identity = decision.accepted ?? decision.skipped[0];
+      if (!identity) continue;
+      if (identity.bindingId !== this.binding.id)
+        throw new Error('recovered compute decision does not match the active binding');
+      this.decisionIds.add(decisionId);
+      this.indexDecision(identity.barTime, decisionId);
+    }
+    this.prune();
+    for (const key of this.perBar.keys()) {
+      if (!this.barDecisions.has(key)) this.perBar.delete(key);
+    }
+  }
+
+  get state(): { retainedDecisions: number; retainedBars: number; prunedThroughBarTime?: number } {
+    return {
+      retainedDecisions: this.decisionIds.size,
+      retainedBars: this.barDecisions.size,
+      ...(this.prunedThroughBarTime == null
+        ? {}
+        : { prunedThroughBarTime: this.prunedThroughBarTime }),
+    };
   }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    const { writer, recovery, binding, lease } = this.options;
+    const { writer, lease } = this;
     if (lease && !lease.snapshot) throw new Error('compute journal lease is not acquired');
     if (lease && !this.leaseRecorded) {
       const snapshot = lease.snapshot!;
@@ -713,11 +758,14 @@ class ComputeDecisionJournal {
     await writer.append({
       recordType: 'recovery',
       action: 'loaded',
-      sourceLastSequence: recovery.lastSequence,
-      ...(recovery.lastFinalCursor == null ? {} : { lastFinalCursor: recovery.lastFinalCursor }),
-      unresolvedLogicalOrderIds: [...recovery.unresolvedIntents.keys()].sort(),
+      sourceLastSequence: this.recoveryLastSequence,
+      ...(this.recoveryLastFinalCursor == null
+        ? {}
+        : { lastFinalCursor: this.recoveryLastFinalCursor }),
+      unresolvedLogicalOrderIds: this.recoveryUnresolvedLogicalOrderIds,
     });
-    if (!recovery.binding) await writer.append({ recordType: 'binding', binding });
+    if (!this.recoveryBindingRecorded)
+      await writer.append({ recordType: 'binding', binding: this.binding });
     this.initialized = true;
   }
 
@@ -727,21 +775,29 @@ class ComputeDecisionJournal {
     detail?: string,
   ): Promise<void> {
     if (!this.initialized) throw new Error('compute journal is not initialized');
-    if (this.decisionIds.has(evaluation.decisionId!)) return;
-    const { writer, binding, strategyId } = this.options;
+    const decisionId = evaluation.decisionId!;
+    if (this.decisionIds.has(decisionId)) return;
     const barTime = evaluation.context.barTime;
-    const key = `${binding.id}:${barTime}`;
+    if (this.prunedThroughBarTime != null && barTime <= this.prunedThroughBarTime)
+      throw new RangeError('compute decision predates the retained dedupe horizon');
+    const key = `${this.binding.id}:${barTime}`;
     const counter = this.perBar.get(key) ?? { targets: 0, intents: 0 };
     this.perBar.set(key, counter);
-    await writer.append({
+    await this.writer.append({
       recordType: 'evaluation.skipped',
-      ...decisionFields(evaluation, strategyId),
+      ...decisionFields(evaluation, this.strategyId),
       reason,
       targetOrdinal: counter.targets + 1,
       ...(detail ? { detail } : {}),
     });
     counter.targets++;
-    this.decisionIds.add(evaluation.decisionId!);
+    this.decisionIds.add(decisionId);
+    this.indexDecision(barTime, decisionId);
+    if (evaluation.update?.authoritativeFinal) this.prune();
+  }
+
+  private indexDecision(barTime: number, decisionId: string): void {
+    const key = `${this.binding.id}:${barTime}`;
     let owned = this.barDecisions.get(key);
     if (!owned) {
       owned = new Set();
@@ -753,30 +809,30 @@ class ComputeDecisionJournal {
         this.barTimes.sort((left, right) => left - right);
       }
     }
-    owned.add(evaluation.decisionId!);
-    if (evaluation.update?.authoritativeFinal) this.prune();
+    owned.add(decisionId);
   }
 
-  /** Keep the newest DEFAULT_DECISION_RETENTION_BARS bars of dedup state in memory. */
   private prune(): void {
-    while (this.barTimes.length > DEFAULT_DECISION_RETENTION_BARS) {
+    while (this.barTimes.length > this.retainBars) {
       const oldest = this.barTimes.shift()!;
-      const key = `${this.options.binding.id}:${oldest}`;
-      for (const decisionId of this.barDecisions.get(key) ?? []) this.decisionIds.delete(decisionId);
+      const key = `${this.binding.id}:${oldest}`;
+      for (const decisionId of this.barDecisions.get(key) ?? [])
+        this.decisionIds.delete(decisionId);
       this.barDecisions.delete(key);
       this.perBar.delete(key);
+      this.prunedThroughBarTime = Math.max(this.prunedThroughBarTime ?? oldest, oldest);
     }
   }
 
   async stop(): Promise<void> {
-    await this.options.writer.flush();
+    await this.writer.flush();
   }
 
   async releaseLease(): Promise<void> {
-    const lease = this.options.lease;
+    const lease = this.lease;
     if (!lease?.snapshot) return;
     try {
-      await releaseRecordedLease(this.options.writer, lease, this.leaseRecorded);
+      await releaseRecordedLease(this.writer, lease, this.leaseRecorded);
     } finally {
       this.leaseRecorded = false;
     }

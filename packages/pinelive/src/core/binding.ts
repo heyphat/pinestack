@@ -64,6 +64,10 @@ export function createRunInstrumentBinding(
     if (brokerInstrument.pointValue == null)
       throw new InstrumentBindingError('broker metadata is missing pointValue');
     compare('pointValue', brokerInstrument.pointValue, resolved.pointValue);
+  } else if (brokerInstrument.pointValue != null) {
+    // compare is also the generic positivity/finiteness gate. A custom broker's
+    // execution-only multiplier must pass it even when there is no provider value.
+    compare('pointValue', brokerInstrument.pointValue, brokerInstrument.pointValue);
   }
   // The broker instrument's pointValue scales PnL even when the data provider reports none,
   // so the binding must attest whichever value execution will actually use.

@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import * as intrabarApi from '@heyphat/pinelive/intrabar';
 import {
   CircuitBreaker,
   IntrabarRunner,
@@ -75,6 +76,7 @@ test('browser-safe and Node entry points expose the v2 production API', () => {
   expect(typeof TargetScheduler).toBe('function');
   expect(typeof CircuitBreaker).toBe('function');
   expect(typeof recoverLedger).toBe('function');
+  expect(intrabarApi).not.toHaveProperty('ComputeDecisionJournal');
 
   expect(typeof JsonlLedger).toBe('function');
   expect(typeof NodeIntrabarPersistence).toBe('function');

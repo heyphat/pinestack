@@ -9,10 +9,18 @@ import {
 } from '@heyphat/pinery';
 import { PaperBroker, type MarkableBroker } from '../src/brokers/paper.js';
 import type { Broker, Capabilities, ExactOrderLookupResult } from '../src/core/broker.js';
+import type { RunInstrumentBinding } from '../src/core/binding.js';
 import { InMemoryExecutionLease, type ExecutionLease } from '../src/core/lease.js';
-import type { LedgerEventV3, LedgerRecord, LedgerSink } from '../src/core/ledger.js';
+import {
+  MemoryLedger,
+  SequencedLedger,
+  type LedgerEventV3,
+  type LedgerRecord,
+  type LedgerSink,
+} from '../src/core/ledger.js';
 import { recoverLedger } from '../src/core/recovery.js';
 import {
+  ComputeDecisionJournal,
   prepareIntrabarRun,
   runIntrabarServer,
   type IntrabarBrokerFactory,
@@ -510,4 +518,88 @@ test('cleanup attempts lease, broker, provider, and ledger teardown after indepe
   expect(trace).toContain('provider:disconnect');
   expect(trace).toContain('ledger:close');
   expect(trace).not.toContain('broker:flatten');
+});
+
+test('compute journal rebuilds and applies its retention horizon on restart', async () => {
+  const binding: RunInstrumentBinding = {
+    id: 'compute-retention-binding',
+    fingerprint: 'compute-retention-binding',
+    strategySymbol: 'ROOT',
+    providerId: 'test-provider',
+    providerHandle: 'test:X',
+    executionSymbol: 'X',
+    qtyStep: 1,
+    minOrderQty: 1,
+    mintick: 0.01,
+    brokerId: 'compute-only',
+  };
+  const evaluation = (barTime: number, index: number) => ({
+    target: 0,
+    cursor: barTime,
+    decisionId: `compute-decision-${index}`,
+    update: {
+      kind: 'intrabar' as const,
+      eventId: `compute-final-${index}`,
+      revision: 1,
+      authoritativeFinal: true,
+      recovered: false,
+      discontinuity: false,
+    },
+    context: {
+      strategySymbol: binding.strategySymbol,
+      executionSymbol: binding.executionSymbol,
+      bindingId: binding.id,
+      strategyId: 'strategy',
+      timeframe: '1m',
+      barTime,
+      sequence: index,
+    },
+  });
+
+  const durable = new MemoryLedger();
+  const firstWriter = new SequencedLedger(durable, {
+    runId: 'compute-retention-run',
+    executionId: 'compute-retention-execution',
+  });
+  const first = new ComputeDecisionJournal({
+    writer: firstWriter,
+    leaseRecorded: false,
+    recovery: recoverLedger([]),
+    binding,
+    strategyId: 'strategy',
+    retainBars: 1,
+  });
+  await first.initialize();
+  for (let index = 1; index <= 5; index++)
+    await first.journal(evaluation(index * 60, index), 'compute-only');
+  expect(first.state).toEqual({
+    retainedDecisions: 1,
+    retainedBars: 1,
+    prunedThroughBarTime: 240,
+  });
+
+  const recovery = recoverLedger(durable.events);
+  expect(recovery.decisions.size).toBe(5); // Durable rows are never pruned.
+  const restartedWriter = new SequencedLedger(new MemoryLedger(), {
+    runId: recovery.runId!,
+    executionId: recovery.executionId!,
+    nextSequence: recovery.nextSequence,
+    lastTimestamp: Date.parse(durable.events.at(-1)!.recordedAt),
+  });
+  const restarted = new ComputeDecisionJournal({
+    writer: restartedWriter,
+    leaseRecorded: false,
+    recovery,
+    binding,
+    strategyId: 'strategy',
+    retainBars: 1,
+  });
+
+  // Recovery rebuilds ownership before pruning instead of leaving all recovered IDs resident.
+  expect(restarted.state).toEqual(first.state);
+  await restarted.initialize();
+  await restarted.journal(evaluation(300, 5), 'compute-only'); // retained duplicate is read-only
+  await expect(restarted.journal(evaluation(60, 1), 'compute-only')).rejects.toThrow(
+    'predates the retained dedupe horizon',
+  );
 });

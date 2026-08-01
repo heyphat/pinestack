@@ -265,6 +265,14 @@ export class TargetScheduler {
   /** Ascending finalizable bar opens per binding, drained by pruneFinalizedBars. */
   private readonly bindingBars = new Map<string, number[]>();
   private readonly retainBars: number;
+  private readonly lease?: ExecutionLease;
+  private readonly binding?: RunInstrumentBinding;
+  private readonly decisionIdFactory?: (evaluation: Readonly<TargetEvaluation>) => string;
+  private readonly recoveredLease?: LedgerRecoveryState['activeLease'];
+  private readonly recoveredLastSequence?: number;
+  private readonly recoveredLastFinalCursor?: LedgerCursor;
+  private readonly recoveredLastFinalDecisionId?: string;
+  private readonly recoveredUnresolvedLogicalOrderIds: string[];
   private attemptTimes: number[] = [];
   private intakeTail: Promise<void> = Promise.resolve();
   private lifecycleTail: Promise<void> = Promise.resolve();
@@ -281,9 +289,12 @@ export class TargetScheduler {
   private lastOperationAt?: number;
   private latestBreakerResetSequence?: number;
 
-  constructor(private readonly options: TargetSchedulerOptions) {
+  constructor(options: TargetSchedulerOptions) {
     if (!options.runId) throw new RangeError('scheduler runId must not be empty');
     this.mirror = options.mirror;
+    this.lease = options.lease;
+    this.binding = options.binding ?? options.recovery?.binding?.binding;
+    this.decisionIdFactory = options.decisionIdFactory;
     this.now = options.now ?? Date.now;
     this.sleep =
       options.sleep ??
@@ -292,6 +303,13 @@ export class TargetScheduler {
     this.retainBars = options.retainBars ?? DEFAULT_DECISION_RETENTION_BARS;
     positiveLimit(this.retainBars, 'retainBars');
     const recovery = options.recovery;
+    this.recoveredLease = recovery?.activeLease;
+    this.recoveredLastSequence = recovery?.lastSequence;
+    this.recoveredLastFinalCursor = recovery?.lastFinalCursor;
+    this.recoveredLastFinalDecisionId = recovery?.lastFinalDecisionId;
+    this.recoveredUnresolvedLogicalOrderIds = recovery
+      ? [...recovery.unresolvedIntents.keys()].sort()
+      : [];
     if (options.binding && recovery && !recovery.binding && recovery.decisions.size > 0)
       throw new RangeError('scheduler cannot add a binding after recovered unbound evaluations');
     this.recoveryRecorded = recovery == null;
@@ -467,7 +485,7 @@ export class TargetScheduler {
     const normalizedEvaluation = { ...evaluation, cursor, update };
     const decisionId =
       evaluation.decisionId ??
-      this.options.decisionIdFactory?.(normalizedEvaluation) ??
+      this.decisionIdFactory?.(normalizedEvaluation) ??
       stableDecisionId(normalizedEvaluation);
     if (!decisionId) throw new RangeError('decisionId must not be empty');
     let resolve!: (result: ScheduledTargetResult) => void;
@@ -506,8 +524,8 @@ export class TargetScheduler {
   }
 
   private async initializeCore(): Promise<void> {
-    const lease = this.options.lease;
-    const recoveredLease = this.options.recovery?.activeLease;
+    const lease = this.lease;
+    const recoveredLease = this.recoveredLease;
     if (recoveredLease && !lease)
       throw new Error('recovery has an active execution lease but no lease was supplied');
     let acquiredHere = false;
@@ -533,33 +551,33 @@ export class TargetScheduler {
         this.leaseRecorded = true;
       }
       if (this.recoveredThresholdLatchPending) {
-        const recovery = this.options.recovery!;
         await this.writer.append({
           recordType: 'breaker',
           state: 'latched',
           reason: 'consecutive-errors',
           consecutiveErrors: this.breaker.snapshot.consecutiveErrors,
-          ...(recovery.lastFinalDecisionId ? { decisionId: recovery.lastFinalDecisionId } : {}),
+          ...(this.recoveredLastFinalDecisionId
+            ? { decisionId: this.recoveredLastFinalDecisionId }
+            : {}),
           detail: 'recovered consecutive-error threshold',
         });
         this.recoveredThresholdLatchPending = false;
       }
       if (!this.recoveryRecorded) {
-        const recovery = this.options.recovery!;
         await this.writer.append({
           recordType: 'recovery',
           action: 'loaded',
-          sourceLastSequence: recovery.lastSequence,
-          ...(recovery.lastFinalCursor == null
+          sourceLastSequence: this.recoveredLastSequence!,
+          ...(this.recoveredLastFinalCursor == null
             ? {}
-            : { lastFinalCursor: recovery.lastFinalCursor }),
-          unresolvedLogicalOrderIds: [...recovery.unresolvedIntents.keys()].sort(),
+            : { lastFinalCursor: this.recoveredLastFinalCursor }),
+          unresolvedLogicalOrderIds: this.recoveredUnresolvedLogicalOrderIds,
         });
         this.recoveryRecorded = true;
       }
       await this.finalizeRecoveredSupersededDecisions();
-      if (this.options.binding && !this.bindingRecorded) {
-        await this.writer.append({ recordType: 'binding', binding: this.options.binding });
+      if (this.binding && !this.bindingRecorded) {
+        await this.writer.append({ recordType: 'binding', binding: this.binding });
         this.bindingRecorded = true;
       }
     } catch (error) {
@@ -782,7 +800,7 @@ export class TargetScheduler {
     }
     try {
       await this.runLifecycle(async () => {
-        const lease = this.options.lease;
+        const lease = this.lease;
         if (!lease?.snapshot) return;
         const snapshot = lease.snapshot;
         try {
@@ -896,9 +914,9 @@ export class TargetScheduler {
       item.resolve({ decisionId: item.decisionId, status: 'skipped', reason: 'breaker-open' });
       return;
     }
-    if (this.options.lease) {
+    if (this.lease) {
       try {
-        await this.options.lease.assertHeld();
+        await this.lease.assertHeld();
       } catch (error) {
         await this.appendSkipped(item, 'lease-unavailable', errorMessage(error));
         item.resolve({
@@ -1564,6 +1582,7 @@ export class TargetScheduler {
       decision.terminalSkipped = true;
       this.recoveredSupersededDecisionIds.shift();
     }
+    this.pruneAllFinalizedBars();
   }
 
   private async completeEvaluation(
@@ -1661,9 +1680,9 @@ export class TargetScheduler {
   }
 
   private async assertLeaseBeforeEffect(item: PendingEvaluation, submitted = false): Promise<void> {
-    if (!this.options.lease) return;
+    if (!this.lease) return;
     try {
-      await this.options.lease.assertHeld();
+      await this.lease.assertHeld();
     } catch (error) {
       await this.latchBreaker(
         'lease-lost',
@@ -1685,7 +1704,7 @@ export class TargetScheduler {
   }
 
   private assertBindingContext(context: ReconcileContext): void {
-    const binding = this.options.binding ?? this.options.recovery?.binding?.binding;
+    const binding = this.binding;
     if (!binding) return;
     if (
       context.bindingId !== binding.id ||
@@ -1792,32 +1811,46 @@ export class TargetScheduler {
    */
   private pruneFinalizedBars(bindingId: string): void {
     const bars = this.bindingBars.get(bindingId);
-    if (!bars) return;
-    while (bars.length > this.retainBars) {
-      const oldest = bars[0]!;
-      const key = ledgerBarKey(bindingId, oldest);
+    if (!bars || bars.length <= this.retainBars) return;
+
+    const firstRetainedIndex = bars.length - this.retainBars;
+    const protectedBars: number[] = [];
+    for (const barTime of bars.slice(0, firstRetainedIndex)) {
+      const key = ledgerBarKey(bindingId, barTime);
       const entry = this.barIndex.get(key);
+      if (entry && this.barIsProtected(entry.decisionIds)) {
+        protectedBars.push(barTime);
+        continue;
+      }
       if (entry) {
-        for (const decisionId of entry.decisionIds) {
-          const decision = this.decisions.get(decisionId);
-          if (!decision) continue;
-          if (decision.logicalOrderIds.some((id) => this.unresolved.has(id))) return;
-          const uncertainty = decision.latestPositionUncertaintySequence;
-          if (
-            uncertainty != null &&
-            (this.latestBreakerResetSequence == null ||
-              this.latestBreakerResetSequence <= uncertainty)
-          )
-            return;
-        }
         for (const decisionId of entry.decisionIds) this.decisions.delete(decisionId);
         for (const eventId of entry.eventIds) this.eventIdToDecisionId.delete(eventId);
         for (const clientId of entry.clientIds) this.clientMappings.delete(clientId);
         this.barIndex.delete(key);
       }
       this.perBar.delete(key);
-      bars.shift();
     }
+    this.bindingBars.set(bindingId, [...protectedBars, ...bars.slice(firstRetainedIndex)]);
+  }
+
+  private barIsProtected(decisionIds: ReadonlySet<string>): boolean {
+    for (const decisionId of decisionIds) {
+      if (this.recoveredSupersededDecisionIds.includes(decisionId)) return true;
+      const decision = this.decisions.get(decisionId);
+      if (!decision) continue;
+      if (decision.logicalOrderIds.some((id) => this.unresolved.has(id))) return true;
+      const uncertainty = decision.latestPositionUncertaintySequence;
+      if (
+        uncertainty != null &&
+        (this.latestBreakerResetSequence == null || this.latestBreakerResetSequence <= uncertainty)
+      )
+        return true;
+    }
+    return false;
+  }
+
+  private pruneAllFinalizedBars(): void {
+    for (const bindingId of this.bindingBars.keys()) this.pruneFinalizedBars(bindingId);
   }
 
   private barCounters(item: Pick<PendingEvaluation, 'context'>): RecoveredBarCounters {
@@ -1834,6 +1867,8 @@ export class TargetScheduler {
   }
 
   private restore(recovery: LedgerRecoveryState): void {
+    this.latestBreakerResetSequence = recovery.latestBreakerResetSequence;
+    this.recoveredSupersededDecisionIds = [...(recovery.supersededDecisionIds ?? [])];
     for (const [key, value] of recovery.perBar) this.perBar.set(key, { ...value });
     for (const [key, value] of recovery.decisions) {
       const latestCompletedIntent = value.latestCompletedIntent
@@ -1879,14 +1914,12 @@ export class TargetScheduler {
         });
         for (const logicalId of decision.logicalOrderIds) {
           const clientId = logicalToClientId.get(logicalId);
-          if (clientId)
-            this.indexBarOwnership(identity.bindingId, identity.barTime, { clientId });
+          if (clientId) this.indexBarOwnership(identity.bindingId, identity.barTime, { clientId });
         }
       }
     }
+    this.pruneAllFinalizedBars();
     this.attemptTimes = [...recovery.rollingMinuteAttemptTimes];
-    this.latestBreakerResetSequence = recovery.latestBreakerResetSequence;
-    this.recoveredSupersededDecisionIds = [...(recovery.supersededDecisionIds ?? [])];
     const hasOpenAcceptedEvaluations =
       recovery.hasOpenAcceptedEvaluations ??
       [...recovery.decisions.values()].some(

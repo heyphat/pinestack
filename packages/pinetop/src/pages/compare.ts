@@ -18,9 +18,23 @@ import { scriptLabel } from '../scripts.js';
 import type { AppState } from '../state.js';
 import { profitFactor, type CompareJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
+import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
+import {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+} from './strategies-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = ['config', 'metrics', 'overlay'] as const;
+const PANES = [STRATEGIES_PANE, 'config', 'metrics', 'overlay', HISTORY_PANE] as const;
 
 export function report(state: AppState): CompareJson | undefined {
   if (state.run?.command !== 'compare' || state.run.status !== 'ok') return undefined;
@@ -243,6 +257,8 @@ export const comparePage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'compare');
+    if (paneId === STRATEGIES_PANE) return strategyRowCount();
     if (paneId === 'config') return configRowCount(state, 'compare');
     if (paneId === 'metrics') {
       const data = report(state);
@@ -267,6 +283,15 @@ export const comparePage: Page = {
     return crumbs;
   },
 
+  // COMPARE's only ↵ is the script picker: A and B are the page, and the metric
+  // table has nothing to load anywhere.
+  confirm: (state) => {
+    if (state.panes.compare.focus === HISTORY_PANE) return loadRun(state, 'compare');
+    return state.panes.compare.focus === STRATEGIES_PANE
+      ? loadStrategy(state, 'compare')
+      : undefined;
+  },
+
   render: (ctx) => {
     const { body, screen } = ctx;
     const leftW = Math.min(34, Math.max(26, Math.floor(screen.cols * 0.24)));
@@ -275,7 +300,15 @@ export const comparePage: Page = {
     const [leftCol, rightCol] = columns(body, [leftW]) as [Rect, Rect];
     const [metricsRect, overlayRect] = rows(rightCol, [rightCol.h - overlayH]) as [Rect, Rect];
 
-    drawConfigPane(ctx, leftCol, { command: 'compare' });
+    const stratH = strategiesHeight(leftCol.h);
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      leftCol.h - stratH - histH,
+    ]) as [Rect, Rect, Rect];
+    drawStrategiesPane(ctx, stratRect, { command: 'compare' });
+    drawConfigPane(ctx, configRect, { command: 'compare' });
+    drawHistoryPane(ctx, histRect, 'compare');
     drawMetrics(ctx, metricsRect);
     if (overlayH > 0) drawOverlay(ctx, overlayRect);
   },

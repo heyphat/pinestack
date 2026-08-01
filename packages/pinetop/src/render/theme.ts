@@ -31,6 +31,32 @@ export const STYLE = {
   /** The gold dot on an AI-applied, not-yet-re-run edit (§4.5.c). */
   pending: '1;33',
   strike: '9',
+  /**
+   * The EDITOR's text cursor. Bold reverse rather than plain reverse, so it stays
+   * visible inside a visual-mode selection — which is itself reverse video.
+   */
+  cursor: '1;7',
+} as const satisfies Record<string, Style>;
+
+/**
+ * Pine syntax in the EDITOR buffer.
+ *
+ * Same rule as the rest of the app (§4.7): the terminal's own ANSI palette, so
+ * the buffer respects the user's theme instead of asserting a colour scheme over
+ * it. Kept separate from `STYLE` because these roles are lexical — a number in
+ * source is not a "positive value" — and conflating the two would make a
+ * report's colour semantics change when a syntax colour is retuned.
+ */
+export const SYNTAX = {
+  plain: '',
+  comment: '2',
+  /** `//@version=6`, `//@strategy_alert_message`, … */
+  annotation: '2;36',
+  keyword: '1;35',
+  /** `ta.`, `math.`, `strategy.`, and the bar series (`close`, `volume`, …). */
+  builtin: '36',
+  string: '32',
+  number: '33',
 } as const satisfies Record<string, Style>;
 
 /** `pinerun`'s value grade, worst → best. Mirrors the CLI's TTY quintiles. */

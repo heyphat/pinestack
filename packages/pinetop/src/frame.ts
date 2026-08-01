@@ -1,5 +1,5 @@
 /**
- * The frame: everything that is identical on all seven pages.
+ * The frame: everything that is identical on all eight pages.
  *
  * Top to bottom — tab bar (§4.2), breadcrumb, the page's body, the composed
  * `$ pinerun …` line (§3 G2: always shown verbatim, always copy-pasteable), and
@@ -38,25 +38,42 @@ function statusGlyph(state: AppState): { text: string; style: string } {
   }
 }
 
+/** Columns the full tab bar wants: `1 EDITOR  2 BACKTEST  …`. */
+function tabBarWidth(): number {
+  return PAGES.reduce((sum, page, i) => sum + `${i + 1} `.length + PAGE_TITLES[page].length + 2, 1);
+}
+
 function drawTabs(screen: Screen, state: AppState, y: number): void {
+  const status = statusGlyph(state);
+  const grid = `${screen.cols}×${screen.rows}`;
+  // The right side is drawn first so the tabs know how much room they actually
+  // have. With eight pages the full bar no longer fits an 80-column terminal, and
+  // a tab bar overprinted by the grid size is worse than a compact one.
+  const rightW = displayWidth(grid) + 3 + displayWidth(status.text);
+  const room = screen.cols - 2 - rightW;
+  const compact = tabBarWidth() > room;
+
   let x = 1;
   for (let i = 0; i < PAGES.length; i++) {
     const page = PAGES[i]!;
     const active = page === state.page;
     const ordinal = `${i + 1} `;
-    const title = PAGE_TITLES[page];
     screen.text(x, y, ordinal, active ? STYLE.accent : STYLE.muted);
     x += ordinal.length;
+    // Compact form names only the page you are on. Its ordinal sits immediately
+    // to its left, so which tab the title belongs to is never ambiguous.
+    if (compact && !active) {
+      x += 1;
+      continue;
+    }
+    const title = PAGE_TITLES[page];
     screen.text(x, y, title, active ? STYLE.accentBold : STYLE.muted);
     x += title.length + 2;
   }
 
   // Right side: run status, then the grid the page is being drawn at.
-  const status = statusGlyph(state);
-  const grid = `${screen.cols}×${screen.rows}`;
-  const right = `${grid}`;
-  screen.text(screen.cols - 1 - displayWidth(right), y, right, STYLE.muted);
-  const statusX = screen.cols - 3 - displayWidth(right) - displayWidth(status.text);
+  screen.text(screen.cols - 1 - displayWidth(grid), y, grid, STYLE.muted);
+  const statusX = screen.cols - 3 - displayWidth(grid) - displayWidth(status.text);
   if (statusX > x) screen.text(statusX, y, status.text, status.style);
 }
 
@@ -135,9 +152,9 @@ function drawCommandLine(screen: Screen, state: AppState, page: Page, y: number)
   screen.text(3, y, truncate(line, screen.cols - 4), STYLE.none);
 }
 
-function drawHints(screen: Screen, state: AppState, y: number): void {
+function drawHints(screen: Screen, state: AppState, page: Page, y: number): void {
   let x = 1;
-  for (const hint of HINTS) {
+  for (const hint of page.hints?.(state) ?? HINTS) {
     screen.text(x, y, hint.key, STYLE.accent);
     x += hint.key.length + 1;
     screen.text(x, y, hint.label, STYLE.muted);
@@ -169,7 +186,7 @@ export function drawFrame(screen: Screen, state: AppState, page: Page, askRows =
   const dirty = drawDirtyBanner(screen, state, page, crumbY);
   if (!dirty) drawBreadcrumb(screen, state, page, crumbY);
   drawCommandLine(screen, state, page, cmdY);
-  drawHints(screen, state, hintsY);
+  drawHints(screen, state, page, hintsY);
 
   const bodyTop = crumbY + 1;
   const bodyBottom = cmdY - askRows;
@@ -188,7 +205,8 @@ export function drawFrame(screen: Screen, state: AppState, page: Page, askRows =
  */
 export function widthWarning(page: Page, cols: number): string | undefined {
   if (cols >= page.minCols) return undefined;
-  return `terminal is ${cols} cols; ${PAGE_TITLES[page.id]} wants ${page.minCols} — right rail dropped`;
+  const note = page.degradeNote ?? 'right rail dropped';
+  return `terminal is ${cols} cols; ${PAGE_TITLES[page.id]} wants ${page.minCols} — ${note}`;
 }
 
 export function pageOrdinal(page: PageId): number {

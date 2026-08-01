@@ -78,7 +78,7 @@ pinetop
 
 On a fresh project it loads the only `.pine` it finds (or points you at the
 STRATEGIES pane if there are several), then names the two or three things left to
-set. From there:
+set. From there (on BACKTEST — page `2`):
 
 |              |                                                                                 |
 | ------------ | ------------------------------------------------------------------------------- |
@@ -119,28 +119,63 @@ One tab per command, numbered in workflow order.
 
 | #   | Page        | Command                     | Purpose                                            |
 | --- | ----------- | --------------------------- | -------------------------------------------------- |
-| 1   | BACKTEST    | `pinerun backtest`          | Analyze — one strategy, one symbol, full tearsheet |
-| 2   | SWEEP       | `pinerun sweep`             | Optimize — one script's input grid                 |
-| 3   | WALKFORWARD | `pinerun walkforward`       | Validate — does the swept edge survive OOS         |
-| 4   | SCAN        | `pinerun scan`              | Screen — one script across N symbols               |
-| 5   | PORTFOLIO   | `pinerun portfolio`         | Combine — N symbols, one pot                       |
-| 6   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
-| 7   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
+| 1   | EDITOR      | (the `.pine` source)        | Write — the script itself, vim keys                |
+| 2   | BACKTEST    | `pinerun backtest`          | Analyze — one strategy, one symbol, full tearsheet |
+| 3   | SWEEP       | `pinerun sweep`             | Optimize — one script's input grid                 |
+| 4   | WALKFORWARD | `pinerun walkforward`       | Validate — does the swept edge survive OOS         |
+| 5   | SCAN        | `pinerun scan`              | Screen — one script across N symbols               |
+| 6   | PORTFOLIO   | `pinerun portfolio`         | Combine — N symbols, one pot                       |
+| 7   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
+| 8   | TRADES      | (ledger of the current run) | The fills and the engine log                       |
+
+**SWEEP and WALKFORWARD have an INPUTS pane** below STRATEGIES, listing every
+`input()` the loaded script declares — the same pane EDITOR shows, plus the grid beside each swept
+one. `↵` on a row opens that axis for typing (`7,14,21`, or `30:100:10`), prefilled
+if it is already set; clearing it drops that axis and leaves the rest untouched.
+The legend counts the axes and the combos they make, and turns red when the grid
+goes over `--max-combos`.
+
+That per-row editing is the point: `--input` is a repeatable flag, so the config
+pane can only show it as one space-joined field, and adding a second axis meant
+retyping the first. Walkforward gets it for the same reason and then some — it
+takes the same axis grammar, and a run there is _refused_ without at least one
+axis. Names the script does not declare still appear, in warn colour, because
+`pinerun` will reject them and a row that vanished would hide why.
+
+Every command page also has a **HISTORY** pane under its config, listing that
+page's runs from this session, newest first. `↵` puts one back on screen — the
+report _and_ the flags that produced it, so the config pane and the `$ pinerun …`
+line agree with the numbers, and `r` repeats it. Twenty runs per command are
+kept; older ones are dropped, because each holds a whole report.
+
+All six command pages carry the same **STRATEGIES** pane above their config, first
+in the focus ring, because all six take a `.pine` as their first argument — `↵`
+loads the selected script into that page's command. `compare` takes two, so it
+marks them `A` and `B`, and `↵` fills the first free slot before it starts
+replacing A. TRADES has no picker: it has no command of its own.
 
 The workflow between them is navigation, not documentation: `w` on SWEEP carries
 the grid into WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed
-inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it.
+inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it. EDITOR is
+page 1 because the source is where the workflow starts — every other page is
+downstream of the file it edits.
+
+Below about 105 columns there is no room for eight titles beside the run status,
+so the tab bar names only the page you are on and shows the rest as bare
+ordinals. `:` and `?` list them all.
 
 ## Keys
 
 | Key                  | Action                                                                 |
 | -------------------- | ---------------------------------------------------------------------- |
-| `1`–`7`              | Switch page                                                            |
+| `1`–`8`              | Switch page                                                            |
+| `space` `1`–`8`      | Switch page — also works inside the editor buffer                      |
 | `tab` / `shift-tab`  | Next / previous pane in the focus ring                                 |
 | `j` / `k`, `↓` / `↑` | Move selection                                                         |
 | `g` / `G`            | First / last row                                                       |
 | `↵`                  | Edit the focused config flag · load selection · apply pending proposal |
 | `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)           |
+| `e`                  | Edit this page's script in `$EDITOR`, then reload it                   |
 | `s`                  | Sweep dialog                                                           |
 | `w`                  | Walkforward page                                                       |
 | `/`                  | Filter fills                                                           |
@@ -157,6 +192,110 @@ inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it.
 bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
 `ctrl-p` is the binding.)
 
+On EDITOR, while the buffer has focus, none of the above applies — the buffer
+owns the keyboard. `?` there shows both keyboards side by side.
+
+## The editor
+
+Page 1 is a vim-modal editor for the `.pine` itself: the project's scripts and
+the open one's `input()` titles in the sidebar, the buffer in the wide middle
+with a line-number gutter and Pine syntax colouring from your terminal's palette.
+
+It opens on the strategy you already have loaded. `tab` (or `↵` on a file in
+FILES) enters the buffer; from there it is vim:
+
+|                     |                                                             |
+| ------------------- | ----------------------------------------------------------- |
+| `i` `I` `a` `A` `o` | Insert · at the indent · after · at the line end · a line   |
+| `h j k l` `w b e`   | By character, by word (`W B E` by WORD)                     |
+| `0 ^ $` `gg G` `{}` | Line start / indent / end · first / last line · paragraph   |
+| `space` `1`–`8`     | Switch page — the app's own binding, unchanged here         |
+| `ctrl-p`            | Command palette, to reach any page by name                  |
+| `f F t T`           | To a character on this line                                 |
+| `d c y` + a motion  | `dw` `d$` `c2w` `y}` `dfx` `dgg` — and `dd` `cc` `yy`       |
+| `D C Y` `x` `s` `p` | To the line end · a character · put                         |
+| `>>` `<<` `J` `r`   | Indent · outdent · join · replace one character             |
+| `v` `V`             | Visual · visual line, then `d` `y` `c` `>` `<`              |
+| `u` `ctrl-r`        | Undo · redo (one insert is one step)                        |
+| `/` `?` `n` `N`     | Search (substring, not regex) and repeat                    |
+| `:w` `:wq` `:q`     | Write · write and close · close (`:q!` discards)            |
+| `:e path`           | Open a file; a path with nothing behind it starts a new one |
+| `ctrl-d` `ctrl-u`   | Half a window down / up (`ctrl-f` / `ctrl-b` a whole one)   |
+| `:42` `:set nonu`   | Go to a line · hide the gutter                              |
+
+Counts work where you would expect them (`3dd`, `2w`, `42G`).
+
+**Switching pages from the buffer** is `space` then the page number — the same
+binding as everywhere else in pinetop, which is why it is `space`: bare `1`–`8`
+cannot do the job inside a buffer, where a digit is a vim count and `5j`, `42G`
+and `3dd` all need it. So the app gained a prefix instead of the editor gaining a
+dialect: `space 3` is page 3 on every page, buffer or not. `1`–`8` still work
+directly anywhere outside the buffer.
+
+Keys the buffer hands straight back to the frame, each one already meaning the
+same thing on every other page:
+
+- **`tab` / `shift-tab`** leave the pane, so the buffer is never a keyboard trap.
+- **`space`** is the page prefix, above.
+- **`ctrl-p`** opens the command palette, to reach a page by name.
+
+vim leaves `ctrl-p` unbound in normal mode, and `space` there only means "one
+character right", which `l` already does — so neither costs anything. Everything
+else belongs to the buffer while it has focus. One exception, because it is data
+rather than a binding: after `f`, `t` or `r` the next keystroke is that command's
+argument, so `f<space>` finds a space and `r<space>` writes one.
+
+- **`ctrl-c` always quits pinetop**, even mid-insert. `q` does not: inside the
+  buffer it tells you to use `:q`, and everywhere else it warns once before
+  discarding an unwritten buffer. Quitting on a stray `q` would throw away
+  edits, which is the one thing this page must not do.
+
+Nothing is written except by `:w`. The INPUTS outline is read from the buffer
+rather than from disk, so a renamed `input()` title shows up there before you
+save — and that is the same list `--input NAME` is checked against. The buffer is
+not persisted between sessions, for the same reason pending parameter edits are
+not: a restored unwritten buffer would be an unexplained divergence from the file
+on disk.
+
+`.` (repeat), macros, marks, named registers, visual block and regex search are
+not implemented. `?` lists exactly what is bound, so an unbound key does nothing
+rather than something almost-right. Whether the script compiles is still
+`piner`'s answer — press `2` then `r`.
+
+### `e` — the real editor
+
+For anything the in-frame buffer does not cover, `e` hands the file to your actual
+editor. It works from **any** page, which is the point: on BACKTEST you press `e`,
+edit, come back, press `r` — the whole loop, without leaving the keyboard.
+
+```sh
+export VISUAL="nvim"        # $VISUAL wins over $EDITOR; vim is the fallback
+export EDITOR="nvim -u NONE"  # arguments are honoured
+```
+
+pinetop leaves the alternate screen, hands over the terminal — so it is your real
+editor, with your config, your plugins, your colourscheme — and takes the screen
+back when it exits, reloading the file and refreshing the file list. vi-family
+editors are opened at the line your cursor was on (`+42`); others just get the
+path, since `code +42 file` would create a file called `+42`.
+
+`e` refuses when the in-frame buffer holds unwritten changes to that same file —
+your editor would open the older copy on disk and one of the two would lose. `:w`
+first. An unwritten buffer for some _other_ file is not in the way and is left
+untouched.
+
+The `$EDITOR` spec is split on whitespace and run directly, never through a
+shell, so nothing in that variable can be interpreted as `;` or `$(…)`. The cost
+is that an argument containing spaces cannot be expressed — point `$EDITOR` at a
+wrapper script if you need one.
+
+What this does not do is run your editor _inside_ a pane. That needs a pty and a
+terminal emulator to parse the editor's output into pinetop's cell grid, and the
+pty means a native module — which would end the self-contained single-binary
+build. So the frame goes away while you edit and comes back after. That is the
+whole trade, and it is why the in-frame buffer exists for the edits that are not
+worth it.
+
 ## How it behaves
 
 - **Every flag is settable from the UI.** The config pane edits in place; `.`
@@ -172,6 +311,16 @@ bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
   `FlagModel`. If the line on screen would not run, that is a bug.
 - **Nothing runs without a keypress.** Editing a flag never schedules a spawn; a
   sweep can cost minutes and a keystroke should not spend them.
+- **A failed run announces itself.** When `pinerun` exits non-zero, a drawer opens
+  over the bottom of the frame with every error line the engine printed, the exit
+  code, and how long it took — not one truncated line in the status bar. `esc`
+  dismisses it, `:` → `show the last error` brings it back, and the complete
+  engine log is on TRADES either way.
+- **A run that lost symbols says so too.** `scan` and `portfolio` report and
+  continue past a symbol whose history will not fetch, and `sweep` past a combo
+  that errored. The same drawer opens in warn colour — `SCAN — INCOMPLETE`, the
+  symbols and their reasons — because the point is not the list, which the page
+  already shows, but that the numbers beside it were computed over what was left.
 - **No scrolling.** Content that exceeds the frame truncates, the way a terminal
   truncates. Each page declares a min-width and degrades by dropping the right
   rail before truncating a table — and says what it dropped.
@@ -245,6 +394,6 @@ pinetop --check-flags
 ## Development
 
 ```sh
-bun test packages/pinetop/    # 156 tests
+bun test packages/pinetop/    # 289 tests
 bunx tsc -b                   # typecheck
 ```

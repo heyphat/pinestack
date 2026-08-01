@@ -10,27 +10,34 @@
 
 import { sparkline } from '@heyphat/pinerun';
 import type { Pair } from '../flags/model.js';
-import { axisValues, comboCount } from '../flags/model.js';
 import { schemaFor } from '../flags/schema.js';
 import { compactMoney, duration, int, num } from '../render/format.js';
 import { drawPane, truncate, type Rect } from '../render/screen.js';
-import {
-  drawHeader,
-  drawLeader,
-  drawRow,
-  fitColumns,
-  type Column,
-  type Row,
-} from '../render/table.js';
+import { drawHeader, drawRow, fitColumns, type Column, type Row } from '../render/table.js';
 import { STYLE } from '../render/theme.js';
 import { scriptLabel } from '../scripts.js';
 import type { AppState } from '../state.js';
 import { buildHeatmap, heatmapLegend } from '../views/heatmap.js';
 import type { SweepJson, SweepRankedJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
+import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
+import { axisRows, beginAxisEdit, drawAxisPane } from './inputs-pane.js';
+import {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+} from './strategies-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = ['axes', 'config', 'ranked', 'heatmap'] as const;
+const PANES = [STRATEGIES_PANE, 'inputs', 'config', 'ranked', 'heatmap', HISTORY_PANE] as const;
 
 export function report(state: AppState): SweepJson | undefined {
   if (state.run?.command !== 'sweep' || state.run.status !== 'ok') return undefined;
@@ -161,46 +168,6 @@ function drawRanked(ctx: PageContext, rect: Rect): void {
   }
 }
 
-function drawAxes(ctx: PageContext, rect: Rect): void {
-  const { screen, state } = ctx;
-  const model = state.flags.sweep;
-  const axes = (model.values['input'] as Pair[] | undefined) ?? [];
-  const combos = comboCount(axes);
-  const cap = typeof model.values['max-combos'] === 'number' ? model.values['max-combos'] : 5000;
-
-  const inner = drawPane(screen, rect, {
-    title: 'AXES',
-    focused: ctx.focus === 'axes',
-    legend: axes.length > 0 ? `${int(combos)} combos` : undefined,
-  });
-  if (inner.h <= 0) return;
-
-  let y = inner.y;
-  for (const axis of axes) {
-    if (y >= inner.y + inner.h - 1) break;
-    const values = axisValues(axis.value);
-    drawLeader(screen, inner, y, axis.name, `${axis.value} (${values.length})`, {
-      valueStyle: STYLE.none,
-    });
-    y += 1;
-  }
-  if (axes.length === 0) {
-    screen.text(inner.x, y, 'no --input axes — press r', STYLE.muted, inner);
-    y += 1;
-  }
-
-  // The guard the CLI enforces, enforced here before the spawn (§7 P2).
-  if (combos > cap) {
-    screen.text(
-      inner.x,
-      inner.y + inner.h - 1,
-      truncate(`over --max-combos ${int(cap)}`, inner.w),
-      STYLE.error,
-      inner,
-    );
-  }
-}
-
 function drawHeatmap(ctx: PageContext, rect: Rect): void {
   const { screen, state } = ctx;
   const data = report(state);
@@ -267,6 +234,9 @@ export const sweepPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'sweep');
+    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === 'inputs') return axisRows(state, 'sweep').length;
     if (paneId === 'config') return configRowCount(state, 'sweep');
     if (paneId === 'ranked') return rankedRows(state).length;
     return 0;
@@ -291,6 +261,10 @@ export const sweepPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.sweep.focus === HISTORY_PANE) return loadRun(state, 'sweep');
+    if (state.panes.sweep.focus === STRATEGIES_PANE) return loadStrategy(state, 'sweep');
+    // ↵ on an input opens that one axis for typing — see `beginAxisEdit`.
+    if (state.panes.sweep.focus === 'inputs') return beginAxisEdit(state, 'sweep');
     // ↵ on a ranked row loads that combo into BACKTEST as fixed inputs — the
     // sweep → backtest deep-dive edge (§2, §4.2).
     if (state.panes.sweep.focus !== 'ranked') return undefined;
@@ -318,16 +292,28 @@ export const sweepPage: Page = {
     const { body, screen } = ctx;
     const narrow = screen.cols < sweepPage.minCols;
     const leftW = Math.min(34, Math.max(26, Math.floor(screen.cols * 0.22)));
-    const heatH = narrow ? 0 : Math.min(14, Math.max(0, Math.floor(body.h * 0.42)));
+    // SURFACE sits under RANKED inside the right column rather than spanning the
+    // frame, so the sidebar runs the full height and has room for HISTORY. The
+    // cost is the sidebar's width: the heatmap loses those columns.
+    const [leftCol, rightCol] = columns(body, [leftW]) as [Rect, Rect];
+    const heatH = narrow ? 0 : Math.min(14, Math.max(0, Math.floor(rightCol.h * 0.42)));
+    const [rankedCol, surfaceRect] = rows(rightCol, [rightCol.h - heatH]) as [Rect, Rect];
+    // Three panes share the left column here, so the axes take their share of
+    // what is left after STRATEGIES rather than of the whole column.
+    const stratH = strategiesHeight(leftCol.h);
+    const inputsH = Math.min(11, Math.max(5, Math.floor((leftCol.h - stratH) * 0.32)));
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, inputsRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      inputsH,
+      leftCol.h - stratH - inputsH - histH,
+    ]) as [Rect, Rect, Rect, Rect];
 
-    const [top, bottom] = rows(body, [body.h - heatH]) as [Rect, Rect];
-    const [leftCol, rankedCol] = columns(top, [leftW]) as [Rect, Rect];
-    const axesH = Math.min(9, Math.max(5, Math.floor(leftCol.h * 0.42)));
-    const [axesRect, configRect] = rows(leftCol, [axesH]) as [Rect, Rect];
-
-    drawAxes(ctx, axesRect);
+    drawStrategiesPane(ctx, stratRect, { command: 'sweep' });
+    drawAxisPane(ctx, inputsRect, 'sweep');
     drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'WF w', 'ASK a'] });
+    drawHistoryPane(ctx, histRect, 'sweep');
     drawRanked(ctx, rankedCol);
-    if (heatH > 0) drawHeatmap(ctx, bottom);
+    if (heatH > 0) drawHeatmap(ctx, surfaceRect);
   },
 };

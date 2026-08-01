@@ -8,29 +8,42 @@
  *    propose; only `↵` applies, and `ctrl-x` rejects.
  */
 
+import { handOff } from './editor/handoff.js';
 import { drawFrame, widthWarning, windowTitle } from './frame.js';
-import { composeArgv, validate, withOverrides, type FlagValue, type Pair } from './flags/model.js';
+import {
+  cloneModel,
+  composeArgv,
+  validate,
+  withOverrides,
+  type FlagValue,
+  type Pair,
+} from './flags/model.js';
 import { readInputTitles } from './flags/pine-inputs.js';
-import { COMMANDS, schemaFor, type CommandId, type PageId } from './flags/schema.js';
+import { COMMANDS, PAGES, schemaFor, type CommandId, type PageId } from './flags/schema.js';
 import { discoverScripts } from './scripts.js';
 import { resolve, type Action } from './keymap.js';
 import {
   askHeight,
   drawAsk,
+  drawError,
   drawFilter,
   drawHelp,
   drawPalette,
   drawRunDialog,
   drawWelcome,
+  errorHeight,
   filterPalette,
   paletteItems,
 } from './overlays.js';
-import { backtestPage, refreshScripts } from './pages/backtest.js';
+import { backtestPage } from './pages/backtest.js';
 import { comparePage } from './pages/compare.js';
 import { firstUnmetRow, isRunRow, runRowCount, visibleFlags } from './pages/config-pane.js';
+import { editorPage, ensureEditorFile } from './pages/editor.js';
+import { evictHistory } from './pages/history-pane.js';
 import type { Page } from './pages/page.js';
 import { clampCursor } from './pages/page.js';
 import { portfolioPage } from './pages/portfolio.js';
+import { refreshScripts } from './scripts.js';
 import { scanPage } from './pages/scan.js';
 import { selectedCombo, sweepPage } from './pages/sweep.js';
 import { tradesPage } from './pages/trades.js';
@@ -39,12 +52,16 @@ import { saveFlags } from './persist.js';
 import { Screen } from './render/screen.js';
 import { appendSession } from './run/session-log.js';
 import { runPinerun, type SpawnOptions } from './run/spawn.js';
-import type { AppState, RunState } from './state.js';
+import type { AppState, EditState, RunState } from './state.js';
 import { applyProposal, nextRunId, overridesFor, revertOverrides } from './state.js';
 import { groundReport, parseAskResponse, type AskProvider } from './ask/protocol.js';
 import type { Key, Terminal } from './terminal.js';
 
+/** Said once before `q` will discard an unwritten editor buffer. */
+const QUIT_WARNING = 'unwritten changes in the editor — :w to write, or q again to discard';
+
 export const PAGE_MAP: Record<PageId, Page> = {
+  editor: editorPage,
   backtest: backtestPage,
   sweep: sweepPage,
   walkforward: walkforwardPage,
@@ -114,6 +131,8 @@ export class App {
   private readonly provider?: AskProvider;
   private abort?: AbortController;
   private disposers: (() => void)[] = [];
+  /** `space` was pressed and the next digit picks a page (§4.2.f). */
+  private pagePrefix = false;
 
   constructor(opts: AppOptions) {
     this.terminal = opts.terminal;
@@ -133,8 +152,11 @@ export class App {
     const page = this.page;
     this.state.widthWarning = widthWarning(page, cols);
 
+    // Both drawers displace the page rather than covering it: an error you have
+    // to move something to read is an error you will misread.
     const askRows = askHeight(this.state);
-    const body = drawFrame(screen, this.state, page, askRows);
+    const errorRows = errorHeight(this.state);
+    const body = drawFrame(screen, this.state, page, askRows + errorRows);
 
     const focus = this.focusId();
     page.render({
@@ -149,6 +171,8 @@ export class App {
       screen.text(1, body.y + body.h - 1, this.state.widthWarning, '33');
     }
 
+    // Above the Ask drawer, which keeps the bottom row it has always had.
+    drawError(screen, this.state, askRows);
     if (this.state.ask.open) {
       drawAsk(
         screen,
@@ -189,6 +213,7 @@ export class App {
 
   start(): void {
     this.terminal.open();
+    if (this.state.page === 'editor') ensureEditorFile(this.state);
     process.stdout.write(`\x1b]2;${windowTitle(this.state)}\x07`);
     this.disposers.push(this.terminal.onKey((key) => this.onKey(key)));
     this.disposers.push(this.terminal.onResizeEvent(() => this.paint()));
@@ -246,6 +271,28 @@ export class App {
       this.paint();
       return;
     }
+    // An armed `space` outranks the page, so `space 3` reaches page 3 even inside
+    // the EDITOR buffer, where a bare `3` is a vim count. This is what lets one
+    // page-switch binding hold everywhere instead of the buffer needing its own.
+    if (this.pagePrefix) {
+      this.pagePrefix = false;
+      const ordinal = /^[1-9]$/.test(key.name) ? Number.parseInt(key.name, 10) : 0;
+      const page = PAGES[ordinal - 1];
+      if (page != null) {
+        this.dispatch({ kind: 'page', page });
+        this.paint();
+        return;
+      }
+      // Not a page digit: the prefix is abandoned and the key means what it
+      // normally means, rather than being swallowed.
+      this.state.status = 'page switch cancelled';
+    }
+    // A page may claim the keyboard before the global keymap. Exactly one does —
+    // EDITOR, where `j` is a character and `1` is a count (see `Page.onKey`).
+    if (this.page.onKey?.(this.state, key) === true) {
+      this.paint();
+      return;
+    }
 
     const action = resolve(key.name);
     if (action != null) this.dispatch(action);
@@ -269,7 +316,7 @@ export class App {
       return;
     }
     if (key.name === 'enter') {
-      this.commitField(edit.command, edit.index, edit.buffer);
+      this.commitField(edit);
       state.edit = null;
       return;
     }
@@ -289,7 +336,14 @@ export class App {
     switch (action.kind) {
       case 'page':
         state.page = action.page;
+        // Arriving at EDITOR with nothing open is a blank screen beside a project
+        // full of scripts; open the loaded one (see `ensureEditorFile`).
+        if (action.page === 'editor') ensureEditorFile(state);
         process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
+        break;
+      case 'page-prefix':
+        this.pagePrefix = true;
+        state.status = `page 1–${PAGES.length}…`;
         break;
       case 'focus-next':
         this.moveFocus(1);
@@ -341,6 +395,12 @@ export class App {
       case 'walkforward':
         this.handoffToWalkforward();
         break;
+      case 'edit-external':
+        // The frame is torn down and rebuilt inside `handOff`, so the title bar
+        // has to be reclaimed: the editor will have set its own (§4.8.g).
+        state.status = handOff(state, this.terminal, this.cwd);
+        process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
+        break;
       case 'filter':
         state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };
         break;
@@ -372,10 +432,19 @@ export class App {
           state.status = 'pending edits reverted';
         }
         break;
-      case 'quit':
+      case 'quit': {
+        // An unwritten buffer must not leave on one keystroke. `q` says so once
+        // and quits on the second, which is the same two-step `:q` / `:q!` gives
+        // inside the editor.
+        const buffer = state.editor.buffer;
+        if (buffer?.modified === true && state.status !== QUIT_WARNING) {
+          state.status = QUIT_WARNING;
+          break;
+        }
         state.quit = true;
         this.stop();
         break;
+      }
     }
   }
 
@@ -410,6 +479,13 @@ export class App {
     }
     if (state.ask.open) {
       state.ask.open = false;
+      return;
+    }
+    // The failure drawer outranks the filter and the log scope: it is the newest
+    // thing on screen and the one `esc` most likely meant.
+    if (errorHeight(state) > 0 && state.run != null) {
+      state.run.errorDismissed = true;
+      state.status = 'dismissed — the engine log is on TRADES';
       return;
     }
     if (state.logScope != null) {
@@ -462,6 +538,10 @@ export class App {
           if (item != null) {
             const status = item.run(state);
             if (status != null) state.status = status;
+            // An item may name a keymap action instead of mutating state, which
+            // is how the palette reaches the things that need the App itself —
+            // the run dialog, the $EDITOR hand-off.
+            if (item.action != null) this.dispatch(item.action);
           }
           return;
         }
@@ -575,13 +655,50 @@ export class App {
     };
   }
 
+  /**
+   * One swept axis, committed on its own.
+   *
+   * An empty value removes the axis, which is what makes the INPUTS row a toggle:
+   * `↵` on a swept input opens its grid, and clearing it drops the input from the
+   * run. Nothing else in the model is touched, so the other axes survive — the
+   * whole point of editing them one at a time.
+   */
+  private commitAxis(command: CommandId, name: string, spec: string): void {
+    const model = this.state.flags[command];
+    const key = command === 'compare' ? 'input-a' : 'input';
+    const pairs = [...((model.values[key] as Pair[] | undefined) ?? [])];
+    const at = pairs.findIndex((pair) => pair.name === name);
+
+    if (spec === '') {
+      if (at < 0) return;
+      pairs.splice(at, 1);
+    } else if (at >= 0) {
+      pairs[at] = { name, value: spec };
+    } else {
+      pairs.push({ name, value: spec });
+    }
+
+    model.values[key] = pairs.length > 0 ? pairs : undefined;
+    this.state.status =
+      spec === ''
+        ? `${name} dropped from the grid`
+        : `${name} = ${spec} · ${pairs.length} ${pairs.length === 1 ? 'axis' : 'axes'}`;
+  }
+
   /** Parse a typed value back into the FlagModel according to the flag's kind. */
-  private commitField(command: CommandId, index: number, raw: string): void {
+  private commitField(edit: EditState): void {
     const state = this.state;
+    const { command, index } = edit;
+    const text = edit.buffer.trim();
+
+    if (edit.origin === 'axis') {
+      if (edit.input != null) this.commitAxis(command, edit.input, text);
+      return;
+    }
+
     const schema = schemaFor(command);
     const flags = visibleFlags(state, command);
     const model = state.flags[command];
-    const text = raw.trim();
 
     if (index < schema.scripts) {
       const next = [...model.scripts];
@@ -652,6 +769,9 @@ export class App {
       log: [],
       argv,
       startedAt: Date.now(),
+      // Snapshot what is being spawned, so HISTORY can restore this run's config
+      // alongside its report rather than showing one beside the other's numbers.
+      flags: cloneModel(model),
     };
     state.run = run;
     state.status = `running ${command}…`;
@@ -675,9 +795,13 @@ export class App {
     run.log = outcome.log;
     run.elapsedMs = outcome.elapsedMs;
     run.error = outcome.error;
+    run.exitCode = outcome.exitCode;
     run.progress = '';
 
     state.history.push(run);
+    // A RunState holds a whole report; keeping every run of a long session is a
+    // leak, and HISTORY exists to encourage keeping them (§10.3).
+    evictHistory(state, command);
     // A fresh report is the answer to the pending edits, so they are no longer
     // pending: the numbers on screen now include them (§4.5.c's dirty banner
     // exists precisely for the window between apply and re-run).

@@ -9,14 +9,24 @@
  */
 
 import { commandLine, displayValue, isSet, validate, withOverrides } from './flags/model.js';
-import { schemaFor, PAGE_PURPOSE, PAGES, PAGE_TITLES, type CommandId } from './flags/schema.js';
-import { BINDINGS } from './keymap.js';
+import {
+  commandForPage,
+  isCommandPage,
+  schemaFor,
+  PAGE_PURPOSE,
+  PAGES,
+  PAGE_TITLES,
+  type CommandId,
+} from './flags/schema.js';
+import { BINDINGS, EDITOR_KEYS, type Action } from './keymap.js';
+import { duration } from './render/format.js';
 import { displayWidth, drawPane, truncate, type Rect, type Screen } from './render/screen.js';
 import { drawLeader } from './render/table.js';
 import { STYLE, type Style } from './render/theme.js';
-import type { AppState } from './state.js';
+import type { AppState, RunState } from './state.js';
 import { overridesFor } from './state.js';
 import { visibleFlags } from './pages/config-pane.js';
+import { ensureEditorFile } from './pages/editor.js';
 
 /** Centre a box of the given size in the screen. */
 function centred(screen: Screen, w: number, h: number): Rect {
@@ -42,9 +52,38 @@ const GROUP_TITLES: Record<string, string> = {
   overlay: 'OVERLAY',
 };
 
-/** §7 P0's exit criterion: `?` documents the real keymap. It is generated. */
+const GROUPS = ['navigate', 'select', 'act', 'overlay'] as const;
+
+/** Rows a group costs: its title, its bindings, and a blank line after it. */
+function groupHeight(group: string): number {
+  return 2 + BINDINGS.filter((binding) => binding.group === group).length;
+}
+
+/**
+ * §7 P0's exit criterion: `?` documents the real keymap. It is generated.
+ *
+ * Which means the box is sized from the table, never hard-coded. A fixed height
+ * silently dropped the last two bindings the moment one was added — a generated
+ * help that loses entries is worse than a hand-written one, because it still
+ * reads as complete. So: one column when the terminal is tall enough, two when it
+ * is not, and the height comes from what there is to show.
+ */
 export function drawHelp(screen: Screen, state: AppState): void {
-  const rect = centred(screen, 76, 28);
+  // On EDITOR the buffer's own bindings are the ones you need, and there are more
+  // of them than the app's — so that page gets a two-column box wide enough to
+  // hold both keyboards at once rather than a truncated version of either.
+  if (state.page === 'editor') {
+    drawEditorHelp(screen, state);
+    return;
+  }
+
+  const tall = GROUPS.reduce((sum, group) => sum + groupHeight(group), 0);
+  const columnGroups: string[][] =
+    tall + 3 <= screen.rows - 4 ? [[...GROUPS]] : [GROUPS.slice(0, 2), GROUPS.slice(2)];
+  const height =
+    Math.max(...columnGroups.map((c) => c.reduce((sum, g) => sum + groupHeight(g), 0))) + 3;
+
+  const rect = centred(screen, columnGroups.length === 1 ? 76 : 104, height);
   clear(screen, rect);
   // The legend answers "what am I running" — both halves of it, since every
   // number on screen came out of that pinerun, so a stale one explains a stale
@@ -57,33 +96,102 @@ export function drawHelp(screen: Screen, state: AppState): void {
         ? `${versions.pinetop} · driving ${versions.pinerun}`
         : `${versions.pinetop} · pinerun not found`;
   const inner = drawPane(screen, rect, { title: 'KEYS', focused: true, legend });
+  if (inner.h <= 1) return;
 
-  let y = inner.y;
-  for (const group of ['navigate', 'select', 'act', 'overlay']) {
-    if (y >= inner.y + inner.h - 1) break;
-    screen.text(inner.x, y, GROUP_TITLES[group]!, STYLE.title, inner);
-    y += 1;
-    for (const binding of BINDINGS) {
-      if (binding.group !== group) continue;
+  const columnW = Math.floor(inner.w / columnGroups.length);
+  for (let column = 0; column < columnGroups.length; column++) {
+    const x = inner.x + column * columnW;
+    let y = inner.y;
+    for (const group of columnGroups[column]!) {
       if (y >= inner.y + inner.h - 1) break;
-      screen.text(inner.x + 2, y, binding.display.padEnd(12), STYLE.accent, inner);
-      screen.text(
-        inner.x + 15,
-        y,
-        truncate(binding.description, Math.max(0, inner.w - 16)),
-        STYLE.none,
-        inner,
-      );
+      screen.text(x, y, GROUP_TITLES[group]!, STYLE.title, inner);
+      y += 1;
+      for (const binding of BINDINGS) {
+        if (binding.group !== group) continue;
+        if (y >= inner.y + inner.h - 1) break;
+        screen.text(x + 2, y, binding.display.padEnd(12), STYLE.accent, inner);
+        screen.text(
+          x + 15,
+          y,
+          truncate(binding.description, Math.max(0, columnW - 16)),
+          STYLE.none,
+          inner,
+        );
+        y += 1;
+      }
       y += 1;
     }
-    y += 1;
   }
 
   const note =
     '⌘K is listed in the design as the palette key; a terminal cannot see it — ctrl-p is the binding.';
-  if (y < inner.y + inner.h) {
-    screen.text(inner.x, inner.y + inner.h - 1, truncate(note, inner.w), STYLE.muted, inner);
+  screen.text(inner.x, inner.y + inner.h - 1, truncate(note, inner.w), STYLE.muted, inner);
+}
+
+/**
+ * `?` on the EDITOR page.
+ *
+ * Both keyboards, side by side: the buffer's bindings on the left (the ones in
+ * play while it has focus) and the app's on the right (the ones `tab` gets you
+ * back to). Generated from `EDITOR_KEYS` and `BINDINGS`, so neither column can
+ * drift from what the keys actually do.
+ */
+function drawEditorHelp(screen: Screen, state: AppState): void {
+  const rect = centred(screen, 116, 34);
+  clear(screen, rect);
+  const buffer = state.editor.buffer;
+  const inner = drawPane(screen, rect, {
+    title: 'KEYS — EDITOR',
+    focused: true,
+    legend:
+      buffer == null ? 'no file open' : `${buffer.path}${buffer.modified ? ' · unwritten' : ''}`,
+  });
+  if (inner.h <= 1) return;
+
+  const leftW = Math.min(62, Math.max(30, inner.w - 48));
+  const keyW = 10;
+
+  screen.text(inner.x, inner.y, 'IN THE BUFFER', STYLE.title, inner);
+  let y = inner.y + 1;
+  for (const key of EDITOR_KEYS) {
+    if (y >= inner.y + inner.h - 1) break;
+    screen.text(inner.x + 1, y, key.display.padEnd(keyW), STYLE.accent, inner);
+    screen.text(
+      inner.x + 1 + keyW + 1,
+      y,
+      truncate(key.description, Math.max(0, leftW - keyW - 3)),
+      STYLE.none,
+      inner,
+    );
+    y += 1;
   }
+
+  const rightX = inner.x + leftW;
+  screen.text(rightX, inner.y, 'ELSEWHERE IN PINETOP', STYLE.title, inner);
+  let ry = inner.y + 1;
+  for (const binding of BINDINGS) {
+    if (ry >= inner.y + inner.h - 1) break;
+    screen.text(rightX + 1, ry, binding.display.padEnd(11), STYLE.accent, inner);
+    screen.text(
+      rightX + 13,
+      ry,
+      truncate(binding.description, Math.max(0, inner.x + inner.w - rightX - 14)),
+      STYLE.none,
+      inner,
+    );
+    ry += 1;
+  }
+
+  screen.text(
+    inner.x,
+    inner.y + inner.h - 1,
+    truncate(
+      'The buffer takes every key while it has focus, except tab (leave the pane) and ctrl-c (quit pinetop).',
+      inner.w,
+    ),
+    STYLE.muted,
+    inner,
+  );
 }
 
 /**
@@ -95,7 +203,7 @@ export function drawHelp(screen: Screen, state: AppState): void {
  * Once `.pinetop/flags.json` exists this is never shown again.
  */
 export function drawWelcome(screen: Screen, state: AppState): void {
-  const command = state.page === 'trades' ? 'backtest' : state.page;
+  const command = commandForPage(state.page);
   const model = state.flags[command];
   const scriptSet = model.scripts[0] != null;
   const targetFlag = command === 'scan' || command === 'portfolio' ? '--symbols' : '--symbol';
@@ -121,7 +229,7 @@ export function drawWelcome(screen: Screen, state: AppState): void {
     ],
     ['· 3. run                r, then ↵ on RUN', STYLE.none],
     ['', STYLE.none],
-    ['1–7 switch command pages · ? shows every key', STYLE.muted],
+    [`1–${PAGES.length} switch pages · 1 EDITOR edits the .pine · ? shows every key`, STYLE.muted],
     ['Flags are saved per project, so next time this is already set.', STYLE.muted],
   ];
 
@@ -139,6 +247,12 @@ export interface PaletteItem {
   label: string;
   hint: string;
   run: (state: AppState) => string | undefined;
+  /**
+   * A keymap action to dispatch after `run`, for the verbs that need the App and
+   * not just the state — suspending the terminal for `$EDITOR`, opening a dialog.
+   * `run` alone cannot express those: it is handed a state, not a program.
+   */
+  action?: Action;
 }
 
 export function paletteItems(): PaletteItem[] {
@@ -147,11 +261,20 @@ export function paletteItems(): PaletteItem[] {
     hint: PAGE_PURPOSE[page],
     run: (state) => {
       state.page = page;
+      // The same courtesy `1` gets: EDITOR opens the loaded script rather than
+      // showing an empty buffer.
+      if (page === 'editor') ensureEditorFile(state);
       return undefined;
     },
   }));
 
   items.push(
+    {
+      label: 'edit in $EDITOR',
+      hint: 'suspend the frame and open this page’s script in vim',
+      run: () => undefined,
+      action: { kind: 'edit-external' },
+    },
     {
       label: 'ask pinetop',
       hint: 'open the AI prompt drawer',
@@ -165,11 +288,23 @@ export function paletteItems(): PaletteItem[] {
       hint: 'discard AI/user overrides for this script',
       run: (state) => {
         const page = state.page;
-        if (page === 'trades') return 'no config on this page';
+        if (!isCommandPage(page)) return 'no config on this page';
         const key = state.flags[page].scripts[0] ?? '';
         if (key === '') return 'no script loaded';
         delete state.overrides[key];
         return 'reverted pending edits';
+      },
+    },
+    {
+      // Dismissing an error should not lose it: `esc` hides the drawer, this
+      // brings it back, and the engine log on TRADES was never gone.
+      label: 'show the last error',
+      hint: 'reopen the drawer for the loaded run',
+      run: (state) => {
+        const run = state.run;
+        if (run == null) return 'no run loaded';
+        run.errorDismissed = false;
+        return runTrouble(state) == null ? 'the loaded run reported no errors' : undefined;
       },
     },
     {
@@ -341,6 +476,150 @@ export function drawFilter(screen: Screen, state: AppState): void {
   screen.text(2 + displayWidth(state.overlay.buffer), y, '█', STYLE.accent);
   const hint = '↵ apply · esc clear';
   screen.text(screen.cols - 1 - hint.length, y, hint, STYLE.muted);
+}
+
+// ————————————————————————————————————————————————————————— the failure drawer
+
+/**
+ * The per-symbol failures inside a report that otherwise succeeded.
+ *
+ * `scan` and `portfolio` report and continue when a symbol's history cannot be
+ * fetched, and `sweep` does the same for a combo that errored — §8 says that
+ * distinction must be shown, not swallowed. Only three report shapes carry these
+ * fields; the rest read as absent, which is why this narrows `unknown` rather
+ * than switching on the command.
+ */
+interface PartialReport {
+  fetchErrors?: { symbol: string; error: string }[];
+  errors?: { symbol?: string; id?: string; error?: string }[];
+}
+
+export function partialFailures(run: RunState | null | undefined): string[] {
+  const report = run?.report as PartialReport | undefined;
+  if (report == null) return [];
+  return [
+    ...(report.fetchErrors ?? []).map((e) => `${e.symbol}: ${e.error}`),
+    ...(report.errors ?? []).map(
+      (e) => `${e.symbol ?? e.id ?? '—'}: ${e.error ?? 'the run errored'}`,
+    ),
+  ];
+}
+
+/** What the drawer is announcing, or null when there is nothing to announce. */
+export interface RunTrouble {
+  /** `failed` — the process; `incomplete` — it finished, but parts of it did not. */
+  kind: 'failed' | 'incomplete';
+  title: string;
+  legend: string;
+  lines: string[];
+  style: Style;
+  hint: string;
+}
+
+export function runTrouble(state: AppState): RunTrouble | null {
+  const run = state.run;
+  if (run == null || run.errorDismissed === true) return null;
+  const elapsed = run.elapsedMs == null ? undefined : duration(run.elapsedMs);
+  const tail = [elapsed, `run ${run.id}`].filter((part): part is string => part != null);
+
+  if (run.status === 'failed') {
+    // `pinerun`'s own error-level stderr, which is the engine speaking for
+    // itself — falling back to the summary the spawn layer derived when the
+    // process said nothing gradeable (bad JSON, empty stdout, no binary).
+    const errors = run.log.filter((line) => line.level === 'error').map((line) => line.text);
+    return {
+      kind: 'failed',
+      title: `${run.command.toUpperCase()} FAILED`,
+      legend: [run.exitCode == null ? 'did not start' : `exit ${run.exitCode}`, ...tail].join(
+        ' · ',
+      ),
+      lines: errors.length > 0 ? errors : run.error == null ? [] : [run.error],
+      style: STYLE.error,
+      hint: 'esc dismiss · the full engine log is on TRADES · r retries',
+    };
+  }
+
+  if (run.status !== 'ok') return null;
+  const lines = partialFailures(run);
+  if (lines.length === 0) return null;
+
+  return {
+    kind: 'incomplete',
+    title: `${run.command.toUpperCase()} — INCOMPLETE`,
+    legend: [`${lines.length} produced no result`, ...tail].join(' · '),
+    lines,
+    style: STYLE.warn,
+    // The part that matters and that a per-page error list does not say: the
+    // report on screen was computed over what is left, so the numbers are for a
+    // smaller universe than the one that was asked for.
+    hint: 'esc dismiss · the numbers on this page exclude these',
+  };
+}
+
+/** Kept as the narrow question the drawer used to answer: what will it print? */
+export function errorLines(state: AppState): string[] {
+  return runTrouble(state)?.lines ?? [];
+}
+
+/** Rows the drawer needs, so the frame can reserve them. */
+export function errorHeight(state: AppState): number {
+  const trouble = runTrouble(state);
+  if (trouble == null) return 0;
+  // Border, the lines (capped), and the footer.
+  return Math.min(9, 3 + Math.max(1, trouble.lines.length));
+}
+
+/**
+ * A failed run, stated where it happened.
+ *
+ * §8 says failures are surfaced rather than swallowed, and until now this one was
+ * only half kept: the last error line went to the status strip, where it was
+ * truncated to whatever space the hints left, and the rest sat in the engine log
+ * on a page you had to know to open. A run that exits non-zero is the one thing
+ * the user most needs to read, so it gets a drawer of its own — over the bottom
+ * of the frame like the Ask drawer (§4.5.a), for the same reason: width is scarce
+ * and a permanent panel would cost columns even when nothing has failed.
+ *
+ * It appears on its own, because an error you have to ask for is an error you
+ * will miss, and it stays until `esc` — unlike the read-only overlays, which any
+ * key dismisses.
+ */
+export function drawError(screen: Screen, state: AppState, offset = 0): void {
+  const trouble = runTrouble(state);
+  const height = errorHeight(state);
+  if (trouble == null || height === 0) return;
+
+  const rect: Rect = { x: 0, y: screen.rows - 2 - offset - height, w: screen.cols, h: height };
+  clear(screen, rect);
+
+  const inner = drawPane(screen, rect, {
+    // `drawPane` supplies the ◆ for a focused pane; a second one here was a
+    // stutter in the title.
+    title: trouble.title,
+    focused: true,
+    legend: trouble.legend,
+  });
+  if (inner.h <= 0) return;
+
+  const { lines } = trouble;
+  const room = Math.max(1, inner.h - 1);
+  // The tail, not the head: the last thing said before giving up is the thing
+  // that explains it, and the last symbols to fail are the newest news.
+  const shown = lines.slice(Math.max(0, lines.length - room));
+
+  for (let i = 0; i < shown.length && i < room; i++) {
+    screen.text(inner.x, inner.y + i, truncate(shown[i]!, inner.w), trouble.style, inner);
+  }
+  if (lines.length === 0) {
+    screen.text(inner.x, inner.y, 'no error output — see the engine log', STYLE.muted, inner);
+  }
+
+  const hidden = lines.length - shown.length;
+  const hint =
+    hidden > 0
+      ? `esc dismiss · ${hidden} more ${trouble.kind === 'failed' ? 'in the engine log (TRADES)' : 'not shown'}`
+      : trouble.hint;
+  screen.text(inner.x, inner.y + inner.h - 1, truncate(hint, inner.w), STYLE.muted, inner);
 }
 
 /** Rows the Ask drawer needs, so the frame can reserve them (§4.5.a). */

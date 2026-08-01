@@ -23,7 +23,7 @@ import { int, isoDay, isoMonth } from '../render/format.js';
 import { drawPane, truncate, type Rect } from '../render/screen.js';
 import { drawLeader } from '../render/table.js';
 import { STYLE, type Style } from '../render/theme.js';
-import { discoverScripts, scriptLabel, type ScriptEntry } from '../scripts.js';
+import { cachedScripts, refreshScripts, scriptLabel, type ScriptEntry } from '../scripts.js';
 import type { AppState } from '../state.js';
 import {
   fillModelNote,
@@ -33,26 +33,36 @@ import {
   type MetricRow,
 } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
+import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
+import {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+  type StrategiesPaneOptions,
+} from './strategies-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-/** Discovery hits the filesystem, so it is cached for the process lifetime. */
-let scriptCache: ScriptEntry[] | undefined;
-
+/** The shared discovery cache — see `scripts.ts`; the editor reads the same one. */
 export function scripts(): ScriptEntry[] {
-  scriptCache ??= discoverScripts();
-  return scriptCache;
+  return cachedScripts();
 }
 
-export function refreshScripts(): void {
-  scriptCache = undefined;
-}
+export { refreshScripts };
 
 export function report(state: AppState): BacktestJson | undefined {
   if (state.run?.command !== 'backtest' || state.run.status !== 'ok') return undefined;
   return state.run.report as BacktestJson | undefined;
 }
 
-const PANES = ['strategies', 'config', 'charts', 'metrics', 'monthly'] as const;
+const PANES = ['strategies', 'config', 'charts', 'metrics', 'monthly', HISTORY_PANE] as const;
 
 /** Style for a signed metric: losses never read as accent (§4.7 deviation 2). */
 function signStyleOf(sign: number): Style {
@@ -61,55 +71,17 @@ function signStyleOf(sign: number): Style {
   return STYLE.none;
 }
 
-function drawStrategies(ctx: PageContext, rect: Rect): void {
-  const { screen, state } = ctx;
-  const list = scripts();
-  const inner = drawPane(screen, rect, {
-    title: 'STRATEGIES',
-    focused: ctx.focus === 'strategies',
-    legend: list.length > interiorHeight(rect) ? `${list.length}` : undefined,
-  });
-  if (inner.h <= 0) return;
-
-  const loaded = state.flags.backtest.scripts[0];
-  const cursor = clampCursor(ctx.cursor('strategies'), list.length);
-  const listRows = Math.max(0, inner.h - 1);
-  const { from, to } = windowFor(cursor, list.length, listRows);
-
-  for (let i = from; i < to; i++) {
-    const entry = list[i]!;
-    const y = inner.y + (i - from);
-    const selected = i === cursor && ctx.focus === 'strategies';
-    const isLoaded = entry.path === loaded;
-
-    if (selected) screen.text(inner.x, y, ' '.repeat(inner.w), STYLE.selected);
-    // The loaded script keeps a bar marker even when the cursor is elsewhere.
-    screen.text(inner.x, y, isLoaded ? '▌' : ' ', selected ? STYLE.selected : STYLE.accent);
-    screen.text(
-      inner.x + 1,
-      y,
-      truncate(entry.label, inner.w - 8),
-      selected ? STYLE.selected : isLoaded ? STYLE.none : STYLE.muted,
-    );
-
-    // The rail value is the loaded run's Sharpe, and only for the loaded script:
-    // showing a stale number beside a script we have not run would be a claim
-    // the report does not make.
-    const value = isLoaded ? report(state)?.strategy?.metrics?.sharpe : undefined;
-    const text = value == null || !Number.isFinite(value) ? '' : value.toFixed(2);
-    if (text !== '') {
-      screen.text(inner.x + inner.w - text.length, y, text, selected ? STYLE.selected : STYLE.none);
-    }
-  }
-
-  if (list.length === 0) {
-    screen.text(inner.x, inner.y, 'no .pine found here', STYLE.muted, inner);
-  }
-  screen.text(inner.x, inner.y + inner.h - 1, 'j/k move · ↵ load', STYLE.muted, inner);
-}
-
-function interiorHeight(rect: Rect): number {
-  return Math.max(0, rect.h - 2);
+/**
+ * The rail value beside a script: the loaded run's Sharpe, and only for the
+ * loaded script. A number beside a script we have not run would be a claim the
+ * report does not make.
+ */
+function sharpeRail(state: AppState): StrategiesPaneOptions['rail'] {
+  return (_entry, loaded) => {
+    if (!loaded) return undefined;
+    const value = report(state)?.strategy?.metrics?.sharpe;
+    return value == null || !Number.isFinite(value) ? undefined : value.toFixed(2);
+  };
 }
 
 function drawCharts(ctx: PageContext, rect: Rect): void {
@@ -425,9 +397,10 @@ export const backtestPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'backtest');
     switch (paneId) {
       case 'strategies':
-        return scripts().length;
+        return strategyRowCount();
       case 'config':
         return configRowCount(state, 'backtest');
       case 'monthly':
@@ -460,15 +433,11 @@ export const backtestPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.backtest.focus === HISTORY_PANE) return loadRun(state, 'backtest');
     // ↵ on STRATEGIES loads the selected script; elsewhere it is the run dialog's
     // job, so the page says nothing rather than guessing (§4.6: no auto-run).
-    if (state.panes.backtest.focus !== 'strategies') return undefined;
-    const list = scripts();
-    const entry = list[clampCursor(state.panes.backtest.cursor['strategies'] ?? 0, list.length)];
-    if (entry == null) return undefined;
-    state.flags.backtest.scripts = [entry.path];
-    // Overrides are keyed by script, so switching does not leak edits (§4.6).
-    return `loaded ${entry.label} — press r to run`;
+    if (state.panes.backtest.focus !== STRATEGIES_PANE) return undefined;
+    return loadStrategy(state, 'backtest');
   },
 
   render: (ctx) => {
@@ -494,11 +463,16 @@ export const backtestPage: Page = {
       Rect,
     ];
 
-    const strategiesH = Math.min(8, Math.max(5, Math.floor(leftCol.h * 0.38)));
-    const [stratRect, configRect] = rows(leftCol, [strategiesH]) as [Rect, Rect];
+    const stratH = strategiesHeight(leftCol.h);
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      leftCol.h - stratH - histH,
+    ]) as [Rect, Rect, Rect];
 
-    drawStrategies(ctx, stratRect);
+    drawStrategiesPane(ctx, stratRect, { command: 'backtest', rail: sharpeRail(state) });
     drawConfigPane(ctx, configRect, { command: 'backtest' });
+    drawHistoryPane(ctx, histRect, 'backtest');
     drawCharts(ctx, midCol);
     if (railW > 0) drawMetrics(ctx, rightCol);
     drawMonthly(ctx, bottom);

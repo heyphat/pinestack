@@ -9,6 +9,7 @@
 
 import { readdirSync, statSync, type Dirent } from 'node:fs';
 import { join, relative } from 'node:path';
+import { readInputTitles } from './flags/pine-inputs.js';
 
 export interface ScriptEntry {
   /** Path as it will appear in argv — relative to cwd when it is below it. */
@@ -81,4 +82,42 @@ export function discoverScripts(cwd = process.cwd(), depth = 3, limit = 200): Sc
 export function scriptLabel(path: string): string {
   const base = path.split(/[\\/]/).pop() ?? path;
   return base.replace(/\.pine$/, '');
+}
+
+/**
+ * Discovery hits the filesystem, so it is cached for the process lifetime and
+ * shared: the STRATEGIES pane and the editor's FILES pane must not disagree
+ * about which scripts exist, and `:w` on a new file has to make it appear in
+ * both.
+ */
+let cache: ScriptEntry[] | undefined;
+
+export function cachedScripts(cwd?: string): ScriptEntry[] {
+  cache ??= discoverScripts(cwd);
+  return cache;
+}
+
+/**
+ * A script's `input()` titles, read once.
+ *
+ * The INPUTS pane asks for these on every frame, and a synchronous file read per
+ * frame is not something a redraw should cost. Cleared with the script list,
+ * which covers the two ways the titles change from under us: a `:w` in the
+ * editor, and a return from `$EDITOR`.
+ */
+const titles = new Map<string, string[]>();
+
+export function cachedInputTitles(path: string): string[] {
+  let found = titles.get(path);
+  if (found == null) {
+    found = readInputTitles(path);
+    titles.set(path, found);
+  }
+  return found;
+}
+
+/** Drop the caches: a script was added, renamed, or written. */
+export function refreshScripts(): void {
+  cache = undefined;
+  titles.clear();
 }

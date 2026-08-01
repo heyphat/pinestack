@@ -46,6 +46,13 @@ port.on('message', (msg: { seq: number; job: WireJob }) => {
     );
 });
 
+// Announce that the listener above is attached. The pool holds every job until
+// this arrives: a `new Worker()` can occasionally produce a thread whose entry
+// module never executes at all — no `error` event, no `exit` event, nothing
+// (heyphat/pinestack#12) — and a job posted to that thread would never settle.
+// Readiness is the signal that lets pool.ts bound the wait and recover.
+port.postMessage({ ready: true });
+
 function errMessage(err: unknown): string {
   return err instanceof Error ? (err.stack ?? err.message) : String(err);
 }

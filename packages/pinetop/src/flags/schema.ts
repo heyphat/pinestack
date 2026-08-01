@@ -237,8 +237,13 @@ const RANKING: FlagSpec[] = [
 
 const CHART: FlagSpec[] = [{ name: 'no-chart', kind: 'bool', group: 'display' }];
 
-/** The seven pages, in workflow order (§4.2). TRADES is a view, not a command. */
+/**
+ * The eight pages, in workflow order (§4.2). EDITOR and TRADES are views, not
+ * commands: the loop starts at the source and ends at the fills, and neither end
+ * spawns anything.
+ */
 export const PAGES = [
+  'editor',
   'backtest',
   'sweep',
   'walkforward',
@@ -249,12 +254,33 @@ export const PAGES = [
 ] as const;
 
 export type PageId = (typeof PAGES)[number];
+/** The pages that are not a `pinerun` command. */
+export type ViewId = 'editor' | 'trades';
 /** The six pages that spawn something. */
-export type CommandId = Exclude<PageId, 'trades'>;
+export type CommandId = Exclude<PageId, ViewId>;
 
-export const COMMANDS: readonly CommandId[] = PAGES.filter((p): p is CommandId => p !== 'trades');
+const VIEWS: readonly string[] = ['editor', 'trades'];
+
+export const COMMANDS: readonly CommandId[] = PAGES.filter(
+  (p): p is CommandId => !VIEWS.includes(p),
+);
+
+/** True when this page spawns a `pinerun` command (§4.2.b). */
+export function isCommandPage(page: PageId): page is CommandId {
+  return !VIEWS.includes(page);
+}
+
+/**
+ * The command a page's config belongs to. Views have none of their own, so they
+ * borrow BACKTEST — the page a script is normally run on — rather than each
+ * caller inventing its own fallback.
+ */
+export function commandForPage(page: PageId): CommandId {
+  return isCommandPage(page) ? page : 'backtest';
+}
 
 export const PAGE_TITLES: Record<PageId, string> = {
+  editor: 'EDITOR',
   backtest: 'BACKTEST',
   sweep: 'SWEEP',
   walkforward: 'WALKFORWARD',
@@ -266,6 +292,7 @@ export const PAGE_TITLES: Record<PageId, string> = {
 
 /** The docs' own verb for each page (§4.2). */
 export const PAGE_PURPOSE: Record<PageId, string> = {
+  editor: 'write — the .pine source itself, vim keys',
   backtest: 'analyze — one strategy, one symbol, full tearsheet',
   sweep: "optimize — one script's input grid",
   walkforward: 'validate — does the swept edge survive OOS',

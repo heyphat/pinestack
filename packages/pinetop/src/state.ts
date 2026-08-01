@@ -15,6 +15,8 @@ import type { FlagModel, Override } from './flags/model.js';
 import { emptyModel } from './flags/model.js';
 import type { CommandId, PageId } from './flags/schema.js';
 import { COMMANDS } from './flags/schema.js';
+import type { EditorState } from './editor/state.js';
+import { initialEditor } from './editor/state.js';
 import type { LogLine } from './run/spawn.js';
 
 export type RunStatus = 'idle' | 'running' | 'ok' | 'failed';
@@ -30,8 +32,25 @@ export interface RunState {
   log: LogLine[];
   elapsedMs?: number;
   error?: string;
+  /** The process's exit status. `null` when it never started or was signalled. */
+  exitCode?: number | null;
   argv: string[];
   startedAt: number;
+  /**
+   * The flags this run actually spawned with, overrides already merged.
+   *
+   * Kept so HISTORY can put a past run *and its config* back on screen together.
+   * Restoring only the report would leave the config pane and the `$ pinerun …`
+   * line describing a different invocation from the numbers beside them, and
+   * §4.1.b calls exactly that a bug.
+   */
+  flags?: FlagModel;
+  /**
+   * Set once the user has dismissed this run's failure drawer. It lives on the
+   * run rather than in `AppState` so a new run cannot inherit an acknowledgement
+   * of an older one's error — the next failure announces itself.
+   */
+  errorDismissed?: boolean;
 }
 
 /** One AI turn: what was asked, what came back (§4.5.b). */
@@ -101,8 +120,18 @@ export interface EditState {
   index: number;
   /** What has been typed so far. */
   buffer: string;
-  /** Where the edit was started, so `esc` and `↵` return focus there. */
-  origin: 'config' | 'dialog';
+  /**
+   * Where the edit was started, so `esc` and `↵` return focus there.
+   *
+   * `axis` is the third surface and the odd one: it edits a single `--input`
+   * pair rather than a whole flag row. `--input` is repeatable, so the config
+   * pane can only render it as one space-joined field — adding a second axis
+   * meant retyping the first. On SWEEP's INPUTS pane each axis is its own row
+   * with its own `↵`, and `index` is unused; `input` names the axis instead.
+   */
+  origin: 'config' | 'dialog' | 'axis';
+  /** The Pine `input()` title this edit is an axis for (`origin: 'axis'`). */
+  input?: string;
 }
 
 export interface PaneSelection {
@@ -126,6 +155,12 @@ export interface AppState {
   overlay: Overlay;
   /** The field currently being typed into, in the pane or the dialog (§10.2). */
   edit: EditState | null;
+  /**
+   * The EDITOR page's buffer and vim mode. Not persisted — an unwritten buffer
+   * restored from a previous session would be an unexplained divergence from the
+   * file on disk, the same reason overrides are not persisted (§4.5.c).
+   */
+  editor: EditorState;
   /**
    * Reveal the rarely-touched flags (`--mintick`, `--data-dir`, the magnifier
    * overrides, …). Off by default so the config pane stays readable, but it must
@@ -157,12 +192,19 @@ export interface AppState {
 export function initialPanes(): Record<PageId, PaneSelection> {
   const make = (focus: string): PaneSelection => ({ focus, cursor: {} });
   return {
+    // EDITOR opens on FILES, not on the buffer. The buffer takes the whole
+    // keyboard while it has focus — `1` there is a count, not page 1 — so
+    // entering it is a deliberate `tab` or `↵`, never where you simply land.
+    editor: make('files'),
+    // Every command page opens on STRATEGIES, because picking the script is step
+    // one on all of them — and because a pane that is in the same place and gets
+    // focus at the same moment on six pages reads as one thing rather than six.
     backtest: make('strategies'),
-    sweep: make('axes'),
-    walkforward: make('config'),
-    scan: make('universe'),
-    portfolio: make('sleeves'),
-    compare: make('config'),
+    sweep: make('strategies'),
+    walkforward: make('strategies'),
+    scan: make('strategies'),
+    portfolio: make('strategies'),
+    compare: make('strategies'),
     trades: make('ledger'),
   };
 }
@@ -181,6 +223,7 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
     ask: { open: false, input: '', transcript: [], pending: null, action: null, busy: false },
     overlay: { kind: 'none', buffer: '', cursor: 0 },
     edit: null,
+    editor: initialEditor(),
     showAdvanced: false,
     tradeFilter: '',
     logScope: null,

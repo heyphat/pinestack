@@ -24,9 +24,24 @@ import { scriptLabel } from '../scripts.js';
 import type { AppState } from '../state.js';
 import type { WalkforwardJson, WalkforwardWindowJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
-import { clampCursor, columns, windowFor, type Page, type PageContext } from './page.js';
+import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
+import { axisRows, beginAxisEdit, drawAxisPane } from './inputs-pane.js';
+import {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+} from './strategies-pane.js';
+import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = ['config', 'windows', 'verdict'] as const;
+const PANES = [STRATEGIES_PANE, 'inputs', 'config', 'windows', 'verdict', HISTORY_PANE] as const;
 
 export function report(state: AppState): WalkforwardJson | undefined {
   if (state.run?.command !== 'walkforward' || state.run.status !== 'ok') return undefined;
@@ -240,6 +255,9 @@ export const walkforwardPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'walkforward');
+    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === 'inputs') return axisRows(state, 'walkforward').length;
     if (paneId === 'config') return configRowCount(state, 'walkforward');
     if (paneId === 'windows') return windowRows(state).length;
     return 0;
@@ -262,6 +280,12 @@ export const walkforwardPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.walkforward.focus === HISTORY_PANE) return loadRun(state, 'walkforward');
+    if (state.panes.walkforward.focus === STRATEGIES_PANE)
+      return loadStrategy(state, 'walkforward');
+    // Same grammar as SWEEP, and an axis is mandatory here — `validate` refuses a
+    // walkforward without one — so this page needs the picker at least as much.
+    if (state.panes.walkforward.focus === 'inputs') return beginAxisEdit(state, 'walkforward');
     // ↵ on a window loads its winner into BACKTEST: the natural next question
     // after "which fold won" is "what did that fold actually do".
     if (state.panes.walkforward.focus !== 'windows') return undefined;
@@ -297,7 +321,22 @@ export const walkforwardPage: Page = {
       Rect,
     ];
 
-    drawConfigPane(ctx, leftCol, { command: 'walkforward', actions: ['RUN r', 'ASK a', ': cmd'] });
+    const stratH = strategiesHeight(leftCol.h);
+    const inputsH = Math.min(11, Math.max(5, Math.floor((leftCol.h - stratH) * 0.3)));
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, inputsRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      inputsH,
+      leftCol.h - stratH - inputsH - histH,
+    ]) as [Rect, Rect, Rect, Rect];
+
+    drawStrategiesPane(ctx, stratRect, { command: 'walkforward' });
+    drawAxisPane(ctx, inputsRect, 'walkforward');
+    drawHistoryPane(ctx, histRect, 'walkforward');
+    drawConfigPane(ctx, configRect, {
+      command: 'walkforward',
+      actions: ['RUN r', 'ASK a', ': cmd'],
+    });
     drawWindows(ctx, midCol);
     if (railW > 0) drawVerdict(ctx, rightCol);
   },

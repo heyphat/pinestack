@@ -1,10 +1,14 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { App } from '../src/app.js';
-import { PAGES, type PageId } from '../src/flags/schema.js';
+import { COMMANDS, PAGES, type CommandId, type PageId } from '../src/flags/schema.js';
+import { cachedScripts, refreshScripts } from '../src/scripts.js';
+import { BINDINGS } from '../src/keymap.js';
 import { hiddenFlagCount, isRunRow, runRowCount, visibleFlags } from '../src/pages/config-pane.js';
-import { composeArgv } from '../src/flags/model.js';
+import { cloneModel, composeArgv, type Pair } from '../src/flags/model.js';
+import { HISTORY_LIMIT, evictHistory } from '../src/pages/history-pane.js';
+import { paletteItems } from '../src/overlays.js';
 import { stripAnsi } from '../src/render/screen.js';
-import { initialState, resetRunIds, type AppState } from '../src/state.js';
+import { initialState, resetRunIds, type AppState, type RunState } from '../src/state.js';
 import type { Key, Terminal, TerminalSize } from '../src/terminal.js';
 import {
   backtestReport,
@@ -87,18 +91,29 @@ describe('P0 — the shell', () => {
     expect(makeApp(state).render(100, 30)).toHaveLength(30);
   });
 
-  test('the tab bar numbers the seven pages in workflow order', () => {
+  test('the tab bar numbers the eight pages in workflow order', () => {
     const text = screenText(makeApp(state));
-    expect(text).toContain('1 BACKTEST');
-    expect(text).toContain('2 SWEEP');
-    expect(text).toContain('3 WALKFORWARD');
-    expect(text).toContain('4 SCAN');
-    expect(text).toContain('5 PORTFOLIO');
-    expect(text).toContain('6 COMPARE');
-    expect(text).toContain('7 TRADES');
+    expect(text).toContain('1 EDITOR');
+    expect(text).toContain('2 BACKTEST');
+    expect(text).toContain('3 SWEEP');
+    expect(text).toContain('4 WALKFORWARD');
+    expect(text).toContain('5 SCAN');
+    expect(text).toContain('6 PORTFOLIO');
+    expect(text).toContain('7 COMPARE');
+    expect(text).toContain('8 TRADES');
   });
 
-  test('1–7 switch pages', () => {
+  test('a terminal too narrow for eight titles names only the page you are on', () => {
+    state.page = 'scan';
+    const text = screenText(makeApp(state, 80, 24), 80, 24);
+    const tabs = text.split('\n')[0]!;
+    expect(tabs).toContain('5 SCAN');
+    expect(tabs).not.toContain('WALKFORWARD');
+    // The grid size still has room, which is the whole point of going compact.
+    expect(tabs).toContain('80×24');
+  });
+
+  test('1–8 switch pages', () => {
     const app = makeApp(state);
     const expected: PageId[] = [...PAGES];
     for (let i = 0; i < expected.length; i++) {
@@ -147,6 +162,27 @@ describe('P0 — the shell', () => {
     expect(text).toContain('shift-tab');
     expect(text).toContain('Reject pending AI proposal');
     expect(text).toContain('Command palette');
+  });
+
+  test('? shows every binding, at a tall terminal and a short one', () => {
+    // The guard that matters: the overlay is generated, so adding a binding must
+    // never push another one off the box. A fixed height did exactly that once.
+    for (const [cols, rows] of [
+      [168, 46],
+      [120, 30],
+      [100, 24],
+    ] as const) {
+      const app = makeApp(state, cols, rows);
+      app.onKey({ name: '?', text: '?' });
+      const text = screenText(app, cols, rows);
+      for (const binding of BINDINGS) {
+        // Long descriptions are truncated with an ellipsis at narrow widths; the
+        // opening words are enough to prove the row was drawn at all.
+        const head = binding.description.slice(0, 20);
+        expect(text, `${binding.display} missing at ${cols}×${rows}`).toContain(head);
+      }
+      app.onKey({ name: 'escape' });
+    }
   });
 
   test('esc dismisses the overlay', () => {
@@ -1076,5 +1112,463 @@ describe('workflow hand-offs (§3 G3)', () => {
     app.onKey({ name: 'enter' });
     expect(state.page).toBe('backtest');
     expect(state.flags.backtest.values['symbol']).toBe('BTCUSDT');
+  });
+});
+
+describe('the STRATEGIES pane, on every command page', () => {
+  const list = cachedScripts();
+
+  test('discovery found the project’s examples, so the rest of this block means something', () => {
+    expect(list.length).toBeGreaterThan(2);
+  });
+
+  test('every command page draws it, and TRADES — which has no command — does not', () => {
+    for (const command of COMMANDS) {
+      state.page = command;
+      expect(screenText(makeApp(state)), command).toContain('STRATEGIES');
+    }
+    state.page = 'trades';
+    expect(screenText(makeApp(state))).not.toContain('STRATEGIES');
+  });
+
+  test('it is first in the focus ring, and each page opens on it', () => {
+    for (const command of COMMANDS) {
+      state.page = command;
+      expect(makeApp(state).page.panes(state)[0], command).toBe('strategies');
+      expect(state.panes[command].focus, command).toBe('strategies');
+    }
+  });
+
+  test('↵ loads the selection as that command’s own script argument', () => {
+    for (const command of COMMANDS) {
+      state.page = command;
+      state.flags[command].scripts = [];
+      state.panes[command].focus = 'strategies';
+      state.panes[command].cursor['strategies'] = 1;
+      makeApp(state).onKey({ name: 'enter' });
+      // Not BACKTEST's — the point of the change is that each page loads its own.
+      expect(state.flags[command].scripts[0], command).toBe(list[1]!.path);
+    }
+  });
+
+  test('compare fills A, then B, then keeps replacing A', () => {
+    state.page = 'compare';
+    state.flags.compare.scripts = [];
+    state.panes.compare.focus = 'strategies';
+    const app = makeApp(state);
+
+    state.panes.compare.cursor['strategies'] = 0;
+    app.onKey({ name: 'enter' });
+    expect(state.flags.compare.scripts).toEqual([list[0]!.path]);
+
+    state.panes.compare.cursor['strategies'] = 1;
+    app.onKey({ name: 'enter' });
+    expect(state.flags.compare.scripts).toEqual([list[0]!.path, list[1]!.path]);
+
+    state.panes.compare.cursor['strategies'] = 2;
+    app.onKey({ name: 'enter' });
+    expect(state.flags.compare.scripts).toEqual([list[2]!.path, list[1]!.path]);
+  });
+
+  test('compare marks the two slots A and B rather than with one bar', () => {
+    state.page = 'compare';
+    state.flags.compare.scripts = [list[0]!.path, list[1]!.path];
+    const text = screenText(makeApp(state));
+    expect(text).toContain(`A${list[0]!.label}`);
+    expect(text).toContain(`B${list[1]!.label}`);
+  });
+
+  test('the loaded script keeps its marker when the cursor is elsewhere', () => {
+    state.page = 'sweep';
+    state.flags.sweep.scripts = [list[0]!.path];
+    state.panes.sweep.cursor['strategies'] = 2;
+    expect(screenText(makeApp(state))).toContain(`▌${list[0]!.label}`);
+  });
+});
+
+describe('choosing axes from the script’s own inputs', () => {
+  const script = 'examples/rsi-mean-reversion.pine';
+  // Both pages take `--input` in the `axes` group, and `validate` applies the same
+  // "at least one axis" rule and the same --max-combos cap to both. One pane, so
+  // one test — a page that grew its own copy would show up here as a failure.
+  const AXIS_PAGES = ['sweep', 'walkforward'] as const;
+
+  const axes = (command: (typeof AXIS_PAGES)[number]): Pair[] =>
+    (state.flags[command].values['input'] as Pair[] | undefined) ?? [];
+
+  function focusInputs(command: (typeof AXIS_PAGES)[number]): void {
+    refreshScripts();
+    state.page = command;
+    state.flags[command].scripts = [script];
+    state.flags[command].values['input'] = undefined;
+    state.panes[command].focus = 'inputs';
+    state.panes[command].cursor['inputs'] = 0;
+  }
+
+  /** Open the row under the cursor, type a grid, accept. */
+  function setGrid(app: App, grid: string): void {
+    app.onKey({ name: 'enter' });
+    for (const ch of grid) app.onKey({ name: ch, text: ch });
+    app.onKey({ name: 'enter' });
+  }
+
+  test('both pages list every input the script declares, before any are swept', () => {
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      const text = screenText(makeApp(state));
+      expect(text, command).toContain('INPUTS');
+      for (const title of ['length', 'oversold', 'overbought']) {
+        expect(text, `${command}/${title}`).toContain(title);
+      }
+    }
+  });
+
+  test('a second axis does not disturb the first — the point of per-row editing', () => {
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      const app = makeApp(state);
+      setGrid(app, '7,14,21');
+      expect(axes(command), command).toEqual([{ name: 'length', value: '7,14,21' }]);
+
+      state.panes[command].cursor['inputs'] = 1;
+      setGrid(app, '20:35:5');
+      expect(axes(command), command).toEqual([
+        { name: 'length', value: '7,14,21' },
+        { name: 'oversold', value: '20:35:5' },
+      ]);
+
+      // And the composed line carries both, repeated as the CLI expects.
+      const argv = composeArgv(state.flags[command]);
+      expect(
+        argv.filter((a) => a === '--input'),
+        command,
+      ).toHaveLength(2);
+      expect(argv.join(' '), command).toContain('--input length=7,14,21 --input oversold=20:35:5');
+    }
+  });
+
+  test('editing a swept input prefills its grid, and clearing it drops that axis', () => {
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      const app = makeApp(state);
+      setGrid(app, '7,14');
+      state.panes[command].cursor['inputs'] = 1;
+      setGrid(app, '20,30');
+      expect(axes(command), command).toHaveLength(2);
+
+      // Re-open the first row: the buffer starts from what is already set.
+      state.panes[command].cursor['inputs'] = 0;
+      app.onKey({ name: 'enter' });
+      expect(state.edit?.buffer, command).toBe('7,14');
+      app.onKey({ name: 'ctrl-u' });
+      app.onKey({ name: 'enter' });
+
+      expect(axes(command), command).toEqual([{ name: 'oversold', value: '20,30' }]);
+    }
+  });
+
+  test('swept inputs are marked and carry their grid; the rest stay plain', () => {
+    focusInputs('sweep');
+    setGrid(makeApp(state), '7,14,21');
+    const text = screenText(makeApp(state));
+    expect(text).toContain('▌length');
+    expect(text).toMatch(/▌length[^\n]*7,14,21/);
+    expect(text).not.toContain('▌overbought');
+  });
+
+  test('the legend counts the axes and the grid they make', () => {
+    focusInputs('walkforward');
+    const app = makeApp(state);
+    setGrid(app, '7,14,21');
+    state.panes.walkforward.cursor['inputs'] = 1;
+    setGrid(app, '20,25,30,35');
+    expect(screenText(makeApp(state))).toContain('2 axes · 12 combos');
+  });
+
+  test('an axis the script does not declare is still shown, so the reason is visible', () => {
+    focusInputs('sweep');
+    state.flags.sweep.values['input'] = [{ name: 'notAnInput', value: '1,2' }];
+    expect(screenText(makeApp(state))).toContain('notAnInput');
+  });
+
+  test('with no script loaded the pane says what to do rather than sitting empty', () => {
+    for (const command of AXIS_PAGES) {
+      focusInputs(command);
+      state.flags[command].scripts = [];
+      expect(screenText(makeApp(state)), command).toContain('load a strategy above');
+    }
+  });
+});
+
+describe('a run that exits non-zero', () => {
+  function fail(overrides: Partial<RunState> = {}): void {
+    state.run = {
+      id: '#401',
+      command: 'backtest',
+      status: 'failed',
+      progress: '',
+      log: [
+        { level: 'info', text: 'resolving NOPE-PERP @ 1h', at: 4 },
+        { level: 'error', text: 'binance: no such symbol NOPE-PERP', at: 120 },
+        { level: 'error', text: '  set --provider, or check the ticker', at: 121 },
+      ],
+      argv: ['backtest', 'x.pine'],
+      startedAt: 0,
+      elapsedMs: 812,
+      exitCode: 2,
+      error: 'binance: no such symbol NOPE-PERP',
+      ...overrides,
+    };
+  }
+
+  test('the drawer appears on its own, with the exit code and every error line', () => {
+    fail();
+    const text = screenText(makeApp(state));
+    expect(text).toContain('BACKTEST FAILED');
+    expect(text).toContain('exit 2');
+    // Not just the last line, which is all the status strip ever carried.
+    expect(text).toContain('binance: no such symbol NOPE-PERP');
+    expect(text).toContain('set --provider, or check the ticker');
+    // Engine narration is not an error and belongs on TRADES, not here.
+    expect(text).not.toContain('resolving NOPE-PERP');
+  });
+
+  test('it displaces the page instead of covering it', () => {
+    fail();
+    const clean = screenText(makeApp(state), 168, 46);
+    state.run!.errorDismissed = true;
+    const dismissed = screenText(makeApp(state), 168, 46);
+    // The monthly strip is the bottom-most pane; it survives, just higher up.
+    expect(clean).toContain('MONTHLY RETURNS');
+    expect(dismissed).toContain('MONTHLY RETURNS');
+    expect(clean).not.toBe(dismissed);
+  });
+
+  test('esc dismisses it, and the palette brings it back', () => {
+    fail();
+    const app = makeApp(state);
+    app.onKey({ name: 'escape' });
+    expect(state.run!.errorDismissed).toBe(true);
+    expect(screenText(makeApp(state))).not.toContain('BACKTEST FAILED');
+
+    const item = paletteItems().find((i) => i.label === 'show the last error')!;
+    item.run(state);
+    expect(screenText(makeApp(state))).toContain('BACKTEST FAILED');
+  });
+
+  test('a dismissal does not carry to the next failure', () => {
+    fail({ errorDismissed: true });
+    expect(screenText(makeApp(state))).not.toContain('BACKTEST FAILED');
+    // A fresh run is a fresh RunState, so the flag cannot be inherited.
+    fail();
+    expect(screenText(makeApp(state))).toContain('BACKTEST FAILED');
+  });
+
+  test('a process that never started says so rather than claiming an exit code', () => {
+    fail({ exitCode: null, log: [], error: 'could not spawn pinerun: ENOENT' });
+    const text = screenText(makeApp(state));
+    expect(text).toContain('did not start');
+    expect(text).toContain('could not spawn pinerun');
+  });
+
+  test('a successful run draws no drawer at all', () => {
+    state.run = {
+      id: '#402',
+      command: 'backtest',
+      status: 'ok',
+      progress: '',
+      log: [],
+      argv: [],
+      startedAt: 0,
+      exitCode: 0,
+      report: backtestReport(),
+    };
+    expect(screenText(makeApp(state))).not.toContain('FAILED');
+  });
+});
+
+describe('a run that succeeded but not for every symbol', () => {
+  function partial(report: unknown): void {
+    state.page = 'scan';
+    state.run = {
+      id: '#403',
+      command: 'scan',
+      status: 'ok',
+      progress: '',
+      log: [],
+      argv: ['scan', 'x.pine'],
+      startedAt: 0,
+      elapsedMs: 4210,
+      exitCode: 0,
+      report,
+    };
+  }
+
+  const withFailures = (): unknown => ({
+    ranked: [{ symbol: 'BTCUSDT', value: 1200 }],
+    fetchErrors: [
+      { symbol: 'LUNAUSDT', error: 'binance: symbol delisted' },
+      { symbol: 'FTTUSDT', error: 'binance: no klines in range' },
+    ],
+    errors: [{ symbol: 'DOGEUSDT', error: 'runtime: division by zero' }],
+  });
+
+  test('fetch failures and per-symbol errors both reach the drawer', () => {
+    partial(withFailures());
+    const text = screenText(makeApp(state));
+    expect(text).toContain('SCAN — INCOMPLETE');
+    expect(text).toContain('LUNAUSDT: binance: symbol delisted');
+    expect(text).toContain('FTTUSDT: binance: no klines in range');
+    expect(text).toContain('DOGEUSDT: runtime: division by zero');
+    expect(text).toContain('3 produced no result');
+  });
+
+  test('it says the numbers exclude them, which the per-page list does not', () => {
+    partial(withFailures());
+    expect(screenText(makeApp(state))).toContain('the numbers on this page exclude these');
+  });
+
+  test('it is a warning, not a failure — exit 0 is not an error', () => {
+    partial(withFailures());
+    expect(screenText(makeApp(state))).not.toContain('FAILED');
+    const raw = makeApp(state).render(168, 46).join('\n');
+    expect(raw).toContain('\x1b[33m'); // warn, not the error red
+  });
+
+  test('a clean run draws nothing, and neither do reports without the fields', () => {
+    partial({ ranked: [{ symbol: 'BTCUSDT', value: 1200 }] });
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+
+    partial({ ranked: [], fetchErrors: [], errors: [] });
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+
+    // backtest reports carry neither field; reading them must not throw.
+    state.page = 'backtest';
+    state.run!.command = 'backtest';
+    state.run!.report = backtestReport();
+    expect(() => screenText(makeApp(state))).not.toThrow();
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+  });
+
+  test('esc dismisses it, and the palette says so when there is nothing to reopen', () => {
+    partial(withFailures());
+    makeApp(state).onKey({ name: 'escape' });
+    expect(screenText(makeApp(state))).not.toContain('INCOMPLETE');
+
+    const item = paletteItems().find((i) => i.label === 'show the last error')!;
+    expect(item.run(state)).toBeUndefined();
+    expect(screenText(makeApp(state))).toContain('INCOMPLETE');
+
+    partial({ ranked: [] });
+    expect(item.run(state)).toContain('no errors');
+  });
+});
+
+describe('run history, per page', () => {
+  let counter: number;
+
+  function run(command: CommandId, symbol: string, over: Partial<RunState> = {}): RunState {
+    const flags = cloneModel(state.flags[command]);
+    flags.values['symbol'] = symbol;
+    flags.values['tf'] = '1h';
+    return {
+      id: `#${++counter}`,
+      command,
+      status: 'ok',
+      progress: '',
+      log: [],
+      argv: [],
+      startedAt: 0,
+      elapsedMs: 2100,
+      exitCode: 0,
+      flags,
+      report: { ranked: [], sleeves: [], windows: [] },
+      ...over,
+    };
+  }
+
+  beforeEach(() => {
+    counter = 400;
+    state.flags.backtest.scripts = ['examples/rsi.pine'];
+  });
+
+  test('every command page has the pane; the two view pages do not', () => {
+    state.history = [run('backtest', 'BTCUSDT')];
+    for (const command of COMMANDS) {
+      state.page = command;
+      expect(screenText(makeApp(state)), command).toContain('HISTORY');
+    }
+    for (const page of ['trades', 'editor'] as const) {
+      state.page = page;
+      expect(screenText(makeApp(state)), page).not.toContain('HISTORY');
+    }
+  });
+
+  test('it lists this page’s runs, newest first, and nobody else’s', () => {
+    state.history = [
+      run('backtest', 'BTCUSDT'),
+      run('sweep', 'ETHUSDT'),
+      run('backtest', 'SOLUSDT'),
+    ];
+    state.page = 'backtest';
+    const text = screenText(makeApp(state));
+    expect(text).toContain('#403 SOLUSDT');
+    expect(text).toContain('#401 BTCUSDT');
+    // The sweep run belongs to the sweep page.
+    expect(text).not.toContain('ETHUSDT');
+    expect(text.indexOf('#403 SOLUSDT')).toBeLessThan(text.indexOf('#401 BTCUSDT'));
+  });
+
+  test('↵ restores the run and the config that produced it, so the line agrees', () => {
+    state.page = 'backtest';
+    state.flags.backtest.values['symbol'] = 'BTCUSDT';
+    state.history = [run('backtest', 'BTCUSDT'), run('backtest', 'ETHUSDT')];
+    state.run = state.history[1]!;
+    state.flags.backtest.values['symbol'] = 'ETHUSDT';
+
+    state.panes.backtest.focus = 'history';
+    state.panes.backtest.cursor['history'] = 1; // newest first, so [1] is the older
+    makeApp(state).onKey({ name: 'enter' });
+
+    expect(state.run!.id).toBe('#401');
+    expect(state.flags.backtest.values['symbol']).toBe('BTCUSDT');
+    // §4.1.b — the line on screen is the one that produced what is on screen.
+    expect(screenText(makeApp(state))).toContain('--symbol BTCUSDT');
+  });
+
+  test('loading drops pending overrides, which the snapshot already carries', () => {
+    state.page = 'backtest';
+    state.history = [run('backtest', 'BTCUSDT')];
+    state.overrides['examples/rsi.pine'] = {
+      stopAtr: { input: 'stopAtr', from: '2.4', to: '1.8' },
+    };
+    state.panes.backtest.focus = 'history';
+    makeApp(state).onKey({ name: 'enter' });
+    expect(state.overrides['examples/rsi.pine']).toBeUndefined();
+  });
+
+  test('the loaded run keeps its marker wherever the cursor is', () => {
+    state.page = 'backtest';
+    state.history = [run('backtest', 'BTCUSDT'), run('backtest', 'ETHUSDT')];
+    state.run = state.history[0]!;
+    state.panes.backtest.cursor['history'] = 0; // sitting on the newer one
+    expect(screenText(makeApp(state))).toContain('▌#401 BTCUSDT');
+  });
+
+  test('history is capped per command, oldest evicted', () => {
+    for (let i = 0; i < HISTORY_LIMIT + 5; i++) state.history.push(run('backtest', `S${i}`));
+    state.history.push(run('sweep', 'ETHUSDT'));
+    evictHistory(state, 'backtest');
+
+    const backtests = state.history.filter((r) => r.command === 'backtest');
+    expect(backtests).toHaveLength(HISTORY_LIMIT);
+    // The oldest went, the newest stayed, and another command's run is untouched.
+    expect(backtests[0]!.flags!.values['symbol']).toBe('S5');
+    expect(state.history.some((r) => r.command === 'sweep')).toBe(true);
+  });
+
+  test('an empty history says how to make one', () => {
+    state.page = 'backtest';
+    expect(screenText(makeApp(state))).toContain('no runs yet');
   });
 });

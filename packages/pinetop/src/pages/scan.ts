@@ -19,9 +19,23 @@ import { scriptLabel } from '../scripts.js';
 import type { AppState } from '../state.js';
 import type { ScanJson, ScanRankedJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
+import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
+import {
+  STRATEGIES_PANE,
+  drawStrategiesPane,
+  loadStrategy,
+  strategiesHeight,
+  strategyRowCount,
+} from './strategies-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = ['config', 'universe', 'errors'] as const;
+const PANES = [STRATEGIES_PANE, 'config', 'universe', 'errors', HISTORY_PANE] as const;
 
 export function report(state: AppState): ScanJson | undefined {
   if (state.run?.command !== 'scan' || state.run.status !== 'ok') return undefined;
@@ -196,6 +210,8 @@ export const scanPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'scan');
+    if (paneId === STRATEGIES_PANE) return strategyRowCount();
     if (paneId === 'config') return configRowCount(state, 'scan');
     if (paneId === 'universe') return rankedRows(state).length;
     if (paneId === 'errors') return failures(state).length;
@@ -216,6 +232,8 @@ export const scanPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.scan.focus === HISTORY_PANE) return loadRun(state, 'scan');
+    if (state.panes.scan.focus === STRATEGIES_PANE) return loadStrategy(state, 'scan');
     // ↵ on a scanned symbol deep-dives it in BACKTEST.
     if (state.panes.scan.focus !== 'universe') return undefined;
     const list = rankedRows(state);
@@ -241,7 +259,15 @@ export const scanPage: Page = {
     const [leftCol, rightCol] = columns(body, [leftW]) as [Rect, Rect];
     const [universeRect, errorsRect] = rows(rightCol, [rightCol.h - errorsH]) as [Rect, Rect];
 
-    drawConfigPane(ctx, leftCol, { command: 'scan' });
+    const stratH = strategiesHeight(leftCol.h);
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      leftCol.h - stratH - histH,
+    ]) as [Rect, Rect, Rect];
+    drawStrategiesPane(ctx, stratRect, { command: 'scan' });
+    drawConfigPane(ctx, configRect, { command: 'scan' });
+    drawHistoryPane(ctx, histRect, 'scan');
     drawUniverse(ctx, universeRect);
     if (errorsH > 0) drawErrors(ctx, errorsRect);
   },

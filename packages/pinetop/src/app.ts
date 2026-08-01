@@ -10,7 +10,14 @@
 
 import { handOff } from './editor/handoff.js';
 import { drawFrame, widthWarning, windowTitle } from './frame.js';
-import { composeArgv, validate, withOverrides, type FlagValue, type Pair } from './flags/model.js';
+import {
+  cloneModel,
+  composeArgv,
+  validate,
+  withOverrides,
+  type FlagValue,
+  type Pair,
+} from './flags/model.js';
 import { readInputTitles } from './flags/pine-inputs.js';
 import { COMMANDS, PAGES, schemaFor, type CommandId, type PageId } from './flags/schema.js';
 import { discoverScripts } from './scripts.js';
@@ -32,6 +39,7 @@ import { backtestPage } from './pages/backtest.js';
 import { comparePage } from './pages/compare.js';
 import { firstUnmetRow, isRunRow, runRowCount, visibleFlags } from './pages/config-pane.js';
 import { editorPage, ensureEditorFile } from './pages/editor.js';
+import { evictHistory } from './pages/history-pane.js';
 import type { Page } from './pages/page.js';
 import { clampCursor } from './pages/page.js';
 import { portfolioPage } from './pages/portfolio.js';
@@ -761,6 +769,9 @@ export class App {
       log: [],
       argv,
       startedAt: Date.now(),
+      // Snapshot what is being spawned, so HISTORY can restore this run's config
+      // alongside its report rather than showing one beside the other's numbers.
+      flags: cloneModel(model),
     };
     state.run = run;
     state.status = `running ${command}…`;
@@ -788,6 +799,9 @@ export class App {
     run.progress = '';
 
     state.history.push(run);
+    // A RunState holds a whole report; keeping every run of a long session is a
+    // leak, and HISTORY exists to encourage keeping them (§10.3).
+    evictHistory(state, command);
     // A fresh report is the answer to the pending edits, so they are no longer
     // pending: the numbers on screen now include them (§4.5.c's dirty banner
     // exists precisely for the window between apply and re-run).

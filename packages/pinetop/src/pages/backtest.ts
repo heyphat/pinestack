@@ -34,6 +34,13 @@ import {
 } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
 import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
+import {
   STRATEGIES_PANE,
   drawStrategiesPane,
   loadStrategy,
@@ -55,7 +62,7 @@ export function report(state: AppState): BacktestJson | undefined {
   return state.run.report as BacktestJson | undefined;
 }
 
-const PANES = ['strategies', 'config', 'charts', 'metrics', 'monthly'] as const;
+const PANES = ['strategies', 'config', 'charts', 'metrics', 'monthly', HISTORY_PANE] as const;
 
 /** Style for a signed metric: losses never read as accent (§4.7 deviation 2). */
 function signStyleOf(sign: number): Style {
@@ -390,6 +397,7 @@ export const backtestPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'backtest');
     switch (paneId) {
       case 'strategies':
         return strategyRowCount();
@@ -425,6 +433,7 @@ export const backtestPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.backtest.focus === HISTORY_PANE) return loadRun(state, 'backtest');
     // ↵ on STRATEGIES loads the selected script; elsewhere it is the run dialog's
     // job, so the page says nothing rather than guessing (§4.6: no auto-run).
     if (state.panes.backtest.focus !== STRATEGIES_PANE) return undefined;
@@ -454,10 +463,16 @@ export const backtestPage: Page = {
       Rect,
     ];
 
-    const [stratRect, configRect] = rows(leftCol, [strategiesHeight(leftCol.h)]) as [Rect, Rect];
+    const stratH = strategiesHeight(leftCol.h);
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      leftCol.h - stratH - histH,
+    ]) as [Rect, Rect, Rect];
 
     drawStrategiesPane(ctx, stratRect, { command: 'backtest', rail: sharpeRail(state) });
     drawConfigPane(ctx, configRect, { command: 'backtest' });
+    drawHistoryPane(ctx, histRect, 'backtest');
     drawCharts(ctx, midCol);
     if (railW > 0) drawMetrics(ctx, rightCol);
     drawMonthly(ctx, bottom);

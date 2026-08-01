@@ -37,6 +37,15 @@ export interface RunState {
   argv: string[];
   startedAt: number;
   /**
+   * The flags this run actually spawned with, overrides already merged.
+   *
+   * Kept so HISTORY can put a past run *and its config* back on screen together.
+   * Restoring only the report would leave the config pane and the `$ pinerun …`
+   * line describing a different invocation from the numbers beside them, and
+   * §4.1.b calls exactly that a bug.
+   */
+  flags?: FlagModel;
+  /**
    * Set once the user has dismissed this run's failure drawer. It lives on the
    * run rather than in `AppState` so a new run cannot inherit an acknowledgement
    * of an older one's error — the next failure announces itself.

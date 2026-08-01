@@ -20,6 +20,13 @@ import type { AppState } from '../state.js';
 import { buildHeatmap, heatmapLegend } from '../views/heatmap.js';
 import type { SweepJson, SweepRankedJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
+import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
 import { axisRows, beginAxisEdit, drawAxisPane } from './inputs-pane.js';
 import {
   STRATEGIES_PANE,
@@ -30,7 +37,7 @@ import {
 } from './strategies-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = [STRATEGIES_PANE, 'inputs', 'config', 'ranked', 'heatmap'] as const;
+const PANES = [STRATEGIES_PANE, 'inputs', 'config', 'ranked', 'heatmap', HISTORY_PANE] as const;
 
 export function report(state: AppState): SweepJson | undefined {
   if (state.run?.command !== 'sweep' || state.run.status !== 'ok') return undefined;
@@ -227,6 +234,7 @@ export const sweepPage: Page = {
   panes: () => [...PANES],
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'sweep');
     if (paneId === STRATEGIES_PANE) return strategyRowCount();
     if (paneId === 'inputs') return axisRows(state, 'sweep').length;
     if (paneId === 'config') return configRowCount(state, 'sweep');
@@ -253,6 +261,7 @@ export const sweepPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.sweep.focus === HISTORY_PANE) return loadRun(state, 'sweep');
     if (state.panes.sweep.focus === STRATEGIES_PANE) return loadStrategy(state, 'sweep');
     // ↵ on an input opens that one axis for typing — see `beginAxisEdit`.
     if (state.panes.sweep.focus === 'inputs') return beginAxisEdit(state, 'sweep');
@@ -283,24 +292,28 @@ export const sweepPage: Page = {
     const { body, screen } = ctx;
     const narrow = screen.cols < sweepPage.minCols;
     const leftW = Math.min(34, Math.max(26, Math.floor(screen.cols * 0.22)));
-    const heatH = narrow ? 0 : Math.min(14, Math.max(0, Math.floor(body.h * 0.42)));
-
-    const [top, bottom] = rows(body, [body.h - heatH]) as [Rect, Rect];
-    const [leftCol, rankedCol] = columns(top, [leftW]) as [Rect, Rect];
+    // SURFACE sits under RANKED inside the right column rather than spanning the
+    // frame, so the sidebar runs the full height and has room for HISTORY. The
+    // cost is the sidebar's width: the heatmap loses those columns.
+    const [leftCol, rightCol] = columns(body, [leftW]) as [Rect, Rect];
+    const heatH = narrow ? 0 : Math.min(14, Math.max(0, Math.floor(rightCol.h * 0.42)));
+    const [rankedCol, surfaceRect] = rows(rightCol, [rightCol.h - heatH]) as [Rect, Rect];
     // Three panes share the left column here, so the axes take their share of
     // what is left after STRATEGIES rather than of the whole column.
     const stratH = strategiesHeight(leftCol.h);
-    const inputsH = Math.min(11, Math.max(5, Math.floor((leftCol.h - stratH) * 0.45)));
-    const [stratRect, inputsRect, configRect] = rows(leftCol, [stratH, inputsH]) as [
-      Rect,
-      Rect,
-      Rect,
-    ];
+    const inputsH = Math.min(11, Math.max(5, Math.floor((leftCol.h - stratH) * 0.32)));
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, inputsRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      inputsH,
+      leftCol.h - stratH - inputsH - histH,
+    ]) as [Rect, Rect, Rect, Rect];
 
     drawStrategiesPane(ctx, stratRect, { command: 'sweep' });
     drawAxisPane(ctx, inputsRect, 'sweep');
     drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'WF w', 'ASK a'] });
+    drawHistoryPane(ctx, histRect, 'sweep');
     drawRanked(ctx, rankedCol);
-    if (heatH > 0) drawHeatmap(ctx, bottom);
+    if (heatH > 0) drawHeatmap(ctx, surfaceRect);
   },
 };

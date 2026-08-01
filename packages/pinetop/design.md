@@ -273,6 +273,11 @@ correctness bug, not a style choice.
   unsupported when it never was. `↵` on an INPUTS row opens that one axis, prefilled;
   clearing it drops that axis and leaves the others alone. This is the third edit surface
   and shares the same text-input mode as the other two (§10.2).
+- **HISTORY sits below the config pane on all six command pages**, last in the focus ring —
+  a fixed slab, so the config pane above it keeps the slack. On SWEEP the SURFACE pane moved
+  out of the full-width strip beneath the page and into the right column under RANKED, which
+  is what frees the sidebar to run the full height. SURFACE pays the sidebar's width for it;
+  RANKED's columns are the ones §4.4 protects, and they are unaffected.
 - **`compare` marks its two slots `A` and `B`, and `↵` fills the first free one, then keeps
   replacing A.** That is the order the work happens in: pick one, pick the other, then keep
   swapping the left-hand side. The markers make the state visible, and the config pane can
@@ -583,9 +588,23 @@ anticipate, each because the alternative was a screen that lied:
    nothing else is reachable — so a half-typed value can never be read as a keymap
    action or start a run. The dialog's last row is `RUN ▸`, so an already-valid
    config is `r` `↵`.
-3. **Run history depth.** Still open. `AppState.history` accumulates the session's runs
+3. **Run history depth.** ~~Still open. `AppState.history` accumulates the session's runs
    and the session log records every invocation, but nothing yet lets COMPARE take two
-   *runs* rather than two scripts, and nothing evicts.
+   *runs* rather than two scripts, and nothing evicts.~~
+   **Resolved (as built), except for COMPARE.** Every command page carries a HISTORY pane
+   below its config listing that command's runs, newest first; `↵` puts one back on screen.
+   Two things that decides:
+   - **A run carries the flags it ran with, and `↵` restores them too.** Swapping only the
+     report would leave the config pane and the `$ pinerun …` line describing a different
+     invocation from the numbers beside them — §4.1.b calls that a bug outright. Restoring
+     both keeps page, line and report describing one thing, and makes `r` repeat exactly
+     what was loaded. The cost is that loading discards unsaved config edits; the status
+     line says so.
+   - **It evicts.** 20 runs per command. A `RunState` holds a whole report — equity curves,
+     trades, the engine log — so keeping every run of a long session is a leak, and a pane
+     that invites keeping them makes it a worse one.
+   COMPARE taking two *runs* rather than two scripts is still not built; the pane gives it
+   the picker it would need.
 4. **`--watch` and the TUI.** Still open, and now leaning: `--watch` is refused before
    spawn (it redraws a terminal and is incompatible with `--json`), so pinetop owns any
    refresh loop by default. Whether it should have one at all is undecided.

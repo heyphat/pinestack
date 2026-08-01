@@ -27,6 +27,13 @@ import type { AppState } from '../state.js';
 import type { PortfolioJson, SleeveJson } from '../views/report.js';
 import { configRowCount, drawConfigPane } from './config-pane.js';
 import {
+  HISTORY_PANE,
+  drawHistoryPane,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+} from './history-pane.js';
+import {
   STRATEGIES_PANE,
   drawStrategiesPane,
   loadStrategy,
@@ -35,7 +42,7 @@ import {
 } from './strategies-pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
-const PANES = [STRATEGIES_PANE, 'config', 'sleeves', 'summary'] as const;
+const PANES = [STRATEGIES_PANE, 'config', 'sleeves', 'summary', HISTORY_PANE] as const;
 
 export function report(state: AppState): PortfolioJson | undefined {
   if (state.run?.command !== 'portfolio' || state.run.status !== 'ok') return undefined;
@@ -242,6 +249,7 @@ export const portfolioPage: Page = {
   panes: (state) => (report(state)?.mode === 'isolated' ? [...PANES, 'correlation'] : [...PANES]),
 
   rowCount: (state, paneId) => {
+    if (paneId === HISTORY_PANE) return historyRowCount(state, 'portfolio');
     if (paneId === STRATEGIES_PANE) return strategyRowCount();
     if (paneId === 'config') return configRowCount(state, 'portfolio');
     if (paneId === 'sleeves') return sleeves(state).length;
@@ -261,6 +269,7 @@ export const portfolioPage: Page = {
   },
 
   confirm: (state) => {
+    if (state.panes.portfolio.focus === HISTORY_PANE) return loadRun(state, 'portfolio');
     if (state.panes.portfolio.focus === STRATEGIES_PANE) return loadStrategy(state, 'portfolio');
     if (state.panes.portfolio.focus !== 'sleeves') return undefined;
     const list = sleeves(state);
@@ -292,9 +301,15 @@ export const portfolioPage: Page = {
     ];
     const [sleeveRect, corrRect] = rows(midCol, [midCol.h - corrH]) as [Rect, Rect];
 
-    const [stratRect, configRect] = rows(leftCol, [strategiesHeight(leftCol.h)]) as [Rect, Rect];
+    const stratH = strategiesHeight(leftCol.h);
+    const histH = historyHeight(leftCol.h);
+    const [stratRect, configRect, histRect] = rows(leftCol, [
+      stratH,
+      leftCol.h - stratH - histH,
+    ]) as [Rect, Rect, Rect];
     drawStrategiesPane(ctx, stratRect, { command: 'portfolio' });
     drawConfigPane(ctx, configRect, { command: 'portfolio' });
+    drawHistoryPane(ctx, histRect, 'portfolio');
     drawSleeves(ctx, sleeveRect);
     if (corrH > 0) drawCorrelation(ctx, corrRect);
     if (railW > 0) drawSummary(ctx, rightCol);

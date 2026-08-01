@@ -142,6 +142,12 @@ takes the same axis grammar, and a run there is _refused_ without at least one
 axis. Names the script does not declare still appear, in warn colour, because
 `pinerun` will reject them and a row that vanished would hide why.
 
+Every command page also has a **HISTORY** pane under its config, listing that
+page's runs from this session, newest first. `↵` puts one back on screen — the
+report _and_ the flags that produced it, so the config pane and the `$ pinerun …`
+line agree with the numbers, and `r` repeats it. Twenty runs per command are
+kept; older ones are dropped, because each holds a whole report.
+
 All six command pages carry the same **STRATEGIES** pane above their config, first
 in the focus ring, because all six take a `.pine` as their first argument — `↵`
 loads the selected script into that page's command. `compare` takes two, so it

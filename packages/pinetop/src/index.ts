@@ -200,6 +200,17 @@ export {
   filterPalette,
   paletteItems,
 } from './overlays.js';
+export {
+  HISTORY_LIMIT,
+  HISTORY_PANE,
+  drawHistoryPane,
+  evictHistory,
+  historyFor,
+  historyHeight,
+  historyRowCount,
+  loadRun,
+  runLabel,
+} from './pages/history-pane.js';
 export type { InputRow, InputsPaneOptions } from './pages/inputs-pane.js';
 export { declaredInputs, drawInputsPane } from './pages/inputs-pane.js';
 export type { StrategiesPaneOptions } from './pages/strategies-pane.js';

@@ -1,10 +1,11 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { App } from '../src/app.js';
-import { COMMANDS, PAGES, type PageId } from '../src/flags/schema.js';
+import { COMMANDS, PAGES, type CommandId, type PageId } from '../src/flags/schema.js';
 import { cachedScripts, refreshScripts } from '../src/scripts.js';
 import { BINDINGS } from '../src/keymap.js';
 import { hiddenFlagCount, isRunRow, runRowCount, visibleFlags } from '../src/pages/config-pane.js';
-import { composeArgv, type Pair } from '../src/flags/model.js';
+import { cloneModel, composeArgv, type Pair } from '../src/flags/model.js';
+import { HISTORY_LIMIT, evictHistory } from '../src/pages/history-pane.js';
 import { paletteItems } from '../src/overlays.js';
 import { stripAnsi } from '../src/render/screen.js';
 import { initialState, resetRunIds, type AppState, type RunState } from '../src/state.js';
@@ -1460,5 +1461,114 @@ describe('a run that succeeded but not for every symbol', () => {
 
     partial({ ranked: [] });
     expect(item.run(state)).toContain('no errors');
+  });
+});
+
+describe('run history, per page', () => {
+  let counter: number;
+
+  function run(command: CommandId, symbol: string, over: Partial<RunState> = {}): RunState {
+    const flags = cloneModel(state.flags[command]);
+    flags.values['symbol'] = symbol;
+    flags.values['tf'] = '1h';
+    return {
+      id: `#${++counter}`,
+      command,
+      status: 'ok',
+      progress: '',
+      log: [],
+      argv: [],
+      startedAt: 0,
+      elapsedMs: 2100,
+      exitCode: 0,
+      flags,
+      report: { ranked: [], sleeves: [], windows: [] },
+      ...over,
+    };
+  }
+
+  beforeEach(() => {
+    counter = 400;
+    state.flags.backtest.scripts = ['examples/rsi.pine'];
+  });
+
+  test('every command page has the pane; the two view pages do not', () => {
+    state.history = [run('backtest', 'BTCUSDT')];
+    for (const command of COMMANDS) {
+      state.page = command;
+      expect(screenText(makeApp(state)), command).toContain('HISTORY');
+    }
+    for (const page of ['trades', 'editor'] as const) {
+      state.page = page;
+      expect(screenText(makeApp(state)), page).not.toContain('HISTORY');
+    }
+  });
+
+  test('it lists this page’s runs, newest first, and nobody else’s', () => {
+    state.history = [
+      run('backtest', 'BTCUSDT'),
+      run('sweep', 'ETHUSDT'),
+      run('backtest', 'SOLUSDT'),
+    ];
+    state.page = 'backtest';
+    const text = screenText(makeApp(state));
+    expect(text).toContain('#403 SOLUSDT');
+    expect(text).toContain('#401 BTCUSDT');
+    // The sweep run belongs to the sweep page.
+    expect(text).not.toContain('ETHUSDT');
+    expect(text.indexOf('#403 SOLUSDT')).toBeLessThan(text.indexOf('#401 BTCUSDT'));
+  });
+
+  test('↵ restores the run and the config that produced it, so the line agrees', () => {
+    state.page = 'backtest';
+    state.flags.backtest.values['symbol'] = 'BTCUSDT';
+    state.history = [run('backtest', 'BTCUSDT'), run('backtest', 'ETHUSDT')];
+    state.run = state.history[1]!;
+    state.flags.backtest.values['symbol'] = 'ETHUSDT';
+
+    state.panes.backtest.focus = 'history';
+    state.panes.backtest.cursor['history'] = 1; // newest first, so [1] is the older
+    makeApp(state).onKey({ name: 'enter' });
+
+    expect(state.run!.id).toBe('#401');
+    expect(state.flags.backtest.values['symbol']).toBe('BTCUSDT');
+    // §4.1.b — the line on screen is the one that produced what is on screen.
+    expect(screenText(makeApp(state))).toContain('--symbol BTCUSDT');
+  });
+
+  test('loading drops pending overrides, which the snapshot already carries', () => {
+    state.page = 'backtest';
+    state.history = [run('backtest', 'BTCUSDT')];
+    state.overrides['examples/rsi.pine'] = {
+      stopAtr: { input: 'stopAtr', from: '2.4', to: '1.8' },
+    };
+    state.panes.backtest.focus = 'history';
+    makeApp(state).onKey({ name: 'enter' });
+    expect(state.overrides['examples/rsi.pine']).toBeUndefined();
+  });
+
+  test('the loaded run keeps its marker wherever the cursor is', () => {
+    state.page = 'backtest';
+    state.history = [run('backtest', 'BTCUSDT'), run('backtest', 'ETHUSDT')];
+    state.run = state.history[0]!;
+    state.panes.backtest.cursor['history'] = 0; // sitting on the newer one
+    expect(screenText(makeApp(state))).toContain('▌#401 BTCUSDT');
+  });
+
+  test('history is capped per command, oldest evicted', () => {
+    for (let i = 0; i < HISTORY_LIMIT + 5; i++) state.history.push(run('backtest', `S${i}`));
+    state.history.push(run('sweep', 'ETHUSDT'));
+    evictHistory(state, 'backtest');
+
+    const backtests = state.history.filter((r) => r.command === 'backtest');
+    expect(backtests).toHaveLength(HISTORY_LIMIT);
+    // The oldest went, the newest stayed, and another command's run is untouched.
+    expect(backtests[0]!.flags!.values['symbol']).toBe('S5');
+    expect(state.history.some((r) => r.command === 'sweep')).toBe(true);
+  });
+
+  test('an empty history says how to make one', () => {
+    state.page = 'backtest';
+    expect(screenText(makeApp(state))).toContain('no runs yet');
   });
 });

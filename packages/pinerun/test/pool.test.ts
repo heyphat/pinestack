@@ -1,4 +1,8 @@
 import { test, expect } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { StaticProvider, type Bar } from '@heyphat/pinery';
 import {
   LocalRunner,
@@ -440,3 +444,44 @@ plot(score, "score")`;
   },
   30_000,
 );
+
+test('a worker that never becomes ready is a bounded, explained failure — not a hang (#12)', async () => {
+  // The real defect: `new Worker()` occasionally yields a thread whose entry
+  // module never executes — no `error`, no `exit` (issue #12). From the pool's
+  // side that is indistinguishable from this stub, which runs but never posts
+  // `{ready}`. Before the boot gate, `run()` on such a worker never settled and
+  // scan/sweep/walkforward hung forever with no output.
+  const dir = mkdtempSync(join(tmpdir(), 'pool-boot-'));
+  const stub = join(dir, 'never-ready.mjs');
+  writeFileSync(stub, 'setInterval(() => {}, 60_000);\n');
+
+  const runner = new WorkerPoolRunner({
+    size: 2,
+    workerUrl: pathToFileURL(stub),
+    bootTimeoutMs: 150,
+  });
+  try {
+    const started = Date.now();
+    const job: Job = { source: SRC, symbol: 'A', timeframe: '60', bars: ramp(5, 1_700_000_000, 1) };
+    await expect(runner.run(job)).rejects.toThrow(/did not become ready/);
+    // Three fresh-worker attempts at 150ms each, plus slack — bounded, not ∞.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  } finally {
+    await runner.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test('the boot gate does not tax a healthy pool, and a booted worker still runs jobs', async () => {
+  const runner = new WorkerPoolRunner({ size: 2, bootTimeoutMs: 10_000 });
+  try {
+    const bars = ramp(20, 1_700_000_000, 1);
+    const results = await runner.runAll(
+      [1, 2, 3, 4].map((i) => ({ id: `j${i}`, source: SRC, symbol: 'A', timeframe: '60', bars })),
+      { concurrency: 2, noCache: true },
+    );
+    expect(results.every((r) => r.ok)).toBe(true);
+  } finally {
+    await runner.close();
+  }
+}, 20_000);

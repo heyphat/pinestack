@@ -15,12 +15,40 @@ import { senderCacheAfterHydration, toWireJob } from './wire.js';
 export interface WorkerPoolOptions {
   /** Number of worker threads. Default: CPU count (clamped to 1..16). */
   size?: number;
+  /**
+   * How long a fresh thread may take to run its entry module and report ready.
+   * A healthy boot is milliseconds; the default leaves room for a cold, loaded
+   * CI machine. Overridable via PINERUN_WORKER_BOOT_TIMEOUT_MS. Exists because
+   * a `new Worker()` can occasionally produce a thread whose entry module never
+   * executes (#12) — without a bound, the job posted to it waits forever.
+   */
+  bootTimeoutMs?: number;
+  /** Test seam: an alternate worker entry module. */
+  workerUrl?: URL;
 }
 
 function defaultSize(): number {
   const n = cpus()?.length ?? 4;
   return Math.min(16, Math.max(1, n));
 }
+
+const DEFAULT_BOOT_TIMEOUT_MS = 5_000;
+
+function defaultBootTimeout(): number {
+  const env = Number(process.env['PINERUN_WORKER_BOOT_TIMEOUT_MS']);
+  return Number.isFinite(env) && env > 0 ? env : DEFAULT_BOOT_TIMEOUT_MS;
+}
+
+/**
+ * A worker thread that never became ready (#12). The job was never received by
+ * anything, so retrying it on a fresh worker is always safe — nothing ran.
+ */
+class WorkerBootError extends Error {}
+
+/** Boot-miss retries per job. Each attempt is a *different, fresh* worker, so
+ *  repeated failure means the environment cannot start threads at all — an
+ *  error worth surfacing, not retrying forever. */
+const MAX_BOOT_ATTEMPTS = 3;
 
 // Inside a `bun build --compile` binary the worker entrypoint is embedded in the
 // virtual bunfs as transpiled `.js` (pass it as a second entrypoint when
@@ -48,15 +76,62 @@ class WorkerHandle {
    *  worker is a silent no-op, so a dead handle must never accept another job —
    *  its promise would simply never settle. */
   dead = false;
+  /**
+   * Settles when the entry module reports its message listener attached; rejects
+   * with `WorkerBootError` if the boot timeout lapses first, or with the thread's
+   * own error if it dies before becoming ready.
+   *
+   * This gate exists because worker startup can silently miss (#12): the thread
+   * is created, its entry module never runs, and neither `error` nor `exit`
+   * fires — the one worker death the event handlers below cannot see. `exec`
+   * waits here before posting, so no job is ever sent into that void.
+   */
+  private readonly ready: Promise<void>;
 
-  constructor() {
+  constructor(url: URL = WORKER_URL, bootTimeoutMs = defaultBootTimeout()) {
     this.datasetAuthSecret = randomBytes(32).toString('hex');
-    this.worker = new Worker(WORKER_URL, {
+    this.worker = new Worker(url, {
       workerData: { datasetAuthSecret: this.datasetAuthSecret },
     });
+
+    let readyResolve!: () => void;
+    let readyReject!: (err: Error) => void;
+    this.ready = new Promise<void>((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
+    });
+    // A handle can be replaced while idle without any job ever awaiting `ready`;
+    // its rejection must not surface as an unhandled-rejection crash.
+    this.ready.catch(() => {});
+
+    const bootTimer = setTimeout(() => {
+      this.dead = true;
+      readyReject(
+        new WorkerBootError(
+          `pinerun worker: thread did not become ready within ${bootTimeoutMs}ms ` +
+            `(startup miss — https://github.com/heyphat/pinestack/issues/12)`,
+        ),
+      );
+      // The zombie holds an OS thread; release it. Its `exit` event is a no-op
+      // here — `ready` is already settled and nothing is pending.
+      void this.terminate();
+    }, bootTimeoutMs);
+    bootTimer.unref?.();
+
     this.worker.on(
       'message',
-      (msg: { seq: number; result?: RunResult; error?: string; hydrated: boolean }) => {
+      (msg: {
+        seq: number;
+        result?: RunResult;
+        error?: string;
+        hydrated: boolean;
+        ready?: boolean;
+      }) => {
+        if (msg.ready === true) {
+          clearTimeout(bootTimer);
+          readyResolve();
+          return;
+        }
         const p = this.pending.get(msg.seq);
         if (!p) return;
         this.pending.delete(msg.seq);
@@ -66,16 +141,22 @@ class WorkerHandle {
       },
     );
     this.worker.on('error', (err) => {
+      clearTimeout(bootTimer);
       this.dead = true;
-      this.failAll(err instanceof Error ? err : new Error(String(err)));
+      const error = err instanceof Error ? err : new Error(String(err));
+      readyReject(error); // no-op when already ready
+      this.failAll(error);
     });
     this.worker.on('exit', (code) => {
+      clearTimeout(bootTimer);
       this.dead = true;
+      const error = new Error(`pinerun worker exited with code ${code}`);
+      readyReject(error); // no-op when already ready
       // A clean-looking exit while a job is pending is still a failed worker:
       // without rejection the promise would never settle and the dead handle
       // could not be released/replaced by the pool.
       if (code !== 0 || this.pending.size > 0) {
-        this.failAll(new Error(`pinerun worker exited with code ${code}`));
+        this.failAll(error);
       }
     });
   }
@@ -85,9 +166,14 @@ class WorkerHandle {
     this.pending.clear();
   }
 
-  exec(job: Job): Promise<RunResult> {
+  async exec(job: Job): Promise<RunResult> {
+    // Never post into a thread that has not proven it is listening (#12) — a
+    // message to a worker whose entry module never ran is silently dropped and
+    // its promise would never settle. Resolved-promise cost on the happy path
+    // is one microtask.
+    await this.ready;
     if (this.dead) {
-      return Promise.reject(new Error('pinerun worker: worker thread is no longer running'));
+      throw new Error('pinerun worker: worker thread is no longer running');
     }
     const seq = this.seq++;
     const { wire, sent } = toWireJob(job, this.cachedIds, this.datasetAuthSecret);
@@ -97,8 +183,18 @@ class WorkerHandle {
     });
   }
 
+  private terminated?: Promise<number>;
+
+  /**
+   * Idempotent: the boot-timeout path terminates its zombie, and `close()`
+   * terminates every handle it knows — the same worker can legitimately be
+   * asked twice. A second bare `worker.terminate()` returns a promise that
+   * never resolves (observed on Bun 1.2.5), which turned pool shutdown into
+   * exactly the kind of hang this file exists to prevent.
+   */
   terminate(): Promise<number> {
-    return this.worker.terminate();
+    this.terminated ??= this.worker.terminate();
+    return this.terminated;
   }
 }
 
@@ -106,11 +202,15 @@ export class WorkerPoolRunner implements Runner {
   private readonly workers: WorkerHandle[];
   private readonly idle: WorkerHandle[] = [];
   private readonly waiters: Array<(w: WorkerHandle) => void> = [];
+  private readonly workerUrl: URL;
+  private readonly bootTimeoutMs: number;
   private closed = false;
 
   constructor(opts: WorkerPoolOptions = {}) {
     const size = Math.max(1, opts.size ?? defaultSize());
-    this.workers = Array.from({ length: size }, () => new WorkerHandle());
+    this.workerUrl = opts.workerUrl ?? WORKER_URL;
+    this.bootTimeoutMs = opts.bootTimeoutMs ?? defaultBootTimeout();
+    this.workers = Array.from({ length: size }, () => this.spawnWorker());
     this.idle.push(...this.workers);
   }
 
@@ -118,8 +218,12 @@ export class WorkerPoolRunner implements Runner {
     return this.workers.length;
   }
 
+  private spawnWorker(): WorkerHandle {
+    return new WorkerHandle(this.workerUrl, this.bootTimeoutMs);
+  }
+
   private replaceDead(w: WorkerHandle): WorkerHandle {
-    const replacement = new WorkerHandle();
+    const replacement = this.spawnWorker();
     const index = this.workers.indexOf(w);
     if (index >= 0) this.workers[index] = replacement;
     else this.workers.push(replacement);
@@ -145,11 +249,22 @@ export class WorkerPoolRunner implements Runner {
   }
 
   async run(job: Job): Promise<RunResult> {
-    const w = await this.acquire();
-    try {
-      return await w.exec(job);
-    } finally {
-      this.release(w);
+    for (let attempt = 1; ; attempt++) {
+      const w = await this.acquire();
+      try {
+        return await w.exec(job);
+      } catch (err) {
+        // A boot miss (#12) means the job was never received by anything, so
+        // re-dispatching is always safe — `release` in the finally has already
+        // swapped the dead handle for a fresh worker. Each attempt is a new
+        // thread; give up once repeated fresh threads also fail to start.
+        if (err instanceof WorkerBootError && attempt < MAX_BOOT_ATTEMPTS && !this.closed) {
+          continue;
+        }
+        throw err;
+      } finally {
+        this.release(w);
+      }
     }
   }
 

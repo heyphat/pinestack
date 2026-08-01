@@ -3,14 +3,16 @@
 The A-to-Z runbook for cutting a new pinestack release — prebuilt `pinerun` and
 `pinetop` binaries attached to a GitHub Release. There is **no npm publish**: the packages
 run from TypeScript source in this workspace, and the binaries are the product.
-A release also publishes **no `pinelive` binary**: `@heyphat/pinelive` is
-source-checkout/workspace-only and is not installed by the release installer.
+A release now also ships a standalone **`pinelive`** binary (forward runner).
+The installer does **not** install it by default — it is an explicit
+`PINESTACK_BINS` opt-in, because its Tiger adapters are offline-tested only and
+not sandbox- or production-approved. Paper remains its default broker.
 
 ## Release model
 
 Releases are **tag-driven**. Pushing a `v*` tag to GitHub is the single trigger:
 it runs `.github/workflows/release.yml`, which typechecks, tests, cross-compiles
-both binaries for every target, and **creates the GitHub Release itself**
+every binary for every target, and **creates the GitHub Release itself**
 (binaries + `checksums.txt` + auto-generated notes). Unlike piner, there is no
 manual `gh release create` step. Everything else — version bump, changelog — is
 done by hand, in a set order, _before_ the tag is pushed.
@@ -97,9 +99,8 @@ even if no user script reads it.
 The four workspace packages are versioned **in lockstep** with the release tag:
 `packages/pinerun/package.json`, `packages/pinery/package.json`,
 `packages/pinetop/package.json` and `packages/pinelive/package.json` all carry
-`X.Y.Z`, even when only one changed. Pinelive ships no binary, but it is stamped
-anyway so a checkout's four manifests can never disagree — `test/workspace.test.ts`
-enforces this. The private workspace-root package stays at `0.0.0`; do not confuse
+`X.Y.Z`, even when only one changed — `test/workspace.test.ts` enforces this,
+along with every `bin` entry having a matching build product. The private workspace-root package stays at `0.0.0`; do not confuse
 it with the pinned root dependency on `@heyphat/piner`.
 Each shipped binary bakes in **its own** manifest version — `build-bin.ts` injects it
 (plus the git commit) so `pinerun --version` and `pinetop --version` self-report.
@@ -146,7 +147,7 @@ Edit `version` in **all four** package manifests to the release version:
 "version": "0.2.0",
 // packages/pinery/package.json  ← kept in lockstep
 "version": "0.2.0",
-// packages/pinelive/package.json  ← kept in lockstep (source-only, still stamped)
+// packages/pinelive/package.json  ← stamps `pinelive --version`
 "version": "0.2.0",
 ```
 
@@ -251,28 +252,29 @@ The job runs: checkout → setup Bun → `bun install --frozen-lockfile` →
 every binary attached. Then confirm:
 
 ```bash
-gh release view vX.Y.Z             # 10 binaries + checksums.txt attached
+gh release view vX.Y.Z             # 15 binaries + checksums.txt attached
 ```
 
-Expected assets — 5 targets × 2 binaries, plus one shared manifest:
+Expected assets — 5 targets × 3 binaries, plus one shared manifest:
 
 ```
-pinerun-linux-x64     pinetop-linux-x64
-pinerun-linux-arm64   pinetop-linux-arm64
-pinerun-darwin-x64    pinetop-darwin-x64
-pinerun-darwin-arm64  pinetop-darwin-arm64
-pinerun-windows-x64.exe   pinetop-windows-x64.exe
+pinerun-linux-x64     pinetop-linux-x64     pinelive-linux-x64
+pinerun-linux-arm64   pinetop-linux-arm64   pinelive-linux-arm64
+pinerun-darwin-x64    pinetop-darwin-x64    pinelive-darwin-x64
+pinerun-darwin-arm64  pinetop-darwin-arm64  pinelive-darwin-arm64
+pinerun-windows-x64.exe   pinetop-windows-x64.exe   pinelive-windows-x64.exe
 checksums.txt
 ```
 
-`checksums.txt` must list **all ten**: `pinerun upgrade` and `pinetop upgrade`
-each resolve their own asset from it, so an asset missing there cannot
-self-update even though it downloaded fine.
+`checksums.txt` must list **all fifteen**: `pinerun upgrade`, `pinetop upgrade`,
+and `pinelive upgrade` each resolve their own asset from it, so an asset missing
+there cannot self-update even though it downloaded fine.
 
 ### 8. Verify the installer path end-to-end
 
 The installer follows `releases/latest`, which now points at the new release. It
-installs both binaries, so check both:
+installs `pinerun` and `pinetop` by default (`pinelive` only with an explicit
+`PINESTACK_BINS` opt-in), so check both defaults:
 
 ```bash
 export PINESTACK_INSTALL_DIR=$(mktemp -d)
@@ -321,15 +323,15 @@ single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 | Install   | `bun install --frozen-lockfile`                                        |
 | Typecheck | `bun run typecheck`                                                    |
 | Test      | `bun test`                                                             |
-| Build     | `build-bin.ts all --product pinerun`, then `--product pinetop`         |
+| Build     | `build-bin.ts all --product <p>` for pinerun, pinetop, pinelive        |
 | Verify    | run each linux-x64 asset: `--version` matches the tag; `--check-flags` |
-| Checksums | `sha256sum pinerun-* pinetop-* > checksums.txt`                        |
+| Checksums | `sha256sum pinerun-* pinetop-* pinelive-* > checksums.txt`             |
 | Release   | `softprops/action-gh-release@v2` — uploads assets, generates notes     |
 
-> Both binaries ship, so a release carries **10 assets** (2 binaries × 5 targets)
+> Three binaries ship, so a release carries **15 assets** (3 binaries × 5 targets)
 > plus one `checksums.txt` covering all of them. That single manifest matters:
-> both `pinerun upgrade` and `pinetop upgrade` resolve their own asset from it, so
-> an asset missing from `checksums.txt` cannot self-update.
+> every `<bin> upgrade` resolves its own asset from it, so an asset missing from
+> `checksums.txt` cannot self-update.
 >
 > The workflow also **executes** the freshly built linux-x64 assets to assert each
 > reports the tag being released, and runs `pinetop --check-flags` against the
@@ -389,9 +391,10 @@ single Ubuntu runner (Bun cross-compiles every target — no build matrix):
 [ ] (pinetop) ./dist/pinetop --check-flags agrees with this release's CLI flags
 [ ] chore(release): X.Y.Z committed on main
 [ ] git tag vX.Y.Z on main, pushed
-[ ] release.yml green; gh release view shows 10 binaries + checksums.txt
+[ ] release.yml green; gh release view shows 15 binaries + checksums.txt
 [ ] curl installer → pinerun --version AND pinetop --version report X.Y.Z
 [ ] pinetop upgrade --check on the previous release offers the new one
-[ ] docs still state that pinelive is source-only and that no npm publish occurs
+[ ] docs still state that pinelive is opt-in (not a default install), Tiger is
+    not production-approved, and no npm publish occurs
 [ ] (optional) release notes replaced with the CHANGELOG section
 ```

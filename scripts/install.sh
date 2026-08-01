@@ -7,10 +7,14 @@
 # Installs two binaries by default:
 #   pinerun   the CLI — scan, backtest, sweep, walkforward, portfolio, compare
 #   pinetop   a terminal UI over that CLI (it spawns pinerun, so it needs it)
+#   pinelive  the forward runner (NOT installed by default — opt in via
+#             PINESTACK_BINS. Paper broker by default; its Tiger adapters are
+#             offline-tested only and not sandbox- or production-approved.)
 #
 # Environment overrides:
 #   PINESTACK_BINS         which to install. Default "pinerun pinetop".
-#                          e.g. PINESTACK_BINS=pinerun for the CLI alone.
+#                          e.g. PINESTACK_BINS=pinerun for the CLI alone, or
+#                          PINESTACK_BINS="pinerun pinetop pinelive" for all.
 #   PINESTACK_VERSION      tag to install (e.g. v0.1.0). Default: latest release.
 #                          (PINERUN_VERSION is still honoured.)
 #   PINESTACK_INSTALL_DIR  directory to install into. Default: ~/.local/bin.
@@ -35,8 +39,8 @@ err() {
 # PINESTACK_BINS fails clean instead of half-installing.
 for bin in $BINS; do
   case "$bin" in
-  pinerun | pinetop) ;;
-  *) err "unknown binary '$bin' in PINESTACK_BINS. Known: pinerun pinetop." ;;
+  pinerun | pinetop | pinelive) ;;
+  *) err "unknown binary '$bin' in PINESTACK_BINS. Known: pinerun pinetop pinelive." ;;
   esac
 done
 [ -n "$BINS" ] || err "PINESTACK_BINS is empty — nothing to install."

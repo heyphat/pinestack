@@ -1,12 +1,14 @@
 import { CompileError, compile, type CompiledScript } from '@heyphat/piner';
 import {
   assertLiveSymbolMatchesConfig,
+  barCloseTime,
   canonicalTimeframeToPineExact,
   parseCanonicalTimeframeExact,
   type MarketDataProvider,
   type ResolvedDataInstrument,
 } from '@heyphat/pinery';
 import { preflightCompiledBarMagnifier, type MagnifierPreflight } from '@heyphat/pinerun';
+import { AlertDispatcher, type AlertChannel } from './alerts.js';
 import type { Broker } from './broker.js';
 import {
   createV2ComputeInstrumentBinding,
@@ -182,6 +184,13 @@ interface IntrabarServerCallbacks {
   /** Invoked only after this evaluation has a durable schema-v3 row. */
   readonly onEvaluation?: (evaluation: IntrabarEvaluation) => void | Promise<void>;
   readonly onLog?: (message: string) => void;
+  /**
+   * Constructed notification channels for `config.alerts`. The config carries
+   * channel SPECS; hosts construct transports (the CLI builds the webhook
+   * kind). Fail-closed: a config that declares channels but reaches the
+   * runtime without them refuses to start.
+   */
+  readonly alertChannels?: readonly AlertChannel[];
 }
 
 interface DirectRuntimeOptions extends IntrabarServerCallbacks {
@@ -307,6 +316,24 @@ export async function runIntrabarServer(
   const config = options.prepared.config;
   const mirrored = config.execution.kind === 'mirrored';
   const brokerClass = mirrored ? config.execution.broker.id : 'compute-only';
+  const alertChannels = options.alertChannels ?? [];
+  if ((config.alerts?.channels.length ?? 0) > 0 && alertChannels.length === 0)
+    throw new Error(
+      'config.alerts declares channels but no alert channels were supplied to the runtime',
+    );
+  const alertDispatcher =
+    alertChannels.length > 0
+      ? new AlertDispatcher({
+          channels: alertChannels,
+          frequency: config.alerts?.frequency,
+          sendTimeoutMs: config.alerts?.sendTimeoutMs,
+          maxPerBar: config.alerts?.maxPerBar,
+          onError: (channel, alert, reason) =>
+            options.onLog?.(
+              `alert delivery failed on ${channel} for bar ${alert.barTime}: ${reason}`,
+            ),
+        })
+      : undefined;
   const managed = isManagedOptions(options);
   const refreshRecoveryAfterLease =
     !managed && mirrored
@@ -407,6 +434,45 @@ export async function runIntrabarServer(
             `decision ${evaluation.decisionId} was refused by the per-bar target limit` +
               (evaluation.finalCommit ? '; the execution breaker is now latched' : ''),
           );
+        }
+        // Alert delivery: fresh authoritative finals only (the mirror gate's
+        // sibling), after the decision row is durable. Fail-open by contract —
+        // only the durable alert row's append may propagate.
+        if (
+          alertDispatcher &&
+          evaluation.finalCommit &&
+          evaluation.reason === 'eligible' &&
+          evaluation.alerts.length > 0
+        ) {
+          const reports = await alertDispatcher.process({
+            runId: writer!.runId,
+            strategyId: config.strategy,
+            strategySymbol: currentBinding.strategySymbol,
+            timeframe: config.timeframe,
+            barTime: evaluation.update.barTime,
+            barCloseMs: barCloseTime(evaluation.update.barTime, config.timeframe) * 1000,
+            price: evaluation.bar.close,
+            closed: true,
+            messages: evaluation.alerts,
+          });
+          for (const report of reports) {
+            await writer!.append({
+              recordType: 'alert',
+              decisionId: evaluation.decisionId,
+              strategyId: config.strategy,
+              strategySymbol: currentBinding.strategySymbol,
+              executionSymbol: currentBinding.executionSymbol,
+              bindingId: currentBinding.id,
+              timeframe: config.timeframe,
+              barTime: report.alert.barTime,
+              ordinal: report.alert.ordinal,
+              message: report.alert.message,
+              source: report.alert.source,
+              price: report.alert.price,
+              firedAt: report.alert.firedAt,
+              deliveries: [...report.deliveries],
+            });
+          }
         }
         evaluationCount++;
         latestDecision = decisionSummary(evaluation);
@@ -635,6 +701,7 @@ export async function runIntrabarServer(
 
   if (scheduler) await cleanup(() => scheduler!.stop());
   if (computeJournal) await cleanup(() => computeJournal!.stop());
+  if (alertDispatcher) await cleanup(() => alertDispatcher.close());
   if (writer) await cleanup(() => writer!.flush());
 
   if (scheduler && lease?.snapshot) {

@@ -51,22 +51,24 @@ against the release's `checksums.txt`, and swaps the executable atomically
 
 `pinetop` spawns `pinerun` for every number it shows, so keep both current.
 
-> **Pinelive is not installed by this command.** GitHub Releases carry the
-> `pinerun` and `pinetop` binaries only. `@heyphat/pinelive` is
-> source-checkout/workspace-only; see its
-> [source quick start](./packages/pinelive/README.md#paper-quick-start).
+> **Pinelive is not installed by default.** Releases also carry a standalone
+> `pinelive` binary (the forward runner), but the installer only fetches it with
+> an explicit opt-in — `PINESTACK_BINS="pinerun pinetop pinelive"` — because its
+> Tiger adapters are offline-tested only and not sandbox- or production-approved.
+> Paper is its default broker. See the
+> [quick start](./packages/pinelive/README.md#paper-quick-start).
 
 Prefer to build them yourself? See [Getting started](#getting-started) below, then
 `bun run build:bin --install`.
 
 ## Packages
 
-| Package                                    | Role                                                                                                                                                                                                                                                | Entry points                                                                                |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| [`@heyphat/pinery`](./packages/pinery)     | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache.                                 | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                                    |
-| [`@heyphat/pinerun`](./packages/pinerun)   | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI)                 |
-| [`@heyphat/pinetop`](./packages/pinetop)   | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command plus a vim editor for the `.pine`, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload. | `@heyphat/pinetop`, `pinetop` (TUI)                                                         |
-| [`@heyphat/pinelive`](./packages/pinelive) | **Forward-execution layer.** Closed-bar runner, exact broker position mirror, PaperBroker, Tiger execution adapters, JSONL ledger, parity, and broker conformance utilities.                                                                        | `@heyphat/pinelive`, `@heyphat/pinelive/node`, `@heyphat/pinelive/testing`, source-only CLI |
+| Package                                    | Role                                                                                                                                                                                                                                                | Entry points                                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| [`@heyphat/pinery`](./packages/pinery)     | **Data layer.** OHLCV history providers (Binance spot/futures, OKX spot/swap, Kraken, Alpaca, Massive, static/CSV) implementing piner's `DataFeed` contract, canonical timeframe helpers, and a Node on-disk cache.                                 | `@heyphat/pinery` (browser-safe), `@heyphat/pinery/node`                                     |
+| [`@heyphat/pinerun`](./packages/pinerun)   | **Orchestration layer.** The job model, a determinism cache, in-process and worker-thread runners, the ranker, the `scan` fan-out, and the `pinerun` CLI.                                                                                           | `@heyphat/pinerun` (browser-safe), `@heyphat/pinerun/node`, `pinerun` (CLI)                  |
+| [`@heyphat/pinetop`](./packages/pinetop)   | **Interactive layer.** A terminal UI over the CLI: one page per `pinerun` command plus a vim editor for the `.pine`, flags editable in place, the report resident on screen. Computes nothing — it spawns `pinerun --json` and renders the payload. | `@heyphat/pinetop`, `pinetop` (TUI)                                                          |
+| [`@heyphat/pinelive`](./packages/pinelive) | **Forward-execution layer.** Closed-bar runner, exact broker position mirror, PaperBroker, Tiger execution adapters, JSONL ledger, parity, and broker conformance utilities.                                                                        | `@heyphat/pinelive`, `@heyphat/pinelive/node`, `@heyphat/pinelive/testing`, `pinelive` (CLI) |
 
 ```
 piner            (engine — separate repo, pure, browser-safe)
@@ -199,7 +201,7 @@ Requires [Bun](https://bun.sh) 1.2.5, matching CI and the release toolchain.
 bun install --frozen-lockfile   # links workspaces + the piner peer
 bun test                        # runs every package's test suite
 bun run typecheck               # tsc -b across every package
-bun packages/pinelive/src/cli.ts --help   # the source-only forward CLI
+bun packages/pinelive/src/cli.ts --help   # the forward CLI (also builds standalone)
 ```
 
 Build a standalone binary from your checkout and drop it on your PATH with

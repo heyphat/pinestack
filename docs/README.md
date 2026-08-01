@@ -30,12 +30,17 @@ pinerun --help
 advances piner, and reconciles one resolved exact contract through PaperBroker or
 a broker adapter.
 
-> **Source-only:** the GitHub release installer provides `pinerun`, not
-> `pinelive`. Pinelive is not published to npm and has no prebuilt release asset.
-> From a checkout, invoke it with
-> `bun packages/pinelive/src/cli.ts run --config <path>`. The
+> **Opt-in install:** releases ship a standalone `pinelive` binary, but the
+> installer fetches it only with `PINESTACK_BINS="pinerun pinetop pinelive"` —
+> its Tiger adapters are offline-tested only and not production-approved. From a
+> checkout, `bun packages/pinelive/src/cli.ts run --config <path>` works without
+> any install. The
 > [pinelive package README](../packages/pinelive/README.md#paper-quick-start)
 > contains a runnable Paper/CSV example.
+
+Pine `alert()` calls in a running strategy reach registered channels — see
+[**pinelive alerts**](./pinelive-alerts.md) for the frequency gate, webhook
+channel, ledger records, and delivery semantics.
 
 Broker implementers should read the
 [adapter contract](./pinelive-adapter-contract.md). Tiger readiness limits and

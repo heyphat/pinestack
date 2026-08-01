@@ -1,5 +1,7 @@
 import type { MarketDataProvider } from '@heyphat/pinery';
+import { AlertDispatcher, type AlertChannel } from './alerts.js';
 import type { Broker } from './broker.js';
+import type { NormalizedAlertsConfig } from './config.js';
 import type { LedgerSink } from './ledger.js';
 import type { PositionMirrorOptions } from './mirror.js';
 import { ForwardRunner } from './runner.js';
@@ -30,6 +32,13 @@ export interface ForwardServerOptions {
   /** Failed refreshes tolerated before stopping. Default 0. */
   maxSecurityStaleRefreshes?: number;
   mirror?: PositionMirrorOptions;
+  /**
+   * Constructed notification channels for `config.alerts`. The server builds
+   * the dispatcher from the normalized policy; a config that declares channels
+   * but reaches the runtime without them refuses to start (fail-closed).
+   */
+  alertChannels?: readonly AlertChannel[];
+  alerts?: NormalizedAlertsConfig;
   signal?: AbortSignal;
   onLog?: (message: string) => void;
 }
@@ -45,6 +54,24 @@ export async function runForwardServer(
   options: ForwardServerOptions,
 ): Promise<ForwardServerResult> {
   if (options.signal?.aborted) throw new Error('forward server start aborted');
+  const alertChannels = options.alertChannels ?? [];
+  if ((options.alerts?.channels.length ?? 0) > 0 && alertChannels.length === 0)
+    throw new Error(
+      'config.alerts declares channels but no alert channels were supplied to the runtime',
+    );
+  const alertDispatcher =
+    alertChannels.length > 0
+      ? new AlertDispatcher({
+          channels: alertChannels,
+          frequency: options.alerts?.frequency,
+          sendTimeoutMs: options.alerts?.sendTimeoutMs,
+          maxPerBar: options.alerts?.maxPerBar,
+          onError: (channel, alert, reason) =>
+            options.onLog?.(
+              `alert delivery failed on ${channel} for bar ${alert.barTime}: ${reason}`,
+            ),
+        })
+      : undefined;
   const runner = new ForwardRunner(options.data, options.broker, {
     source: options.source,
     symbol: options.symbol,
@@ -67,6 +94,19 @@ export async function runForwardServer(
     onSecurityHealth: (record) => options.ledger.append(record),
     mirror: { transientRetries: 2, retryDelayMs: 250, ...options.mirror },
     onBinding: (record) => options.ledger.append(record),
+    ...(alertDispatcher
+      ? {
+          alertDispatcher,
+          onAlertRecord: async (record) => {
+            await options.ledger.append(record);
+            const failed = record.deliveries.filter((d) => d.outcome === 'failed').length;
+            options.onLog?.(
+              `${record.barTime} alert "${record.message}" → ${record.deliveries.length} channel(s)` +
+                (failed > 0 ? ` (${failed} failed)` : ''),
+            );
+          },
+        }
+      : {}),
     onStartupRecord: async (record) => {
       await options.ledger.append(record);
       options.onLog?.(`startup target=${record.target} action=${record.action}`);
@@ -113,6 +153,7 @@ export async function runForwardServer(
     }
   };
   await cleanup(() => runner.stop());
+  await cleanup(async () => alertDispatcher?.close());
   await cleanup(async () => options.ledger.flush?.());
   await cleanup(() => runner.disconnect());
   await cleanup(async () => options.ledger.close?.());

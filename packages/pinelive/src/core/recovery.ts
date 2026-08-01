@@ -355,6 +355,31 @@ export function assertLedgerEventV3(
         nonEmptyString(id, 'unresolvedLogicalOrderIds[]', fail);
       optionalString(event.detail, 'detail', fail);
       break;
+    case 'alert': {
+      nonEmptyString(event.decisionId, 'decisionId', fail);
+      nonEmptyString(event.strategyId, 'strategyId', fail);
+      nonEmptyString(event.strategySymbol, 'strategySymbol', fail);
+      nonEmptyString(event.executionSymbol, 'executionSymbol', fail);
+      nonEmptyString(event.bindingId, 'bindingId', fail);
+      nonEmptyString(event.timeframe, 'timeframe', fail);
+      finite(event.barTime, 'barTime', fail);
+      positiveInteger(event.ordinal, 'ordinal', fail);
+      if (typeof event.message !== 'string') fail('alert message must be a string');
+      if (event.source !== 'bar-close') fail('invalid alert source');
+      finite(event.price, 'price', fail);
+      finite(event.firedAt, 'firedAt', fail);
+      const deliveries = event.deliveries;
+      if (!Array.isArray(deliveries) || deliveries.length === 0)
+        fail('alert deliveries must be a non-empty array');
+      for (const delivery of deliveries as readonly Record<string, unknown>[]) {
+        if (!isObject(delivery)) fail('alert delivery must be an object');
+        nonEmptyString(delivery.channel, 'delivery.channel', fail);
+        if (!['sent', 'failed', 'suppressed'].includes(String(delivery.outcome)))
+          fail('invalid alert delivery outcome');
+        optionalString(delivery.error, 'delivery.error', fail);
+      }
+      break;
+    }
     case 'lease':
       if (!['acquired', 'released', 'contended', 'lost'].includes(String(event.action)))
         fail('invalid lease action');
@@ -775,6 +800,9 @@ export function recoverLedger(
         }
         break;
       }
+      case 'alert':
+        // Advisory: shape was validated above; alerts derive no decision state.
+        break;
       case 'lease':
         if (event.action === 'acquired') {
           if (activeLease) fail('lease acquired while another lease is active');

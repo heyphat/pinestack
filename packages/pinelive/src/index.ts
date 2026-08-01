@@ -50,6 +50,40 @@ export type {
 } from './core/mirror.js';
 export { PositionMirror, PositionMirrorHookError } from './core/mirror.js';
 export type {
+  AlertChannel,
+  AlertDeliveryOutcome,
+  AlertDeliveryStatus,
+  AlertDispatcherOptions,
+  AlertEvaluationContext,
+  AlertFrequency,
+  AlertFrequencyState,
+  AlertSample,
+  AlertSource,
+  DispatchedAlert,
+  StrategyAlert,
+} from './core/alerts.js';
+export {
+  AlertDispatcher,
+  alertFrequencyGate,
+  coarseReason,
+  normalizeAlertMessage,
+  DEFAULT_ALERT_FREQUENCY,
+  DEFAULT_ALERT_SEND_TIMEOUT_MS,
+  DEFAULT_ALERT_ATTEMPTS,
+  DEFAULT_ALERT_RETRY_DELAY_MS,
+  DEFAULT_MAX_ALERTS_PER_BAR,
+  MAX_ALERT_MESSAGE_LENGTH,
+} from './core/alerts.js';
+export type { WebhookAlertChannelOptions, WebhookAlertPayload } from './alerts/webhook.js';
+export { WebhookAlertChannel, webhookAlertPayload } from './alerts/webhook.js';
+export type { TelegramAlertChannelOptions } from './alerts/telegram.js';
+export {
+  TelegramAlertChannel,
+  telegramAlertText,
+  TELEGRAM_API_BASE_URL,
+  TELEGRAM_MAX_TEXT_LENGTH,
+} from './alerts/telegram.js';
+export type {
   ForwardRecord,
   BindingRecord,
   StartupRecord,
@@ -78,6 +112,8 @@ export type {
   BreakerEventV3,
   RecoveryEventV3,
   LeaseEventV3,
+  AlertDispatchRecord,
+  AlertDispatchEventV3,
   SequencedLedgerOptions,
 } from './core/ledger.js';
 export { MemoryLedger, SequencedLedger } from './core/ledger.js';
@@ -201,9 +237,17 @@ export type {
   NormalizedExecutionSchedulerConfig,
   CompiledIntrabarMetadata,
 } from './core/config.js';
+export type {
+  NormalizedAlertsConfig,
+  NormalizedAlertChannelConfig,
+  NormalizedWebhookChannelConfig,
+  NormalizedTelegramChannelConfig,
+} from './core/config.js';
 export {
   normalizeRunConfig,
+  normalizeAlerts,
   validateCompiledIntrabarConfig,
+  MAX_ALERT_CHANNELS,
   DEFAULT_LIVE_THROTTLE_MS,
   DEFAULT_MAX_PENDING_FINALS,
   DEFAULT_LIVE_RECONNECT_ATTEMPTS,

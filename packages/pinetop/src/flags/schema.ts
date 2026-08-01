@@ -127,6 +127,15 @@ const DATA: FlagSpec[] = [
     help: 'Assert absent bars inside an authenticated record span mean no trades',
   },
   {
+    name: 'tiger-profile',
+    kind: 'string',
+    group: 'data',
+    advanced: true,
+    // Optional even when Tiger is selected (TG: symbols work without --provider),
+    // so no revealWhen: the SDK falls back to ./ or ~/.tigeropen discovery.
+    help: 'Tiger credential properties file for --provider tiger / TG: symbols',
+  },
+  {
     name: 'no-security',
     kind: 'bool',
     group: 'data',

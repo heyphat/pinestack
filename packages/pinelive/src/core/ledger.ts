@@ -1,3 +1,4 @@
+import type { AlertDeliveryOutcome, AlertSource } from './alerts.js';
 import type { ReconcileError } from './mirror.js';
 import type { SecurityFeedHealth } from './security.js';
 import type { Bar, Fill, OrderRequest } from './types.js';
@@ -60,6 +61,32 @@ export interface SecurityFeedHealthRecord {
 export interface StartupRecord extends Omit<ForwardRecord, 'recordType' | 'schemaVersion'> {
   schemaVersion: 2;
   recordType: 'startup';
+}
+
+/**
+ * One gated Pine alert with its per-channel delivery outcomes (v1 path).
+ * Written after dispatch so it carries real outcomes; restart cannot duplicate
+ * a delivery because v1 resumes strictly after the last processed bar.
+ */
+export interface AlertDispatchRecord {
+  schemaVersion: 2;
+  recordType: 'alert';
+  runId: string;
+  strategyId: string;
+  strategySymbol: string;
+  timeframe: string;
+  /** Bar open, unix seconds. */
+  barTime: number;
+  /** 1-based among the bar's gated alerts. */
+  ordinal: number;
+  message: string;
+  source: AlertSource;
+  /** The evaluated bar's close. */
+  price: number;
+  /** Bar close, unix milliseconds — sample time, never wall clock. */
+  firedAt: number;
+  deliveries: readonly AlertDeliveryOutcome[];
+  recordedAt: string;
 }
 
 /**
@@ -261,6 +288,25 @@ export interface LeaseEventV3 extends LedgerEventBaseV3 {
   detail?: string;
 }
 
+/** One gated Pine alert with delivery outcomes (schema-v3 stream). Advisory:
+ * recovery validates the shape but derives no decision state from it. */
+export interface AlertDispatchEventV3 extends LedgerEventBaseV3 {
+  recordType: 'alert';
+  decisionId: string;
+  strategyId: string;
+  strategySymbol: string;
+  executionSymbol: string;
+  bindingId: string;
+  timeframe: string;
+  barTime: number;
+  ordinal: number;
+  message: string;
+  source: AlertSource;
+  price: number;
+  firedAt: number;
+  deliveries: readonly AlertDeliveryOutcome[];
+}
+
 export type LedgerEventV3 =
   | AuthorityEventV3
   | BindingEventV3
@@ -275,13 +321,19 @@ export type LedgerEventV3 =
   | OrderCompletionEventV3
   | BreakerEventV3
   | RecoveryEventV3
-  | LeaseEventV3;
+  | LeaseEventV3
+  | AlertDispatchEventV3;
 
 export type SchemaV3Event = LedgerEventV3;
 export type LedgerEventTypeV3 = LedgerEventV3['recordType'];
 
 export type LedgerRecord =
-  BindingRecord | ForwardRecord | StartupRecord | SecurityFeedHealthRecord | LedgerEventV3;
+  | BindingRecord
+  | ForwardRecord
+  | StartupRecord
+  | SecurityFeedHealthRecord
+  | AlertDispatchRecord
+  | LedgerEventV3;
 
 export interface LedgerSink {
   append(record: LedgerRecord): Promise<void>;
@@ -418,6 +470,7 @@ export class MemoryLedger implements LedgerSink {
   readonly bindings: BindingRecord[] = [];
   readonly startups: StartupRecord[] = [];
   readonly security: SecurityFeedHealthRecord[] = [];
+  readonly alerts: AlertDispatchRecord[] = [];
   readonly events: LedgerEventV3[] = [];
 
   async append(record: LedgerRecord): Promise<void> {
@@ -426,6 +479,7 @@ export class MemoryLedger implements LedgerSink {
     else if (cloned.recordType === 'binding') this.bindings.push(cloned);
     else if (cloned.recordType === 'startup') this.startups.push(cloned);
     else if (cloned.recordType === 'security') this.security.push(cloned);
+    else if (cloned.recordType === 'alert') this.alerts.push(cloned);
     else this.records.push(cloned);
   }
 }

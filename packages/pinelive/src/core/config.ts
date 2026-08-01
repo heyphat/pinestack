@@ -1,9 +1,48 @@
 import { assertProviderConfig, type ProviderConfig } from '@heyphat/pinery';
+import {
+  DEFAULT_ALERT_ATTEMPTS,
+  DEFAULT_ALERT_FREQUENCY,
+  DEFAULT_ALERT_RETRY_DELAY_MS,
+  DEFAULT_ALERT_SEND_TIMEOUT_MS,
+  DEFAULT_MAX_ALERTS_PER_BAR,
+  type AlertFrequency,
+} from './alerts.js';
 
 export interface V1OrderPolicyConfig {
   type: 'market' | 'limit';
   limitOffsetTicks?: number;
 }
+
+export interface NormalizedWebhookChannelConfig {
+  readonly id: 'webhook';
+  /** Unique ledger-safe name; the URL and headers stay construction secrets. */
+  readonly name: string;
+  readonly url: string;
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
+export interface NormalizedTelegramChannelConfig {
+  readonly id: 'telegram';
+  /** Unique ledger-safe name; the bot token and chat id stay construction secrets. */
+  readonly name: string;
+  readonly botToken: string;
+  readonly chatId: string;
+  readonly disableNotification?: boolean;
+}
+
+export type NormalizedAlertChannelConfig =
+  NormalizedWebhookChannelConfig | NormalizedTelegramChannelConfig;
+
+export interface NormalizedAlertsConfig {
+  readonly channels: readonly NormalizedAlertChannelConfig[];
+  readonly frequency: AlertFrequency;
+  readonly sendTimeoutMs: number;
+  readonly attempts: number;
+  readonly retryDelayMs: number;
+  readonly maxPerBar: number;
+}
+
+export const MAX_ALERT_CHANNELS = 8;
 
 export interface NormalizedV1RunConfig {
   configVersion: 1;
@@ -41,6 +80,7 @@ export interface NormalizedV1RunConfig {
       };
   armed?: boolean;
   ledger?: string;
+  alerts?: NormalizedAlertsConfig;
 }
 
 export interface NormalizedStandardHistoricalConfig {
@@ -222,6 +262,7 @@ interface NormalizedV2RunConfigCommon {
   readonly inputs?: Readonly<Record<string, unknown>>;
   readonly data: ProviderConfig;
   readonly historical: NormalizedHistoricalConfig;
+  readonly alerts?: NormalizedAlertsConfig;
 }
 
 export type NormalizedBarCloseV2RunConfig = NormalizedV2RunConfigCommon & {
@@ -383,6 +424,7 @@ function normalizeV1(value: Readonly<Record<string, unknown>>): NormalizedV1RunC
       'data',
       'tigerProfile',
       'broker',
+      'alerts',
       'armed',
       'ledger',
     ],
@@ -531,9 +573,11 @@ function normalizeV1(value: Readonly<Record<string, unknown>>): NormalizedV1RunC
     throw new Error('config.inputs must be an object');
   }
 
+  const alerts = normalizeAlerts(value.alerts);
   return {
     ...(value as unknown as NormalizedV1RunConfig),
     configVersion: 1,
+    ...(alerts ? { alerts } : { alerts: undefined }),
     order,
     data:
       tigerProfile != null && data.provider === 'tiger' && data.profile == null
@@ -560,6 +604,7 @@ function normalizeV2(value: Readonly<Record<string, unknown>>): NormalizedV2RunC
       'live',
       'security',
       'execution',
+      'alerts',
     ],
     'config',
   );
@@ -574,6 +619,7 @@ function normalizeV2(value: Readonly<Record<string, unknown>>): NormalizedV2RunC
   assertNoExplicitNullProperties(dataValue, 'config.data');
   assertNoExplicitNullProviderInternals(dataValue);
   const data = assertProviderConfig(dataValue);
+  const alerts = normalizeAlerts(value.alerts);
   const common = {
     configVersion: 2 as const,
     strategy,
@@ -583,6 +629,7 @@ function normalizeV2(value: Readonly<Record<string, unknown>>): NormalizedV2RunC
     ...(inputs !== undefined ? { inputs } : {}),
     data,
     historical,
+    ...(alerts ? { alerts } : {}),
   };
 
   if (live.cadence === 'every-update') {
@@ -1146,6 +1193,111 @@ function isCompleteStaticSecurityDependency(value: unknown): boolean {
 
 function optionalMetadataRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
   return isObjectRecord(value) ? value : undefined;
+}
+
+/** Strict `alerts` section shared by v1 and v2. Absent/undefined disables alerting. */
+export function normalizeAlerts(value: unknown): NormalizedAlertsConfig | undefined {
+  if (value === undefined) return undefined;
+  const alerts = configObject(value, 'config.alerts');
+  assertConfigKeys(
+    alerts,
+    ['channels', 'frequency', 'sendTimeoutMs', 'attempts', 'retryDelayMs', 'maxPerBar'],
+    'config.alerts',
+  );
+  const rawChannels = alerts.channels === undefined ? [] : alerts.channels;
+  if (!Array.isArray(rawChannels)) throw new Error('config.alerts.channels must be an array');
+  if (rawChannels.length > MAX_ALERT_CHANNELS)
+    throw new Error(`config.alerts.channels allows at most ${MAX_ALERT_CHANNELS} channels`);
+  const names = new Set<string>();
+  const channels: NormalizedAlertChannelConfig[] = rawChannels.map((raw, index) => {
+    const at = `config.alerts.channels[${index}]`;
+    const channel = configObject(raw, at);
+    if (channel.id !== 'webhook' && channel.id !== 'telegram')
+      throw new Error(`${at}.id must be "webhook" or "telegram"`);
+    const name =
+      channel.name === undefined
+        ? `${channel.id}-${index + 1}`
+        : nonEmptyString(channel.name, `${at}.name`);
+    if (names.has(name)) throw new Error(`${at}.name "${name}" is not unique`);
+    names.add(name);
+
+    if (channel.id === 'webhook') {
+      assertConfigKeys(channel, ['id', 'name', 'url', 'headers'], at);
+      const url = nonEmptyString(channel.url, `${at}.url`);
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new Error(`${at}.url must be a valid URL`);
+      }
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')
+        throw new Error(`${at}.url must be http(s)`);
+      let headers: Readonly<Record<string, string>> | undefined;
+      if (channel.headers !== undefined) {
+        const rawHeaders = configObject(channel.headers, `${at}.headers`);
+        for (const [key, headerValue] of Object.entries(rawHeaders)) {
+          if (typeof headerValue !== 'string')
+            throw new Error(`${at}.headers.${key} must be a string`);
+        }
+        headers = { ...(rawHeaders as Record<string, string>) };
+      }
+      return { id: 'webhook' as const, name, url, ...(headers ? { headers } : {}) };
+    }
+
+    assertConfigKeys(channel, ['id', 'name', 'botToken', 'chatId', 'disableNotification'], at);
+    const botToken = nonEmptyString(channel.botToken, `${at}.botToken`);
+    if (!/^\d+:[\w-]+$/.test(botToken))
+      throw new Error(`${at}.botToken must look like "<digits>:<secret>"`);
+    // Numeric ids (users, and negative group ids) are accepted and canonicalized.
+    const chatId =
+      typeof channel.chatId === 'number' && Number.isSafeInteger(channel.chatId)
+        ? String(channel.chatId)
+        : nonEmptyString(channel.chatId, `${at}.chatId`);
+    if (channel.disableNotification != null && typeof channel.disableNotification !== 'boolean')
+      throw new Error(`${at}.disableNotification must be boolean`);
+    return {
+      id: 'telegram' as const,
+      name,
+      botToken,
+      chatId,
+      ...(typeof channel.disableNotification === 'boolean'
+        ? { disableNotification: channel.disableNotification }
+        : {}),
+    };
+  });
+  const frequency = alerts.frequency === undefined ? DEFAULT_ALERT_FREQUENCY : alerts.frequency;
+  if (frequency !== 'all' && frequency !== 'once_per_bar' && frequency !== 'once_per_bar_close')
+    throw new Error(
+      'config.alerts.frequency must be "all", "once_per_bar", or "once_per_bar_close"',
+    );
+  return {
+    channels,
+    frequency,
+    sendTimeoutMs: boundedSafeInteger(
+      alerts.sendTimeoutMs === undefined ? DEFAULT_ALERT_SEND_TIMEOUT_MS : alerts.sendTimeoutMs,
+      'config.alerts.sendTimeoutMs',
+      1,
+      120_000,
+    ),
+    attempts: boundedSafeInteger(
+      alerts.attempts === undefined ? DEFAULT_ALERT_ATTEMPTS : alerts.attempts,
+      'config.alerts.attempts',
+      1,
+      5,
+    ),
+    retryDelayMs: boundedSafeInteger(
+      alerts.retryDelayMs === undefined ? DEFAULT_ALERT_RETRY_DELAY_MS : alerts.retryDelayMs,
+      'config.alerts.retryDelayMs',
+      0,
+      10_000,
+    ),
+    maxPerBar: boundedSafeInteger(
+      alerts.maxPerBar === undefined ? DEFAULT_MAX_ALERTS_PER_BAR : alerts.maxPerBar,
+      'config.alerts.maxPerBar',
+      1,
+      1_000,
+    ),
+  };
 }
 
 function configObject(value: unknown, path: string): Readonly<Record<string, unknown>> {

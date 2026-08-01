@@ -64,9 +64,24 @@ makes the loop, and therefore this tool, worth building.
 ### Non-Goals
 
 - **NG1** — Not a new engine. No metric, fill, or equity value is computed in `pinetop`.
-- **NG2** — Not a broker or live-trading surface. `pinelive` stays a separate program:
+- **NG2** — ~~Not a broker or live-trading surface. `pinelive` stays a separate program:
   streaming state has no run boundary and no final number, so it does not fit the
-  report-page shape this app is built around. No LIVE page, now or later.
+  report-page shape this app is built around. No LIVE page, now or later.~~
+  **Revised: a read-only LIVE page is in scope; the trading-surface prohibition
+  stands in full.** What changed is not this app's shape but `pinelive`'s: it now
+  writes a durable ledger, registers running instances in a discoverable runs
+  registry, and will expose a one-shot `pinelive status --json` verb — a finite
+  child returning one JSON payload, which is exactly the report-page shape this
+  app is built around (§2, NG1's spawn-and-render discipline). "Streaming state
+  has no final number" is answered by observing snapshots, not by streaming.
+  What NG2 still rules out stands, and is now stated more precisely: `pinetop`
+  computes no trading state, submits/cancels/flattens nothing, and — in the
+  first LIVE version — takes **no action against a pinelive process at all**:
+  no launch, no stop, no arm, no acknowledge. Signaling a PID read from a
+  registry file is unsafe (PID reuse); control belongs to a later phase with
+  verified process identity, starting with *attached* launches whose child
+  handle `pinetop` itself owns. `pinelive` remains a separate program that this
+  app spawns and reads, exactly as it treats `pinerun`.
 - **NG3** — Not a web app. No browser, no server, no remote state.
 - **NG4** — ~~Not a Pine editor. Scripts are edited in the user's editor; `pinetop` reloads
   them.~~ **Revised (as built): page 1 is a vim-modal editor for the `.pine`.** The
@@ -636,7 +651,7 @@ anticipate, each because the alternative was a screen that lied:
 | **Status** | Built — P0–P7 in `packages/pinetop/` | Not yet a release artifact; built from a checkout |
 | **Owner (DRI)** | [TODO] | Single accountable person, not a team |
 | **Open Questions** | 2 of 4 remain (§10.3 run-history depth, §10.4 `--watch`) | Flag-schema drift is now caught by `--check-flags` rather than prevented |
-| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built · v1.3 — NG4 revised: EDITOR is page 1 (§4.8), the eight ordinals replace seven | 2026-07-31 |
+| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built · v1.3 — NG4 revised: EDITOR is page 1 (§4.8), the eight ordinals replace seven · v1.4 — NG2 revised: read-only LIVE page in scope (observation only — no launch/stop/arm; `pinelive status --json` is the report-page-shaped contract); trading-surface prohibition unchanged | 2026-08-01 |
 
 ---
 

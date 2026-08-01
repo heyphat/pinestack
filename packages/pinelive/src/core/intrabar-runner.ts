@@ -211,6 +211,12 @@ export interface IntrabarEvaluation {
   readonly reason: IntrabarEvaluationReason;
   /** True exactly once for each accepted chart time. */
   readonly finalCommit: boolean;
+  /**
+   * Pine alert() messages emitted by THIS evaluation's tick, in call order.
+   * Warmup-replay alerts are excluded; forming-tick alerts appear here but are
+   * rolled back by piner's own snapshot machinery before the next revision.
+   */
+  readonly alerts: readonly string[];
 }
 
 interface NormalizedOptions {
@@ -251,6 +257,8 @@ export class IntrabarRunner {
   private initialized = false;
   private running = false;
   private sequence = 0;
+  /** Alert count at the last committed (final) tick; forming ticks slice above it. */
+  private committedAlertCount = 0;
   private resumeAfter?: number;
   private startupDiscontinuity = false;
 
@@ -401,6 +409,8 @@ export class IntrabarRunner {
     this.normalized = normalized;
     this.resolved = resolved;
     this.engine = engine;
+    // Warmup-replay alerts are historical data; live collection starts here.
+    this.committedAlertCount = engine.outputs.alerts.length;
     this.state = state;
     this.runBinding = binding;
     this.initialized = true;
@@ -1014,6 +1024,14 @@ export class IntrabarRunner {
     if (!Number.isFinite(target)) {
       throw new IntrabarRunnerError('piner produced a non-finite strategy position target');
     }
+    // Alerts above the committed count belong to THIS tick: piner restores the
+    // collector to the committed base before re-evaluating a forming revision,
+    // so slicing from that base is correct for forming and final ticks alike.
+    const collected = this.engine!.outputs.alerts;
+    const alerts = collected
+      .slice(Math.min(this.committedAlertCount, collected.length))
+      .map((alert) => String(alert.message));
+    if (accepted.finalCommit) this.committedAlertCount = collected.length;
     const sequence = this.sequence++;
     const evaluation = deepFreeze({
       decisionId: decisionId(this.runBinding!, accepted.identity),
@@ -1024,6 +1042,7 @@ export class IntrabarRunner {
       executable: accepted.executable,
       reason: accepted.reason,
       finalCommit: accepted.finalCommit,
+      alerts,
     });
     await this.options.onEvaluation?.(evaluation);
   }

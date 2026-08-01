@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { CompileError, compile } from '@heyphat/piner';
 import {
@@ -27,6 +28,10 @@ import type { PreparedIntrabarAuthorityEnvelope } from './core/intrabar-authorit
 import type { Broker } from './core/broker.js';
 import type { ExecutionLease, ExecutionLeaseSnapshot } from './core/lease.js';
 import { PaperBroker, type PaperBrokerOptions } from './brokers/paper.js';
+import { WebhookAlertChannel, type WebhookAlertChannelOptions } from './alerts/webhook.js';
+import { TelegramAlertChannel, type TelegramAlertChannelOptions } from './alerts/telegram.js';
+import type { AlertChannel } from './core/alerts.js';
+import { normalizeAlerts, type NormalizedAlertsConfig } from './core/config.js';
 import {
   FileExecutionLease,
   JsonlLedger,
@@ -43,6 +48,32 @@ import {
 import { compareLedgerParity } from './parity.js';
 import type { ForwardRecord, LedgerRecord, LedgerSink } from './core/ledger.js';
 import type { ExpectedPositionRecord } from './parity.js';
+
+// Injected by scripts/build-bin.ts (`bun build --define`) so the compiled binary
+// self-reports its release version + commit. Absent when running from source,
+// where resolveVersion() falls back to this package's package.json — the
+// compiled binary has no package.json on disk to read.
+declare const PINELIVE_VERSION: string | undefined;
+declare const PINELIVE_REVISION: string | undefined;
+
+/** The CLI's version — the build define, else package.json (source runs). */
+function resolveVersion(): string | undefined {
+  if (typeof PINELIVE_VERSION === 'string') return PINELIVE_VERSION;
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version;
+  } catch {
+    return undefined;
+  }
+}
+
+/** "pinelive <version>[ (<commit>)]" for --version. Mirrors pinerun's own line. */
+function cliVersion(): string {
+  const revision = typeof PINELIVE_REVISION === 'string' ? ` (${PINELIVE_REVISION})` : '';
+  return `pinelive ${resolveVersion() ?? 'unknown'}${revision}`;
+}
 
 interface Args {
   positional: string[];
@@ -70,6 +101,8 @@ export interface CliDependencies {
   readonly createMarketDataProvider: typeof createNodeMarketDataProvider;
   readonly createTigerBroker: typeof createNodeTigerBroker;
   readonly createPaperBroker: (options: PaperBrokerOptions) => Broker;
+  readonly createWebhookAlertChannel: (options: WebhookAlertChannelOptions) => AlertChannel;
+  readonly createTelegramAlertChannel: (options: TelegramAlertChannelOptions) => AlertChannel;
   readonly createJsonlLedger: (path: string, options?: JsonlLedgerOptions) => LedgerSink;
   readonly createFileExecutionLease: (
     path: string,
@@ -130,6 +163,7 @@ export interface RunConfig {
       };
   armed?: boolean;
   ledger?: string;
+  alerts?: NormalizedAlertsConfig;
 }
 
 function parseArgs(args: string[]): Args {
@@ -175,6 +209,7 @@ export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunCon
       'broker',
       'armed',
       'ledger',
+      'alerts',
     ],
     'config',
   );
@@ -289,9 +324,11 @@ export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunCon
     (typeof value.inputs !== 'object' || value.inputs == null || Array.isArray(value.inputs))
   )
     throw new Error('config.inputs must be an object');
+  const alerts = normalizeAlerts(value.alerts);
   return {
     ...(value as unknown as RunConfig),
     configVersion: 1,
+    ...(alerts ? { alerts } : { alerts: undefined }),
     order,
     // One profile path covers both sections; an explicit section value still wins.
     data:
@@ -323,6 +360,8 @@ const defaultCliDependencies: CliDependencies = {
   createMarketDataProvider: createNodeMarketDataProvider,
   createTigerBroker: createNodeTigerBroker,
   createPaperBroker: (options) => new PaperBroker(options),
+  createWebhookAlertChannel: (options) => new WebhookAlertChannel(options),
+  createTelegramAlertChannel: (options) => new TelegramAlertChannel(options),
   createJsonlLedger: (path, options) => new JsonlLedger(path, options),
   createFileExecutionLease: (path, options) => new FileExecutionLease(path, options),
   readJsonl,
@@ -335,6 +374,34 @@ const defaultCliDependencies: CliDependencies = {
   removeSignalHandler: (signal, handler) => process.off(signal, handler),
 };
 
+/** Construct the built-in channel kinds declared by config.alerts. Run-path only. */
+function buildAlertChannels(
+  alerts: NormalizedAlertsConfig | undefined,
+  dependencies: CliDependencies,
+): AlertChannel[] {
+  if (!alerts || alerts.channels.length === 0) return [];
+  return alerts.channels.map((channel) =>
+    channel.id === 'webhook'
+      ? dependencies.createWebhookAlertChannel({
+          name: channel.name,
+          url: channel.url,
+          ...(channel.headers ? { headers: channel.headers } : {}),
+          attempts: alerts.attempts,
+          retryDelayMs: alerts.retryDelayMs,
+        })
+      : dependencies.createTelegramAlertChannel({
+          name: channel.name,
+          botToken: channel.botToken,
+          chatId: channel.chatId,
+          ...(channel.disableNotification === undefined
+            ? {}
+            : { disableNotification: channel.disableNotification }),
+          attempts: alerts.attempts,
+          retryDelayMs: alerts.retryDelayMs,
+        }),
+  );
+}
+
 export async function main(
   argv = process.argv.slice(2),
   overrides: Partial<CliDependencies> = {},
@@ -345,6 +412,25 @@ export async function main(
     dependencies.log('pinelive run --config <pinelive.json> [--tiger-profile <path>]');
     dependencies.log('pinelive validate --config <pinelive.json>');
     dependencies.log('pinelive parity <live.jsonl> <expected.jsonl>');
+    dependencies.log('pinelive upgrade [--check]');
+    dependencies.log('pinelive --version');
+    return;
+  }
+  if (command === '--version' || command === '-v' || command === 'version') {
+    dependencies.log(cliVersion());
+    return;
+  }
+  // Self-update before anything touches a config, provider, or ledger. The
+  // implementation is pinerun's — same download, same mandatory sha256 check
+  // against the release's checksums.txt, same atomic swap — asked to operate
+  // on the `pinelive` asset.
+  if (command === 'upgrade') {
+    const { runUpgrade } = await import('@heyphat/pinerun');
+    await runUpgrade({
+      check: rest.includes('--check'),
+      currentVersion: resolveVersion(),
+      binary: 'pinelive',
+    });
     return;
   }
   if (command === 'parity') {
@@ -361,7 +447,8 @@ export async function main(
         row.schemaVersion !== 3 &&
         row.recordType !== 'binding' &&
         row.recordType !== 'startup' &&
-        row.recordType !== 'security',
+        row.recordType !== 'security' &&
+        row.recordType !== 'alert',
     );
     const differences = compareLedgerParity(live, expected);
     dependencies.log(JSON.stringify({ matches: differences.length === 0, differences }, null, 2));
@@ -523,6 +610,12 @@ async function runV1Config(
       securityConcurrency: config.securityConcurrency,
       securityRequestTimeoutMs: config.securityRequestTimeoutMs,
       maxSecurityStaleRefreshes: config.maxSecurityStaleRefreshes,
+      ...(config.alerts
+        ? {
+            alerts: config.alerts,
+            alertChannels: buildAlertChannels(config.alerts, dependencies),
+          }
+        : {}),
       mirror: {
         orderType: config.order?.type,
         limitOffsetTicks: config.order?.limitOffsetTicks,
@@ -607,6 +700,7 @@ async function runV2WithStorage(
         dataFactory,
         ledger,
         recoveredEvents: storage.recoveredEvents,
+        alertChannels: buildAlertChannels(normalized.alerts, dependencies),
         signal,
         onLog: dependencies.log,
       });
@@ -618,6 +712,7 @@ async function runV2WithStorage(
         dataFactory,
         ledger,
         recoveredEvents: storage.recoveredEvents,
+        alertChannels: buildAlertChannels(normalized.alerts, dependencies),
         refreshRecoveryAfterLease: async () => {
           const refreshed = await readCrashSafePrefix(storage.ledgerPath, dependencies);
           return {

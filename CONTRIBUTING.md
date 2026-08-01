@@ -87,8 +87,10 @@ Self-update is shared, not duplicated: `pinetop upgrade` calls pinerun's
 over a running executable live in one place on purpose — if you touch
 `packages/pinerun/src/upgrade.ts`, you are touching both binaries.
 
-Pinelive is source-checkout/workspace-only. The release installer provides only
-the standalone `pinerun` and `pinetop` binaries.
+Pinelive also builds a standalone binary (`bun run build:bin` inside
+`packages/pinelive`), released alongside the other two. The installer fetches it
+only with an explicit `PINESTACK_BINS` opt-in: Paper is its default broker, and
+its Tiger adapters are offline-tested only — not sandbox- or production-approved.
 
 ## Determinism and identity are contracts
 

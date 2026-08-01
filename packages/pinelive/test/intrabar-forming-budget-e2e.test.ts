@@ -10,7 +10,11 @@ import {
 import { ReplayProvider, StaticProvider, type Bar, type BarUpdate } from '@heyphat/pinery';
 
 const native = Object.freeze({ kind: 'native' as const });
-const dataConfig = { provider: 'csv', dataDir: '/path/must/not/be-read', cutoverTime: 7_200 } as const;
+const dataConfig = {
+  provider: 'csv',
+  dataDir: '/path/must/not/be-read',
+  cutoverTime: 7_200,
+} as const;
 
 const source = `//@version=6
 strategy("audit repro", use_bar_magnifier=true, calc_on_every_tick=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)

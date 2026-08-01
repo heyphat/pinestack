@@ -8,15 +8,23 @@ reconciles that target through a broker while writing an auditable JSONL ledger.
 
 ## Availability and safety status
 
-Pinelive is currently **source-checkout/workspace-only**:
+Pinelive ships as a standalone binary alongside `pinerun` and `pinetop`, with a
+deliberately conservative distribution posture:
 
 - It is not published to npm.
-- Pinestack GitHub Releases contain the standalone `pinerun` and `pinetop`
-  binaries only; pinelive declares no `bin` entry and has no build product.
-- The `curl | sh` installer and `pinerun upgrade` do not install `pinelive`.
-- Run the CLI from a pinestack checkout with Bun 1.2.5.
-- Its version is still bumped in lockstep with the other workspace packages, so
-  a checkout's four manifests never disagree.
+- Pinestack GitHub Releases carry `pinelive` for all five targets, and the
+  binary self-updates with `pinelive upgrade` (checksum-verified, the shared
+  pinerun implementation).
+- The `curl | sh` installer does **not** fetch it by default: opt in with
+  `PINESTACK_BINS="pinerun pinetop pinelive"`. The default install stays
+  analysis-only because this is the binary that can place orders.
+- From a source checkout it runs without any install:
+  `bun packages/pinelive/src/cli.ts --help` (Bun 1.2.5). Build your own binary
+  with `bun run build:bin` inside `packages/pinelive` (or
+  `--product pinelive` from anywhere; `--local` builds against a sibling
+  piner checkout, like pinerun).
+- Its version is bumped in lockstep with the other workspace packages, so a
+  checkout's four manifests never disagree.
 
 `PaperBroker` is the safe default. The Tiger market-data and execution adapters
 have extensive offline tests against injected SDK facades, but no credentialed
@@ -78,12 +86,14 @@ bun install --frozen-lockfile
 bun packages/pinelive/src/cli.ts --help
 ```
 
-The CLI has three commands:
+The CLI commands:
 
 ```text
 run --config <path> [--tiger-profile <path>]
 validate --config <path>
 parity <live.jsonl> <expected.jsonl>
+upgrade [--check]
+--version
 ```
 
 ## Paper quick start (v1 compatibility)
@@ -312,6 +322,31 @@ Safety is fail-closed by default:
 
 See [`request.security` secondary feeds](../../docs/pinelive.md#requestsecurity-secondary-feeds)
 for addressing, timeframe planning, health snapshots, and configuration limits.
+
+## Alerts
+
+Pine `alert()` calls in the running strategy reach registered channels — the
+headless counterpart of TradingView alert firing, mirroring the fractal web
+app's host semantics. Conditions live in Pine; pinelive owns delivery:
+
+```jsonc
+"alerts": {
+  "channels": [{ "id": "webhook", "name": "ops", "url": "https://example.com/hook" }]
+}
+```
+
+Warmup/replay alerts stay data. Only fresh authoritative bar closes dispatch —
+forming revisions and recovered replays never do, so restarts cannot
+double-send. A pure sample-time frequency gate (`all` / `once_per_bar` /
+`once_per_bar_close`, default close) keys per message; delivery is fail-open
+and bounded (per-alert deadline, transient-only retries, per-bar cap) and runs
+after the bar's reconcile so it can never delay trading. Every gated alert is
+journaled with per-channel outcomes; channel secrets (webhook URL/headers,
+Telegram bot token/chat id) appear in no ledger row, log, or error. Built-in
+channels: `webhook` and `telegram`. Custom
+channels implement `AlertChannel` and must pass `runAlertChannelConformance()`
+from `@heyphat/pinelive/testing`. Full semantics:
+[docs/pinelive-alerts.md](../../docs/pinelive-alerts.md).
 
 ## Paper broker
 

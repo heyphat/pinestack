@@ -7,9 +7,11 @@ import {
   type ResolvedDataInstrument,
 } from '@heyphat/pinery';
 import { isMarkableBroker } from '../brokers/paper.js';
+import type { AlertDispatcher } from './alerts.js';
 import type { Broker } from './broker.js';
 import { createRunInstrumentBinding, type RunInstrumentBinding } from './binding.js';
 import type {
+  AlertDispatchRecord,
   BindingRecord,
   ForwardRecord,
   SecurityFeedHealthRecord,
@@ -80,6 +82,14 @@ export interface ForwardRunnerOptions {
   onBinding?: (record: BindingRecord) => void | Promise<void>;
   onStartupRecord?: (record: StartupRecord) => void | Promise<void>;
   onRecord?: (record: ForwardRecord) => void | Promise<void>;
+  /**
+   * Pine alert() delivery. Dispatch runs after the bar's reconcile and cycle
+   * record, is fail-open (a channel failure never stops the run), and skips
+   * warmup-replay alerts entirely — history is data, not events.
+   */
+  alertDispatcher?: AlertDispatcher;
+  /** Durable per-alert record with delivery outcomes; append it to the ledger. */
+  onAlertRecord?: (record: AlertDispatchRecord) => void | Promise<void>;
 }
 
 export class ForwardRunnerError extends Error {
@@ -111,6 +121,8 @@ export class ForwardRunner {
   private running = false;
   private sequence = 0;
   private lastBarTime = -Infinity;
+  /** Alerts below this index were emitted by warmup replay and stay data. */
+  private alertCursor = 0;
   private readonly runId: string;
   private readonly strategyId: string;
 
@@ -309,6 +321,9 @@ export class ForwardRunner {
       mintick: this.runBinding.mintick,
     });
     this.assertSecurityDependenciesCovered();
+    // Everything alert() emitted during the warmup replay is historical data —
+    // the live collection cursor starts here (fractal: backtest alerts stay data).
+    this.alertCursor = this.engine.outputs.alerts.length;
     this.ensureActive();
     this.mirror = new PositionMirror(this.broker, this.instrument, this.options.mirror);
     this.initialized = true;
@@ -349,9 +364,12 @@ export class ForwardRunner {
         // Dynamic request arguments/call sites are checked after evaluation but before any
         // target can reach the broker.
         this.assertSecurityDependenciesCovered();
+        const alertMessages = this.collectNewAlerts();
         this.lastBarTime = bar.time;
         const { record } = await this.reconcile(bar, 'cycle');
         await this.options.onRecord?.(record);
+        // Trading first: alert delivery only after the cycle completed.
+        await this.dispatchAlerts(bar, alertMessages);
         this.ensureActive();
       }
     } finally {
@@ -506,6 +524,58 @@ export class ForwardRunner {
       feeds: feeds.map((feed) => ({ ...feed })),
       recordedAt: new Date().toISOString(),
     };
+  }
+
+  /** New alert() messages emitted by the tick that just ran. */
+  private collectNewAlerts(): unknown[] {
+    const alerts = this.engine!.outputs.alerts;
+    if (alerts.length <= this.alertCursor) {
+      this.alertCursor = alerts.length;
+      return [];
+    }
+    const fresh = alerts.slice(this.alertCursor).map((alert) => alert.message);
+    this.alertCursor = alerts.length;
+    return fresh;
+  }
+
+  /**
+   * Fail-open delivery: the dispatcher contains channel failures and reports
+   * them as outcomes; only the durable alert record append may propagate,
+   * because durability problems are never advisory.
+   */
+  private async dispatchAlerts(bar: Bar, messages: readonly unknown[]): Promise<void> {
+    const dispatcher = this.options.alertDispatcher;
+    if (!dispatcher || messages.length === 0) return;
+    const binding = this.runBinding!;
+    const reports = await dispatcher.process({
+      runId: this.runId,
+      strategyId: this.strategyId,
+      strategySymbol: binding.strategySymbol,
+      timeframe: this.options.timeframe,
+      barTime: bar.time,
+      barCloseMs: barCloseTime(bar.time, this.options.timeframe) * 1000,
+      price: bar.close,
+      closed: true,
+      messages,
+    });
+    for (const report of reports) {
+      await this.options.onAlertRecord?.({
+        schemaVersion: 2,
+        recordType: 'alert',
+        runId: this.runId,
+        strategyId: this.strategyId,
+        strategySymbol: binding.strategySymbol,
+        timeframe: this.options.timeframe,
+        barTime: report.alert.barTime,
+        ordinal: report.alert.ordinal,
+        message: report.alert.message,
+        source: report.alert.source,
+        price: report.alert.price,
+        firedAt: report.alert.firedAt,
+        deliveries: [...report.deliveries],
+        recordedAt: new Date().toISOString(),
+      });
+    }
   }
 
   private ensureActive(): void {

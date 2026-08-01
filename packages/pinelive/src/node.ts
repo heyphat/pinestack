@@ -9,10 +9,7 @@ import {
   type ExecutionLeaseSnapshot,
 } from './core/lease.js';
 import type { LedgerRecord, LedgerSink } from './core/ledger.js';
-import type {
-  IntrabarPersistence,
-  IntrabarPersistenceRead,
-} from './core/intrabar-server.js';
+import type { IntrabarPersistence, IntrabarPersistenceRead } from './core/intrabar-server.js';
 import type { LedgerRecoveryState } from './core/recovery.js';
 
 export type JsonlDurability = 'buffered' | 'sync';

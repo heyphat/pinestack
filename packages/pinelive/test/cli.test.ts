@@ -404,14 +404,25 @@ function finalJsonLog(logs: readonly string[]): Record<string, unknown> {
   return JSON.parse(line) as Record<string, unknown>;
 }
 
-test('CLI help advertises run, validate, and parity', async () => {
+test('CLI help advertises run, validate, parity, upgrade, and version', async () => {
   const logs: string[] = [];
   await main(['help'], { log: (message) => logs.push(message) });
   expect(logs).toEqual([
     'pinelive run --config <pinelive.json> [--tiger-profile <path>]',
     'pinelive validate --config <pinelive.json>',
     'pinelive parity <live.jsonl> <expected.jsonl>',
+    'pinelive upgrade [--check]',
+    'pinelive --version',
   ]);
+});
+
+test('CLI --version self-reports without touching any dependency factory', async () => {
+  const logs: string[] = [];
+  await main(['--version'], { log: (message) => logs.push(message) });
+  expect(logs).toHaveLength(1);
+  // Source runs fall back to the package manifest; compiled binaries use the
+  // build define. Either way the line starts with the binary's own name.
+  expect(logs[0]!).toMatch(/^pinelive \d+\.\d+\.\d+/);
 });
 
 test('validate performs only pure config/source gates and prints the v2 summary', async () => {

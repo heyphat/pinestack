@@ -4,3 +4,9 @@ export {
   type BrokerConformanceHarness,
   type ConformanceFailure,
 } from './conformance.js';
+export {
+  runAlertChannelConformance,
+  CONFORMANCE_ALERT,
+  type AlertChannelConformanceOptions,
+  type AlertConformanceFailure,
+} from './alert-conformance.js';

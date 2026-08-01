@@ -9,9 +9,38 @@ self-contained binaries (see the README). The workspace packages run from
 TypeScript source and version in lockstep with the release tag; publishing the
 libraries to npm remains a possible follow-up.
 
-## [Unreleased]
+## [0.9.0] - 2026-08-01
 
 ### Added
+
+- **Pine `alert()` delivery in pinelive.** A strategy's `alert()` calls now reach
+  registered notification channels, with the same host semantics as the fractal
+  web app's TradingView-style alerting: warmup/replay alerts stay data, only
+  fresh authoritative bar closes dispatch (forming revisions and recovered
+  replays never do), a pure sample-time frequency gate (`all` /
+  `once_per_bar` / `once_per_bar_close`, default close) keys per message, and
+  every gated alert lands in the ledger with per-channel outcomes (new v1
+  `alert` record and schema-v3 `alert` event, recovery-validated). Delivery is
+  fail-open and bounded — per-alert send deadline, transient-only retries with
+  linear backoff, and a per-bar cap journaled as `suppressed` — and can never
+  delay a reconcile: trading always completes first. Ships with a `webhook`
+  channel (fractal's delivery contract: coarse non-PII failure reasons, URL and
+  headers never journaled or thrown) and a `telegram` channel (Bot API
+  `sendMessage`; plain-text messages truncated to the 4096-char limit; honors
+  `retry_after` on 429 rate limits; the bot token and chat id are construction
+  secrets), configured via a new strict `alerts` config section shared by v1
+  and v2, an `AlertChannel` protocol for custom channels, and
+  `runAlertChannelConformance` in `@heyphat/pinelive/testing`.
+  See [docs/pinelive-alerts.md](./docs/pinelive-alerts.md).
+
+- **A standalone `pinelive` binary.** Releases now carry `pinelive` for the same
+  five targets as `pinerun`/`pinetop`, stamped by `build-bin.ts` so
+  `pinelive --version` self-reports, and self-updating via `pinelive upgrade`
+  (the shared checksum-verified pinerun implementation). The `curl | sh`
+  installer does **not** fetch it by default — opt in with
+  `PINESTACK_BINS="pinerun pinetop pinelive"` — because the forward runner is
+  the binary that can place orders: Paper remains its default broker and the
+  Tiger adapters are offline-tested only, not sandbox- or production-approved.
 
 - **Limit-order execution in pinelive.** `OrderRequest` now requires `limitPrice` for limit orders, and `PositionMirror` accepts an explicit market/limit policy with a side-aware tick offset from each closed-bar price. Market remains the default. Deterministic client ids now frame every identity component by length to prevent sanitizer and delimiter-boundary collisions; limit type/price are included in identity and schema-v2 cycle ledgers. Deploy the new ID format only with no unresolved old-format orders.
   - `PaperBroker` fills only immediately marketable limits and never violates the requested price or invents a resting order.
@@ -58,6 +87,7 @@ libraries to npm remains a possible follow-up.
   - `TargetScheduler` and the compute-only journal prune finalized per-bar decision state to a bounded retention window (default 512 bars per binding; `retainBars` option), so multi-day forward runs no longer grow memory without bound. Durable rows are never pruned; bars with unresolved orders or unreset position uncertainty are always retained, and stale duplicates of pruned decisions are rejected fail-closed by the chart-update gate.
   - Live aggregation and duplicate-final dedupe compare volume with a relative 1e-9 tolerance (OHLC stays exact), so float-summation noise on fractional-volume venues can no longer spuriously abort a run as a data conflict.
   - Fallback decision/event identity hashing widened from 32-bit to 64-bit FNV-1a; canonical identity serialization now sorts by codepoint instead of locale; target-attainment checks use the same tolerant comparison as recovery, removing a redundant broker round trip per fractional fill; an unconfigured `TargetScheduler` now defaults to the shared fail-closed execution limits instead of unlimited; the instrument binding attests broker-supplied `pointValue` when the data provider reports none; and Paper's non-marketable-limit rejection names the limit and mark prices (calling out off-grid reference data).
+  - A follow-up hardening pass extended the retention bound through degraded and restart paths: a protected bar (unresolved order or unreset position uncertainty) is now a bounded exception instead of blocking all pruning behind it, scheduler and compute-only recovery compact to the retention window immediately on restart and release the recovered ledger from memory, the compute journal fail-closes on decisions older than its retained dedupe horizon rather than ever reusing a durable identity, and a broker-only `pointValue` must be positive and finite before it is attested into the instrument binding.
 
 ## [0.8.0] - 2026-08-01
 
@@ -479,6 +509,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.9.0]: https://github.com/heyphat/pinestack/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/heyphat/pinestack/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/heyphat/pinestack/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/heyphat/pinestack/compare/v0.6.0...v0.6.1

@@ -5,17 +5,19 @@ yields market data, piner owns strategy calculations and target position, and a
 pinelive `Broker` owns execution. Pinelive never parses CSV, polls quote APIs,
 decides bar closure, deduplicates bars, or recovers data gaps.
 
-> **Availability:** pinelive is source-checkout/workspace-only. It is not
-> published to npm, has no standalone GitHub Release asset, and is not installed
-> by the `pinerun` installer. Use Bun 1.2.5 from the repository root:
+> **Availability:** releases ship a standalone `pinelive` binary, but the
+> installer fetches it only with an explicit opt-in
+> (`PINESTACK_BINS="pinerun pinetop pinelive"`); it is not published to npm.
+> Paper is the default broker, and the Tiger adapters are offline-tested only —
+> not sandbox- or production-approved. From a source checkout (Bun 1.2.5):
 >
 > ```bash
 > bun install --frozen-lockfile
 > bun packages/pinelive/src/cli.ts --help
 > ```
 >
-> The shorthand `pinelive` used in later snippets can be enabled for the current
-> shell with `alias pinelive='bun packages/pinelive/src/cli.ts'`.
+> The shorthand `pinelive` used in later snippets is either the installed binary
+> or `alias pinelive='bun packages/pinelive/src/cli.ts'` from a checkout.
 
 For a checked-in, runnable Paper/CSV configuration, start with the
 [package README quick start](../packages/pinelive/README.md#paper-quick-start).
@@ -35,6 +37,10 @@ production-approved.
 
 These are repository-owned offline regression capabilities, not TradingView,
 broker, exchange, venue, credentialed Tiger, release, or production evidence.
+
+Pine `alert()` delivery to webhook channels is documented separately in
+[pinelive alerts](./pinelive-alerts.md); the `alerts` config section is shared
+by v1 and v2 and dispatches only on fresh authoritative bar closes.
 
 ## Canonical v1 compatibility run config
 

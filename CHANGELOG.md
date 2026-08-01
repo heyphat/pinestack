@@ -9,6 +9,82 @@ self-contained binaries (see the README). The workspace packages run from
 TypeScript source and version in lockstep with the release tag; publishing the
 libraries to npm remains a possible follow-up.
 
+## [0.8.0] - 2026-08-01
+
+No change to `pinery` or to any output contract.
+
+### Changed (breaking)
+
+- **`pinetop`'s pages are renumbered.** EDITOR is page `1`, so every command page
+  shifts by one: BACKTEST is now `2`, SWEEP `3`, WALKFORWARD `4`, SCAN `5`,
+  PORTFOLIO `6`, COMPARE `7`, TRADES `8`. EDITOR goes first because the tabs are
+  in workflow order and the source is where the workflow starts. `--page editor`
+  is accepted alongside the existing names.
+
+### Added
+
+- **A Pine editor on page 1.** A vim-modal buffer for the `.pine` itself, so a
+  stop that is wrong in the _script_ no longer sends you to another window and
+  back to a stale report. The sidebar lists the project's scripts and the open
+  one's `input()` titles; the buffer has a line-number gutter, Pine syntax
+  colouring from your terminal's palette, and a vim status line.
+  - Modes, motions and operators: `i I a A o O`, `h j k l w b e W B E`, `0 ^ $`,
+    `gg G`, `{ }`, `f F t T`, `d c y > <` over any motion plus `dd cc yy`,
+    `D C Y x X s p P J r`, visual and visual-line, `u` / `ctrl-r`, counts
+    (`3dd`, `42G`, `d3w`), `/` `?` `n` `N`, and `:w :wq :q :q! :e :42 :set nu`.
+  - The buffer owns the keyboard while it has focus, with two ways out that
+    never move: `tab` leaves the pane and `ctrl-c` quits pinetop. `q` inside the
+    buffer explains itself instead of quitting, and elsewhere warns once before
+    discarding an unwritten buffer.
+  - The INPUTS outline reads the buffer rather than the file, so a renamed
+    `input()` title shows up before you save — and that is the same list
+    `--input NAME` is validated against.
+- **`e` hands the script to your real `$EDITOR`.** From any page: the frame
+  suspends, `$VISUAL`/`$EDITOR`/`vim` opens the page's script at your cursor
+  line, and the file is reloaded when it exits. Refuses when the in-frame buffer
+  has unwritten changes to that same file.
+- **`space` then a page number switches page**, everywhere including inside the
+  editor buffer, where a bare digit is a vim count. `1`–`8` still work directly
+  anywhere else.
+- **A STRATEGIES pane on every command page**, not just BACKTEST — all six take a
+  `.pine` as their first argument, and `↵` loads the selection into that page's
+  command. COMPARE takes two, so it marks them `A` and `B` and fills the first
+  free slot.
+- **An INPUTS pane on SWEEP and WALKFORWARD** listing every `input()` the loaded
+  script declares, with the swept ones marked and carrying their grid. `↵` opens
+  one axis for typing, prefilled; clearing it drops that axis and leaves the rest
+  alone. `--input` is repeatable, so the config pane could only show it as a
+  single space-joined field — adding a second axis meant retyping the first.
+- **A HISTORY pane on every command page** listing that page's runs from the
+  session, newest first. `↵` puts one back on screen with the flags that produced
+  it, so the config pane and the `$ pinerun …` line agree with the numbers and
+  `r` repeats it. Twenty runs per command are kept.
+- **A failed run gets a drawer** with every error line the engine printed, the
+  exit code and the elapsed time, instead of one truncated line in the status
+  bar. A run that exits zero but lost symbols — `scan`, `portfolio`, `sweep`
+  reporting and continuing past a fetch failure — gets the same drawer in warn
+  colour, because the report beside it was computed over what was left.
+
+### Fixed
+
+- **`pinerun scan` / `sweep` / `walkforward` could hang forever at startup**
+  ([#12](https://github.com/heyphat/pinestack/issues/12)): a worker thread was
+  occasionally created whose entry module never executed — no error, no exit,
+  no output, ever. The pool now holds each job until its worker proves it is
+  listening; a worker that misses that deadline (default 5 s, tunable via
+  `PINERUN_WORKER_BOOT_TIMEOUT_MS`) is replaced and the job re-dispatched to a
+  fresh thread, so a startup miss costs seconds instead of hanging. Repeated
+  misses fail loudly with the reason instead of silently.
+- **`pinetop`'s `?` overlay silently dropped bindings** once the table outgrew
+  its fixed-height box. It now sizes itself from the keymap and splits into two
+  columns on a short terminal.
+- **Keys typed before the UI was ready were replayed as commands** when the
+  alternate screen opened.
+- **The narrow-terminal warning claimed the right rail had been dropped** on
+  pages that have no right rail; it now names what the page actually loses.
+- **`pinetop`'s tab bar no longer overprints the run status** on terminals too
+  narrow for eight titles — below about 105 columns it names only the active page.
+
 ## [0.7.0] - 2026-07-31
 
 ### Added
@@ -353,6 +429,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[0.8.0]: https://github.com/heyphat/pinestack/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/heyphat/pinestack/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/heyphat/pinestack/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/heyphat/pinestack/compare/v0.5.0...v0.6.0

@@ -1,27 +1,36 @@
 import { expect, test } from 'bun:test';
-import { compareLedgerParity, type ForwardRecord } from '../src/index.js';
+import { compareLedgerParity } from '../src/parity.js';
+import type { EvaluationCompletedEventV3, LedgerEventV3 } from '../src/core/ledger.js';
 
-function record(overrides: Partial<ForwardRecord> = {}): ForwardRecord {
+function record(overrides: Partial<EvaluationCompletedEventV3> = {}): EvaluationCompletedEventV3 {
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
+    sequence: 1,
+    recordType: 'evaluation.completed',
     runId: 'run',
+    executionId: 'execution',
+    decisionId: 'decision',
     strategyId: 'strategy',
-    cycleId: 'cycle',
-    sequence: 0,
-    symbol: 'X',
+    strategySymbol: 'ROOT',
+    executionSymbol: 'X',
+    bindingId: 'binding',
     timeframe: '1m',
-    bar: { time: 100, open: 1, high: 1, low: 1, close: 1, volume: 0 },
+    barTime: 100,
+    cursor: 'cursor',
+    update: {
+      kind: 'close-only',
+      eventId: 'event',
+      revision: 1,
+      authoritativeFinal: true,
+      recovered: false,
+      discontinuity: false,
+    },
     target: 1,
     actualBefore: 0,
     actualAfter: 0,
     delta: 1,
-    action: 'reject',
-    error: {
-      code: 'reject',
-      message: 'blocked',
-      retryable: false,
-      stage: 'submit',
-    },
+    outcome: 'reject',
+    error: { name: 'BrokerError', code: 'reject', message: 'blocked', retryable: false },
     recordedAt: new Date(0).toISOString(),
     ...overrides,
   };
@@ -36,30 +45,60 @@ test('parity reports rejected execution even when strategy targets match', () =>
 test('parity reports unknown and material actual drift', () => {
   expect(
     compareLedgerParity(
-      [record({ action: 'noop', error: undefined, actualAfter: null })],
+      [record({ outcome: 'noop', error: undefined, actualAfter: null })],
       [{ barTime: 100, target: 1 }],
     )[0]?.kind,
   ).toBe('execution-drift');
   expect(
     compareLedgerParity(
-      [record({ action: 'order', error: undefined, actualAfter: 1 })],
+      [record({ outcome: 'order', error: undefined, actualAfter: 1 })],
       [{ barTime: 100, target: 1 }],
     ),
   ).toEqual([]);
 });
 
-test('parity reports duplicate cycles instead of overwriting them', () => {
-  const duplicate = record({ cycleId: 'cycle-2' });
+test('parity reports duplicate durable completions instead of overwriting them', () => {
+  const duplicate = record({
+    sequence: 2,
+    decisionId: 'decision-2',
+    update: {
+      kind: 'intrabar',
+      eventId: 'event-2',
+      revision: 2,
+      authoritativeFinal: true,
+      recovered: false,
+      discontinuity: false,
+    },
+  });
   expect(compareLedgerParity([record(), duplicate], [{ barTime: 100, target: 1 }])).toContainEqual(
     expect.objectContaining({ kind: 'duplicate-live', barTime: 100 }),
   );
 });
 
-test('parity refuses to mix runs in one comparison', () => {
+test('parity refuses to mix durable scopes in one comparison', () => {
   expect(
     compareLedgerParity(
-      [record(), record({ runId: 'other', cycleId: 'other', bar: { ...record().bar, time: 200 } })],
+      [record(), record({ runId: 'other', decisionId: 'other', barTime: 200 })],
       [],
     ),
   ).toEqual([expect.objectContaining({ kind: 'mixed-live-scope' })]);
+});
+
+test('parity ignores non-completion events and rejects old schemas', () => {
+  const lease: LedgerEventV3 = {
+    schemaVersion: 3,
+    sequence: 1,
+    recordType: 'lease',
+    runId: 'run',
+    executionId: 'execution',
+    action: 'acquired',
+    resource: 'ledger',
+    leaseId: 'lease',
+    ownerId: 'owner',
+    recordedAt: new Date(0).toISOString(),
+  };
+  expect(compareLedgerParity([lease], [])).toEqual([]);
+  expect(() => compareLedgerParity([{ ...lease, schemaVersion: 2 }], [])).toThrow(
+    'schemaVersion must be 3',
+  );
 });

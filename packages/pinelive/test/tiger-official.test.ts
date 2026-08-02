@@ -363,3 +363,26 @@ test('official Tiger trade adapter checks cancellation and redacts SDK failures'
   expect(error.message).not.toContain('secret');
   expect(error.cause).toBeUndefined();
 });
+
+test('official Tiger adapter remains production-ineligible without complete synchronization or exact lookup', async () => {
+  const broker = new TigerBroker({
+    transport: new OfficialTigerTradingTransport(new TradeFacade(), 'demo'),
+    armed: true,
+    requireExecutionSafety: true,
+  });
+
+  const synchronization = await broker.synchronizeAccount('MGCZ26');
+  expect(synchronization).toMatchObject({ status: 'blocked' });
+  if (synchronization.status !== 'blocked')
+    throw new Error('official adapter unexpectedly synchronized');
+  expect(synchronization.reasons.join(' ')).toContain('complete open-order inventory');
+  await expect(
+    broker.lookupOrder({
+      symbol: 'MGCZ26',
+      side: 'buy',
+      qty: 1,
+      type: 'market',
+      clientId: 'official-read-only-probe',
+    }),
+  ).resolves.toMatchObject({ status: 'unsupported' });
+});

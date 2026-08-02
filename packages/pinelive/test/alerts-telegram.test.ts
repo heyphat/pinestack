@@ -216,18 +216,18 @@ test('the telegram channel passes alert channel conformance without leaking secr
 // Config normalization for the telegram kind.
 // ---------------------------------------------------------------------------
 
-const v1Base = {
-  configVersion: 1,
+const currentConfig = {
+  configVersion: 3,
   strategy: 's.pine',
   symbol: 'X',
   timeframe: '1m',
   data: { provider: 'csv', dataDir: 'data', cutoverTime: 100 },
-  broker: { id: 'paper' },
+  execution: { kind: 'compute-only' },
 } as const;
 
 test('config accepts telegram channels, canonicalizes numeric chat ids, defaults names', () => {
   const normalized = normalizeRunConfig({
-    ...v1Base,
+    ...currentConfig,
     alerts: {
       channels: [
         { id: 'telegram', botToken: TOKEN, chatId: -1001234567890 },
@@ -235,14 +235,14 @@ test('config accepts telegram channels, canonicalizes numeric chat ids, defaults
       ],
     },
   });
-  if (normalized.configVersion !== 1) throw new Error('expected v1');
+  if (normalized.configVersion !== 3) throw new Error('expected configVersion 3');
   expect(normalized.alerts!.channels).toEqual([
     { id: 'telegram', name: 'telegram-1', botToken: TOKEN, chatId: '-1001234567890' },
     { id: 'webhook', name: 'webhook-2', url: 'https://example.com/h' },
   ]);
 
   const bad = (alerts: unknown, message: string) =>
-    expect(() => normalizeRunConfig({ ...v1Base, alerts })).toThrow(message);
+    expect(() => normalizeRunConfig({ ...currentConfig, alerts })).toThrow(message);
   bad({ channels: [{ id: 'telegram', botToken: 'nope', chatId: '1' }] }, 'botToken must look like');
   bad({ channels: [{ id: 'telegram', botToken: TOKEN }] }, 'chatId');
   bad(

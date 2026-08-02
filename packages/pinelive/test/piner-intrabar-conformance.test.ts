@@ -202,7 +202,7 @@ async function exercise(
 class SealableExactProvider implements HistoryProvider {
   readonly id = 'piner-intrabar-offline-exact';
   exactCalls = 0;
-  legacyCalls = 0;
+  historyCalls = 0;
   private sealed = false;
 
   constructor(private readonly inner: StaticProvider) {}
@@ -212,7 +212,7 @@ class SealableExactProvider implements HistoryProvider {
   }
 
   history(symbol: string, timeframe: string, range?: HistoryRange): Promise<Bar[]> {
-    this.legacyCalls++;
+    this.historyCalls++;
     if (this.sealed) throw new Error('exact provider read after finite preparation');
     return this.inner.history(symbol, timeframe, range);
   }
@@ -332,7 +332,7 @@ describe('piner 0.11.1 repeated-forming-bar offline regression oracle', () => {
       expect(assertResolvedMagnifierDatasetForJob(job, resolution.preflight)).toBe(dataset);
       expect(Object.isFrozen(dataset)).toBe(true);
       expect(resolverProjection(dataset)).toEqual(fixture.resolver);
-      expect(provider.legacyCalls).toBe(0);
+      expect(provider.historyCalls).toBe(0);
       expect(provider.exactCalls).toBe(1);
       provider.seal();
       const readsAtCutover = provider.exactCalls;

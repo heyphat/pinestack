@@ -8,11 +8,6 @@ import {
   type AlertFrequency,
 } from './alerts.js';
 
-export interface V1OrderPolicyConfig {
-  type: 'market' | 'limit';
-  limitOffsetTicks?: number;
-}
-
 export interface NormalizedWebhookChannelConfig {
   readonly id: 'webhook';
   /** Unique ledger-safe name; the URL and headers stay construction secrets. */
@@ -43,45 +38,6 @@ export interface NormalizedAlertsConfig {
 }
 
 export const MAX_ALERT_CHANNELS = 8;
-
-export interface NormalizedV1RunConfig {
-  configVersion: 1;
-  strategy: string;
-  symbol: string;
-  timeframe: string;
-  warmupBars?: number;
-  inputs?: Readonly<Record<string, unknown>>;
-  executionId?: string;
-  reconcileOnStart?: boolean;
-  order?: V1OrderPolicyConfig;
-  resolveSecurity?: boolean;
-  securityWarmupBars?: number;
-  maxSecurityBars?: number;
-  maxSecurityFeeds?: number;
-  securityConcurrency?: number;
-  securityRequestTimeoutMs?: number;
-  maxSecurityStaleRefreshes?: number;
-  data: ProviderConfig;
-  tigerProfile?: string;
-  broker:
-    | {
-        id: 'paper';
-        initialBalance?: number;
-        slippageBps?: number;
-        commissionPerUnit?: number;
-      }
-    | {
-        id: 'tiger';
-        profile?: string;
-        account?: string;
-        orderPollIntervalMs?: number;
-        maxOrderPolls?: number;
-        cancelStuckOrders?: boolean;
-      };
-  armed?: boolean;
-  ledger?: string;
-  alerts?: NormalizedAlertsConfig;
-}
 
 export interface NormalizedStandardHistoricalConfig {
   readonly mode: 'standard';
@@ -149,7 +105,7 @@ export interface NormalizedSecurityEnabledConfig {
 export type NormalizedSecurityConfig =
   NormalizedSecurityDisabledConfig | NormalizedSecurityEnabledConfig;
 
-export type NormalizedV2OrderPolicyConfig =
+export type NormalizedOrderPolicyConfig =
   | { readonly type: 'market'; readonly limitOffsetTicks?: never }
   | { readonly type: 'limit'; readonly limitOffsetTicks: number };
 
@@ -214,7 +170,7 @@ export interface NormalizedComputeOnlyExecutionConfig {
 
 interface NormalizedMirroredExecutionBase {
   readonly kind: 'mirrored';
-  readonly order: NormalizedV2OrderPolicyConfig;
+  readonly order: NormalizedOrderPolicyConfig;
   readonly executionId?: string;
   readonly ledger: NormalizedSyncLedgerConfig;
   readonly lease: NormalizedExclusiveLeaseConfig;
@@ -253,8 +209,8 @@ export type NormalizedMirroredExecutionConfig =
 export type NormalizedExecutionConfig =
   NormalizedComputeOnlyExecutionConfig | NormalizedMirroredExecutionConfig;
 
-interface NormalizedV2RunConfigCommon {
-  readonly configVersion: 2;
+interface NormalizedRunConfigCommon {
+  readonly configVersion: 3;
   readonly strategy: string;
   readonly symbol: string;
   readonly timeframe: string;
@@ -265,14 +221,14 @@ interface NormalizedV2RunConfigCommon {
   readonly alerts?: NormalizedAlertsConfig;
 }
 
-export type NormalizedBarCloseV2RunConfig = NormalizedV2RunConfigCommon & {
+export type NormalizedBarCloseRunConfig = NormalizedRunConfigCommon & {
   readonly live: NormalizedBarCloseLiveConfig;
   readonly security: NormalizedSecurityConfig;
   readonly execution:
     NormalizedComputeOnlyExecutionConfig | NormalizedBarCloseMirroredExecutionConfig;
 };
 
-export type NormalizedEveryUpdateV2RunConfig = NormalizedV2RunConfigCommon & {
+export type NormalizedEveryUpdateRunConfig = NormalizedRunConfigCommon & {
   readonly live: NormalizedEveryUpdateLiveConfig;
   readonly security: NormalizedSecurityDisabledConfig;
   readonly execution:
@@ -280,26 +236,23 @@ export type NormalizedEveryUpdateV2RunConfig = NormalizedV2RunConfigCommon & {
 };
 
 /** Only combinations that the strict normalizer can emit are represented. */
-export type NormalizedV2RunConfig =
-  NormalizedBarCloseV2RunConfig | NormalizedEveryUpdateV2RunConfig;
+export type NormalizedRunConfig = NormalizedBarCloseRunConfig | NormalizedEveryUpdateRunConfig;
 
-export type NormalizedComputeOnlyV2RunConfig =
-  | (Omit<NormalizedBarCloseV2RunConfig, 'execution'> & {
+export type NormalizedComputeOnlyRunConfig =
+  | (Omit<NormalizedBarCloseRunConfig, 'execution'> & {
       readonly execution: NormalizedComputeOnlyExecutionConfig;
     })
-  | (Omit<NormalizedEveryUpdateV2RunConfig, 'execution'> & {
+  | (Omit<NormalizedEveryUpdateRunConfig, 'execution'> & {
       readonly execution: NormalizedComputeOnlyExecutionConfig;
     });
 
-export type NormalizedMirroredV2RunConfig =
-  | (Omit<NormalizedBarCloseV2RunConfig, 'execution'> & {
+export type NormalizedMirroredRunConfig =
+  | (Omit<NormalizedBarCloseRunConfig, 'execution'> & {
       readonly execution: NormalizedBarCloseMirroredExecutionConfig;
     })
-  | (Omit<NormalizedEveryUpdateV2RunConfig, 'execution'> & {
+  | (Omit<NormalizedEveryUpdateRunConfig, 'execution'> & {
       readonly execution: NormalizedEveryUpdateCadenceMirroredExecutionConfig;
     });
-
-export type NormalizedRunConfig = NormalizedV1RunConfig | NormalizedV2RunConfig;
 
 export interface CompiledIntrabarMetadata {
   readonly isStrategy?: unknown;
@@ -328,7 +281,8 @@ export const DEFAULT_MAX_CONSECUTIVE_EXECUTION_ERRORS = 3;
  */
 export function normalizeRunConfig(value: unknown): NormalizedRunConfig {
   const config = configObject(value, 'config');
-  return config.configVersion === 2 ? normalizeV2(config) : normalizeV1(config);
+  if (config.configVersion !== 3) throw new Error('unsupported configVersion; expected 3');
+  return normalizeConfig(config);
 }
 
 /**
@@ -337,7 +291,7 @@ export function normalizeRunConfig(value: unknown): NormalizedRunConfig {
  */
 export function validateCompiledIntrabarConfig(
   compiledMetadata: CompiledIntrabarMetadata,
-  config: NormalizedV2RunConfig,
+  config: NormalizedRunConfig,
 ): void {
   const metadata = configObject(compiledMetadata, 'compiled metadata');
   if (metadata.isStrategy !== true) {
@@ -374,9 +328,7 @@ export function validateCompiledIntrabarConfig(
   }
 
   if (config.security.enabled && config.historical.mode !== 'bar-magnifier') {
-    throw new Error(
-      'v2 exact security requires config.historical.mode "bar-magnifier"; standard close-only security remains on the v1 runtime',
-    );
+    throw new Error('exact security requires config.historical.mode "bar-magnifier"');
   }
 
   if (config.historical.mode !== 'bar-magnifier') return;
@@ -401,195 +353,7 @@ export function validateCompiledIntrabarConfig(
   }
 }
 
-function normalizeV1(value: Readonly<Record<string, unknown>>): NormalizedV1RunConfig {
-  assertConfigKeys(
-    value,
-    [
-      'configVersion',
-      'strategy',
-      'symbol',
-      'timeframe',
-      'warmupBars',
-      'inputs',
-      'executionId',
-      'reconcileOnStart',
-      'order',
-      'resolveSecurity',
-      'securityWarmupBars',
-      'maxSecurityBars',
-      'maxSecurityFeeds',
-      'securityConcurrency',
-      'securityRequestTimeoutMs',
-      'maxSecurityStaleRefreshes',
-      'data',
-      'tigerProfile',
-      'broker',
-      'alerts',
-      'armed',
-      'ledger',
-    ],
-    'config',
-  );
-  for (const field of ['strategy', 'symbol', 'timeframe'] as const) {
-    if (typeof value[field] !== 'string' || !value[field]) {
-      throw new Error(`config.${field} must be a non-empty string`);
-    }
-  }
-  if (value.configVersion != null && value.configVersion !== 1) {
-    throw new Error('unsupported configVersion');
-  }
-  if (
-    value.warmupBars != null &&
-    (!Number.isInteger(value.warmupBars) || (value.warmupBars as number) < 0)
-  ) {
-    throw new Error('config.warmupBars must be a non-negative integer');
-  }
-
-  let order: V1OrderPolicyConfig | undefined;
-  if (value.order != null) {
-    if (typeof value.order !== 'object' || Array.isArray(value.order)) {
-      throw new Error('config.order must be an object');
-    }
-    const orderValue = value.order as Record<string, unknown>;
-    assertConfigKeys(orderValue, ['type', 'limitOffsetTicks'], 'config.order');
-    if (orderValue.type !== 'market' && orderValue.type !== 'limit') {
-      throw new Error('config.order.type must be "market" or "limit"');
-    }
-    if (
-      orderValue.limitOffsetTicks != null &&
-      (!Number.isInteger(orderValue.limitOffsetTicks) ||
-        (orderValue.limitOffsetTicks as number) < 0)
-    ) {
-      throw new Error('config.order.limitOffsetTicks must be a non-negative integer');
-    }
-    if (orderValue.type === 'market' && orderValue.limitOffsetTicks != null) {
-      throw new Error('config.order.limitOffsetTicks is only valid for limit orders');
-    }
-    order = {
-      type: orderValue.type,
-      limitOffsetTicks: orderValue.limitOffsetTicks as number | undefined,
-    };
-  }
-
-  for (const field of [
-    'securityWarmupBars',
-    'maxSecurityBars',
-    'maxSecurityFeeds',
-    'securityConcurrency',
-    'securityRequestTimeoutMs',
-  ] as const) {
-    if (value[field] != null && (!Number.isInteger(value[field]) || (value[field] as number) < 1)) {
-      throw new Error(`config.${field} must be a positive integer`);
-    }
-  }
-  if (
-    value.maxSecurityStaleRefreshes != null &&
-    (!Number.isInteger(value.maxSecurityStaleRefreshes) ||
-      (value.maxSecurityStaleRefreshes as number) < 0)
-  ) {
-    throw new Error('config.maxSecurityStaleRefreshes must be a non-negative integer');
-  }
-  if (
-    value.securityWarmupBars != null &&
-    value.maxSecurityBars != null &&
-    (value.securityWarmupBars as number) > (value.maxSecurityBars as number)
-  ) {
-    throw new Error('config.securityWarmupBars must not exceed config.maxSecurityBars');
-  }
-
-  const data = assertProviderConfig(value.data);
-  if (value.tigerProfile != null && typeof value.tigerProfile !== 'string') {
-    throw new Error('config.tigerProfile must be a string');
-  }
-  const tigerProfile = value.tigerProfile as string | undefined;
-  const brokerValue = value.broker === undefined ? { id: 'paper' } : value.broker;
-  if (!brokerValue || typeof brokerValue !== 'object' || Array.isArray(brokerValue)) {
-    throw new Error('config.broker must be an object');
-  }
-  const broker = brokerValue as Record<string, unknown>;
-  if (broker.id !== 'paper' && broker.id !== 'tiger') {
-    throw new Error('config.broker.id must be "paper" or "tiger"');
-  }
-  if (broker.id === 'paper') {
-    assertConfigKeys(
-      broker,
-      ['id', 'initialBalance', 'slippageBps', 'commissionPerUnit'],
-      'config.broker',
-    );
-    for (const field of ['initialBalance', 'slippageBps', 'commissionPerUnit'] as const) {
-      if (
-        broker[field] != null &&
-        (typeof broker[field] !== 'number' || !Number.isFinite(broker[field]))
-      ) {
-        throw new Error(`config.broker.${field} must be numeric`);
-      }
-    }
-  } else {
-    assertConfigKeys(
-      broker,
-      ['id', 'profile', 'account', 'orderPollIntervalMs', 'maxOrderPolls', 'cancelStuckOrders'],
-      'config.broker',
-    );
-    if (broker.profile != null && typeof broker.profile !== 'string') {
-      throw new Error('config.broker.profile must be a string');
-    }
-    if (broker.account != null && typeof broker.account !== 'string') {
-      throw new Error('config.broker.account must be a string');
-    }
-    for (const field of ['orderPollIntervalMs', 'maxOrderPolls'] as const) {
-      if (
-        broker[field] != null &&
-        (!Number.isInteger(broker[field]) || (broker[field] as number) < 0)
-      ) {
-        throw new Error(`config.broker.${field} must be a non-negative integer`);
-      }
-    }
-    if (broker.cancelStuckOrders != null && typeof broker.cancelStuckOrders !== 'boolean') {
-      throw new Error('config.broker.cancelStuckOrders must be boolean');
-    }
-    if (order?.type === 'limit' && broker.cancelStuckOrders !== true) {
-      throw new Error('Tiger limit orders require config.broker.cancelStuckOrders=true');
-    }
-  }
-  if (value.armed != null && typeof value.armed !== 'boolean') {
-    throw new Error('config.armed must be boolean');
-  }
-  if (value.reconcileOnStart != null && typeof value.reconcileOnStart !== 'boolean') {
-    throw new Error('config.reconcileOnStart must be boolean');
-  }
-  if (value.resolveSecurity != null && typeof value.resolveSecurity !== 'boolean') {
-    throw new Error('config.resolveSecurity must be boolean');
-  }
-  if (value.executionId != null && typeof value.executionId !== 'string') {
-    throw new Error('config.executionId must be a string');
-  }
-  if (value.ledger != null && typeof value.ledger !== 'string') {
-    throw new Error('config.ledger must be a string');
-  }
-  if (
-    value.inputs != null &&
-    (typeof value.inputs !== 'object' || value.inputs == null || Array.isArray(value.inputs))
-  ) {
-    throw new Error('config.inputs must be an object');
-  }
-
-  const alerts = normalizeAlerts(value.alerts);
-  return {
-    ...(value as unknown as NormalizedV1RunConfig),
-    configVersion: 1,
-    ...(alerts ? { alerts } : { alerts: undefined }),
-    order,
-    data:
-      tigerProfile != null && data.provider === 'tiger' && data.profile == null
-        ? { ...data, profile: tigerProfile }
-        : data,
-    broker: (tigerProfile != null && broker.id === 'tiger' && broker.profile == null
-      ? { ...broker, profile: tigerProfile }
-      : broker) as NormalizedV1RunConfig['broker'],
-  };
-}
-
-function normalizeV2(value: Readonly<Record<string, unknown>>): NormalizedV2RunConfig {
+function normalizeConfig(value: Readonly<Record<string, unknown>>): NormalizedRunConfig {
   assertConfigKeys(
     value,
     [
@@ -621,7 +385,7 @@ function normalizeV2(value: Readonly<Record<string, unknown>>): NormalizedV2RunC
   const data = assertProviderConfig(dataValue);
   const alerts = normalizeAlerts(value.alerts);
   const common = {
-    configVersion: 2 as const,
+    configVersion: 3 as const,
     strategy,
     symbol,
     timeframe,
@@ -897,7 +661,7 @@ function normalizeExecution(value: unknown, live: NormalizedLiveConfig): Normali
       'Tiger intrabar execution is unavailable until the credentialed release gate passes; offline facade evidence is insufficient',
     );
   }
-  const order = normalizeV2Order(execution.order);
+  const order = normalizeOrder(execution.order);
   if (broker.id === 'tiger' && order.type === 'limit' && broker.cancelStuckOrders !== true) {
     throw new Error('Tiger limit orders require config.execution.broker.cancelStuckOrders=true');
   }
@@ -986,7 +750,7 @@ function normalizeExecution(value: unknown, live: NormalizedLiveConfig): Normali
   };
 }
 
-function normalizeV2Order(value: unknown): NormalizedV2OrderPolicyConfig {
+function normalizeOrder(value: unknown): NormalizedOrderPolicyConfig {
   if (value === undefined) return { type: 'market' };
   const order = configObject(value, 'config.execution.order');
   assertConfigKeys(order, ['type', 'limitOffsetTicks'], 'config.execution.order');
@@ -1195,7 +959,7 @@ function optionalMetadataRecord(value: unknown): Readonly<Record<string, unknown
   return isObjectRecord(value) ? value : undefined;
 }
 
-/** Strict `alerts` section shared by v1 and v2. Absent/undefined disables alerting. */
+/** Strict `alerts` section. Absent/undefined disables alerting. */
 export function normalizeAlerts(value: unknown): NormalizedAlertsConfig | undefined {
   if (value === undefined) return undefined;
   const alerts = configObject(value, 'config.alerts');

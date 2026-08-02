@@ -55,7 +55,7 @@ function replayFixture(updates: readonly BarUpdate[]): ReplayProvider {
     {
       alignment: 'utc-24x7',
       timeframes: ['10m', '1h'],
-      cacheIdentity: 'pinelive-audit-repro-v1',
+      cacheIdentity: 'pinelive-audit-repro',
     },
   ).setInstrument('X', { minQty: 1, mintick: 0.01 });
   return new ReplayProvider(src, {
@@ -67,7 +67,7 @@ function replayFixture(updates: readonly BarUpdate[]): ReplayProvider {
 
 function everyUpdatePaperConfig() {
   return {
-    configVersion: 2,
+    configVersion: 3,
     strategy: 'audit-repro.pine',
     symbol: 'X',
     timeframe: '1h',

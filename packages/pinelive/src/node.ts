@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { readBootBoundProcessIdentity } from './coordination.js';
+export * from './coordination.js';
+export * from './status.js';
+export * from './administrative-recovery.js';
 export * from './index.js';
 import {
   ExecutionLeaseError,
@@ -24,6 +28,11 @@ export interface JsonlLedgerOptions {
   tailPolicy?: JsonlTailPolicy;
   /** Acquire before opening the ledger and release after final close. */
   lease?: boolean | ExecutionLease;
+  /**
+   * Default true. Set false only when a surrounding runtime owns an already-acquired lease and
+   * must preserve it after a more-sensitive ownership release fails.
+   */
+  releaseLeaseOnClose?: boolean;
   /** Deterministic fault-injection seam. Production defaults to FileHandle.datasync/sync. */
   syncFile?: (handle: FileHandle, method: JsonlSyncMethod) => Promise<void>;
 }
@@ -40,6 +49,7 @@ export class JsonlLedger implements LedgerSink {
   private readonly syncMethod: JsonlSyncMethod;
   private readonly tailPolicy: JsonlTailPolicy;
   private readonly lease?: ExecutionLease;
+  private readonly releaseLeaseOnClose: boolean;
   private readonly syncFile?: JsonlLedgerOptions['syncFile'];
 
   constructor(
@@ -61,6 +71,7 @@ export class JsonlLedger implements LedgerSink {
       normalized.lease === true
         ? new NodeExclusiveFileLease(`${path}.lock`, { resource: path })
         : normalized.lease || undefined;
+    this.releaseLeaseOnClose = normalized.releaseLeaseOnClose ?? true;
     this.syncFile = normalized.syncFile;
   }
 
@@ -121,6 +132,9 @@ export class JsonlLedger implements LedgerSink {
     try {
       if (this.lease) {
         if (!this.lease.snapshot) {
+          if (!this.releaseLeaseOnClose) {
+            throw new Error('externally managed ledger lease must already be acquired');
+          }
           await this.lease.acquire();
           acquiredHere = true;
         } else {
@@ -183,7 +197,7 @@ export class JsonlLedger implements LedgerSink {
       }
       this.handle = undefined;
     }
-    if (this.lease?.snapshot) {
+    if (this.lease?.snapshot && this.releaseLeaseOnClose) {
       try {
         await this.lease.release();
       } catch (error) {
@@ -200,8 +214,6 @@ export class JsonlLedger implements LedgerSink {
 export interface ReadJsonlOptions {
   /** Ignore one malformed, non-newline-terminated final JSON object fragment. Default false. */
   allowPartialFinalLine?: boolean;
-  /** Compatibility alias. */
-  toleratePartialFinalLine?: boolean;
 }
 
 export interface JsonlPrefix<T> {
@@ -255,6 +267,7 @@ export class NodeIntrabarPersistence implements IntrabarPersistence {
       durability: 'sync',
       tailPolicy: 'repair',
       lease,
+      releaseLeaseOnClose: false,
     });
   }
 }
@@ -270,8 +283,7 @@ export async function readJsonlPrefix<T>(
   options: ReadJsonlOptions | boolean = {},
 ): Promise<JsonlPrefix<T>> {
   const normalized = typeof options === 'boolean' ? { allowPartialFinalLine: options } : options;
-  const allowPartial =
-    normalized.allowPartialFinalLine ?? normalized.toleratePartialFinalLine ?? false;
+  const allowPartial = normalized.allowPartialFinalLine ?? false;
   return parseJsonlBytes<T>(path, await readFile(path), allowPartial);
 }
 
@@ -379,9 +391,18 @@ export class NodeExclusiveFileLease implements ExecutionLease {
       ownerId: this.ownerId,
       acquiredAt: new Date(timestamp).toISOString(),
     };
+    const processIdentity = await readBootBoundProcessIdentity();
     try {
       await chmod(this.path, 0o600);
-      await handle.writeFile(`${JSON.stringify({ ...snapshot, pid: process.pid })}\n`, 'utf8');
+      await handle.writeFile(
+        `${JSON.stringify({
+          leaseVersion: 2,
+          ...snapshot,
+          pid: process.pid,
+          ...(processIdentity ? { processIdentity } : {}),
+        })}\n`,
+        'utf8',
+      );
       await handle.datasync();
       this.handle = handle;
       this.value = snapshot;
@@ -695,6 +716,11 @@ export function assertTigerBrokerConfig(value: unknown): TigerBrokerConfig {
   };
 }
 
+export interface CreateNodeTigerBrokerOptions {
+  /** Require a runtime-installed account-claim and synchronization guard before mutations. */
+  readonly requireExecutionSafety?: boolean;
+}
+
 export function createNodeTigerBroker(
   input: TigerBrokerConfig,
   armed: boolean,
@@ -706,9 +732,9 @@ export function createNodeTigerBroker(
     license: process.env.TIGEROPEN_LICENSE,
     token: process.env.TIGEROPEN_TOKEN,
   },
+  options: CreateNodeTigerBrokerOptions = {},
 ): TigerBroker {
   const config = assertTigerBrokerConfig(input);
-  if (!armed) throw new Error('pinelive: Tiger execution requires explicit arming');
   const credentialSlice: TigerTradingCredentials = {
     tigerId: optionalCredential(credentials.tigerId, 'tigerId'),
     privateKey: optionalCredential(credentials.privateKey, 'privateKey'),
@@ -732,6 +758,7 @@ export function createNodeTigerBroker(
     orderPollIntervalMs: config.orderPollIntervalMs,
     maxOrderPolls: config.maxOrderPolls,
     cancelStuckOrders: config.cancelStuckOrders,
+    requireExecutionSafety: options.requireExecutionSafety ?? true,
   });
 }
 

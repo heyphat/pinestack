@@ -48,6 +48,24 @@ the piner engine. Of particular interest:
   unverified or mismatched binary, is downgraded to skip the checksum, or writes
   outside the running executable's own path is in scope. Both commands share one
   implementation for exactly this reason.
+- **Pinelive execution ownership and recovery** — Tiger account/instrument
+  claims and ledger leases are local cooperative safety boundaries. Paths and
+  ledger events must not reveal clear-text account identities; lock/claim files
+  must remain permission-isolated; ordinary startup must never steal an
+  existing artifact; and broker mutations must remain impossible after lease,
+  claim, or synchronized-stream loss. `pinelive status` must stay read-only.
+  `pinelive recover` must require explicit confirmation, conservative
+  boot-bound/dead-process proof, exact durable/physical owner matching, no
+  unresolved broker effects, and audit-preserving quarantine. Failed ownership
+  durability acknowledgement must retain physical lease/claim evidence rather
+  than unlink a possibly recorded owner; an unrecorded claim may be recovered
+  only with exact same-owner/PID/boot-identity binding to the durable execution
+  lease. Administrative-evidence restoration must never overwrite a concurrent
+  owner. A path that
+  bypasses these checks, weakens ambiguous-send no-retransmit behavior, or
+  enables the official Tiger transport despite incomplete inventory/exact
+  lookup/stream guarantees is in scope. See the
+  [production-safety runbook](./docs/pinelive-production-safety.md).
 - Prototype pollution or arbitrary code execution through the CLI argument or
   job pipeline.
 

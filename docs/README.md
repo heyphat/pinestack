@@ -31,21 +31,27 @@ advances piner, and reconciles one resolved exact contract through PaperBroker o
 a broker adapter.
 
 > **Opt-in install:** releases ship a standalone `pinelive` binary, but the
-> installer fetches it only with `PINESTACK_BINS="pinerun pinetop pinelive"` —
-> its Tiger adapters are offline-tested only and not production-approved. From a
-> checkout, `bun packages/pinelive/src/cli.ts run --config <path>` works without
-> any install. The
+> installer fetches it only with `PINESTACK_BINS="pinerun pinetop pinelive"`.
+> The built-in official Tiger adapter is intentionally blocked and ineligible
+> for armed production execution because it cannot prove complete open-order
+> inventory, authoritative exact order absence, or closure of the
+> snapshot/account-stream gap. From a checkout,
+> `bun packages/pinelive/src/cli.ts run --config <path>` works without any
+> install. The
 > [pinelive package README](../packages/pinelive/README.md#paper-quick-start)
-> contains a runnable Paper/CSV example.
+> contains the canonical `"configVersion": 3` Paper/CSV example. See the
+> [production-safety runbook](./pinelive-production-safety.md) for the Tiger
+> gate, status, and confirmed recovery procedures.
 
 Pine `alert()` calls in a running strategy reach registered channels — see
 [**pinelive alerts**](./pinelive-alerts.md) for the frequency gate, webhook
 channel, ledger records, and delivery semantics.
 
 Broker implementers should read the
-[adapter contract](./pinelive-adapter-contract.md). Tiger readiness limits and
-the offline-only nature of its validation are documented in the
-[forward-testing guide](./pinelive.md).
+[adapter contract](./pinelive-adapter-contract.md). Operators should read the
+[production-safety runbook](./pinelive-production-safety.md) for Tiger gate
+semantics, claim paths, read-only status, and explicit stale recovery. The
+[forward-testing guide](./pinelive.md) covers the broader runtime.
 
 ## Shared flags
 

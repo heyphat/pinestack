@@ -1,17 +1,29 @@
 #!/usr/bin/env bun
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { type MarketDataProvider, type ResolvedDataInstrument } from '@heyphat/pinery';
+import { CompileError, compile } from '@heyphat/piner';
+import {
+  assertLiveSymbolMatchesConfig,
+  assertProviderConfig,
+  type MarketDataProvider,
+  type ProviderConfig,
+  type ResolvedDataInstrument,
+} from '@heyphat/pinery';
 import { createNodeMarketDataProvider } from '@heyphat/pinery/node';
+import { runForwardServer } from './core/server.js';
 import {
   prepareIntrabarRun,
   runIntrabarServer,
-  type AccountInstrumentClaimFactoryContext,
   type IntrabarServerResult,
   type PreparedComputeOnlyIntrabarRun,
   type PreparedMirroredIntrabarRun,
 } from './core/intrabar-server.js';
-import type { NormalizedRunConfig } from './core/config.js';
+import {
+  normalizeRunConfig,
+  type NormalizedMirroredExecutionConfig,
+  type NormalizedV1RunConfig,
+  type NormalizedV2RunConfig,
+} from './core/config.js';
 import type { PreparedIntrabarAuthorityEnvelope } from './core/intrabar-authority.js';
 import type { Broker } from './core/broker.js';
 import type { ExecutionLease, ExecutionLeaseSnapshot } from './core/lease.js';
@@ -23,10 +35,7 @@ import { normalizeAlerts, type NormalizedAlertsConfig } from './core/config.js';
 import {
   FileExecutionLease,
   JsonlLedger,
-  createNodeAccountInstrumentClaim,
   createNodeTigerBroker,
-  readPineliveStatus,
-  recoverStalePineliveClaims,
   readConfig,
   readJsonl,
   readJsonlPrefix,
@@ -37,7 +46,7 @@ import {
   type TigerTradingCredentials,
 } from './node.js';
 import { compareLedgerParity } from './parity.js';
-import type { LedgerRecord, LedgerSink } from './core/ledger.js';
+import type { ForwardRecord, LedgerRecord, LedgerSink } from './core/ledger.js';
 import type { ExpectedPositionRecord } from './parity.js';
 
 // Injected by scripts/build-bin.ts (`bun build --define`) so the compiled binary
@@ -74,12 +83,10 @@ interface Args {
 
 type CliSignal = 'SIGINT' | 'SIGTERM';
 
-export interface CliRuntimeStorage {
+export interface CliV2RuntimeStorage {
   readonly ledgerPath: string;
   readonly ledger: LedgerSink;
   readonly recoveredEvents: readonly unknown[];
-  /** Shared ordinary-startup/explicit-recovery mutex for this ledger resource. */
-  readonly administrativeLease: ExecutionLease;
   /** File ownership shared by the direct mirrored runtime or held internally for compute repair. */
   readonly fileLease: ExecutionLease;
 }
@@ -87,11 +94,12 @@ export interface CliRuntimeStorage {
 export interface CliDependencies {
   readonly readConfig: typeof readConfig;
   readonly readSource: (path: string) => Promise<string>;
+  readonly normalizeRunConfig: typeof normalizeRunConfig;
   readonly prepareIntrabarRun: typeof prepareIntrabarRun;
+  readonly runForwardServer: typeof runForwardServer;
   readonly runIntrabarServer: typeof runIntrabarServer;
   readonly createMarketDataProvider: typeof createNodeMarketDataProvider;
   readonly createTigerBroker: typeof createNodeTigerBroker;
-  readonly createAccountInstrumentClaim: typeof createNodeAccountInstrumentClaim;
   readonly createPaperBroker: (options: PaperBrokerOptions) => Broker;
   readonly createWebhookAlertChannel: (options: WebhookAlertChannelOptions) => AlertChannel;
   readonly createTelegramAlertChannel: (options: TelegramAlertChannelOptions) => AlertChannel;
@@ -105,13 +113,57 @@ export interface CliDependencies {
     path: string,
     options?: ReadJsonlOptions | boolean,
   ) => Promise<JsonlPrefix<T>>;
-  readonly readPineliveStatus: typeof readPineliveStatus;
-  readonly recoverStalePineliveClaims: typeof recoverStalePineliveClaims;
+  readonly readTigerProfileOverride: () => string | undefined;
   readonly readTigerDataCredentials: () => Readonly<TigerTradingCredentials>;
   readonly readTigerTradingCredentials: () => Readonly<TigerTradingCredentials>;
   readonly log: (message: string) => void;
   readonly addSignalHandler: (signal: CliSignal, handler: () => void) => void;
   readonly removeSignalHandler: (signal: CliSignal, handler: () => void) => void;
+}
+
+export interface OrderPolicyConfig {
+  type: 'market' | 'limit';
+  /** Passive ticks from the closed-bar price. Buy subtracts; sell adds. */
+  limitOffsetTicks?: number;
+}
+
+export interface RunConfig {
+  configVersion?: 1;
+  strategy: string;
+  symbol: string;
+  timeframe: string;
+  warmupBars?: number;
+  inputs?: Readonly<Record<string, unknown>>;
+  executionId?: string;
+  reconcileOnStart?: boolean;
+  /** Market by default; limit mode derives a tick-aligned price from each closed bar. */
+  order?: OrderPolicyConfig;
+  /** Resolve `request.security` dependencies via secondary provider feeds. Default true. */
+  resolveSecurity?: boolean;
+  /** Secondary-feed bars fetched at startup. Defaults to chart-history bars actually received. */
+  securityWarmupBars?: number;
+  /** Hard total-series ceiling per secondary feed. */
+  maxSecurityBars?: number;
+  maxSecurityFeeds?: number;
+  securityConcurrency?: number;
+  securityRequestTimeoutMs?: number;
+  maxSecurityStaleRefreshes?: number;
+  data: ProviderConfig;
+  /** One credential-profile path applied to Tiger data and broker sections that omit their own. */
+  tigerProfile?: string;
+  broker:
+    | { id: 'paper'; initialBalance?: number; slippageBps?: number; commissionPerUnit?: number }
+    | {
+        id: 'tiger';
+        profile?: string;
+        account?: string;
+        orderPollIntervalMs?: number;
+        maxOrderPolls?: number;
+        cancelStuckOrders?: boolean;
+      };
+  armed?: boolean;
+  ledger?: string;
+  alerts?: NormalizedAlertsConfig;
 }
 
 function parseArgs(args: string[]): Args {
@@ -132,30 +184,181 @@ function parseArgs(args: string[]): Args {
   return parsed;
 }
 
-function assertCommandArgs(
-  args: Args,
-  command: string,
-  allowedValues: readonly string[],
-  allowedFlags: readonly string[],
+export function parseRunConfig(value: Readonly<Record<string, unknown>>): RunConfig {
+  assertConfigKeys(
+    value,
+    [
+      'configVersion',
+      'strategy',
+      'symbol',
+      'timeframe',
+      'warmupBars',
+      'inputs',
+      'executionId',
+      'reconcileOnStart',
+      'order',
+      'resolveSecurity',
+      'securityWarmupBars',
+      'maxSecurityBars',
+      'maxSecurityFeeds',
+      'securityConcurrency',
+      'securityRequestTimeoutMs',
+      'maxSecurityStaleRefreshes',
+      'data',
+      'tigerProfile',
+      'broker',
+      'armed',
+      'ledger',
+      'alerts',
+    ],
+    'config',
+  );
+  for (const field of ['strategy', 'symbol', 'timeframe'] as const)
+    if (typeof value[field] !== 'string' || !value[field])
+      throw new Error(`config.${field} must be a non-empty string`);
+  if (value.configVersion != null && value.configVersion !== 1)
+    throw new Error('unsupported configVersion');
+  if (
+    value.warmupBars != null &&
+    (!Number.isInteger(value.warmupBars) || (value.warmupBars as number) < 0)
+  )
+    throw new Error('config.warmupBars must be a non-negative integer');
+  let order: OrderPolicyConfig | undefined;
+  if (value.order != null) {
+    if (typeof value.order !== 'object' || Array.isArray(value.order))
+      throw new Error('config.order must be an object');
+    const orderValue = value.order as Record<string, unknown>;
+    assertConfigKeys(orderValue, ['type', 'limitOffsetTicks'], 'config.order');
+    if (orderValue.type !== 'market' && orderValue.type !== 'limit')
+      throw new Error('config.order.type must be "market" or "limit"');
+    if (
+      orderValue.limitOffsetTicks != null &&
+      (!Number.isInteger(orderValue.limitOffsetTicks) ||
+        (orderValue.limitOffsetTicks as number) < 0)
+    )
+      throw new Error('config.order.limitOffsetTicks must be a non-negative integer');
+    if (orderValue.type === 'market' && orderValue.limitOffsetTicks != null)
+      throw new Error('config.order.limitOffsetTicks is only valid for limit orders');
+    order = {
+      type: orderValue.type,
+      limitOffsetTicks: orderValue.limitOffsetTicks as number | undefined,
+    };
+  }
+  for (const field of [
+    'securityWarmupBars',
+    'maxSecurityBars',
+    'maxSecurityFeeds',
+    'securityConcurrency',
+    'securityRequestTimeoutMs',
+  ] as const)
+    if (value[field] != null && (!Number.isInteger(value[field]) || (value[field] as number) < 1))
+      throw new Error(`config.${field} must be a positive integer`);
+  if (
+    value.maxSecurityStaleRefreshes != null &&
+    (!Number.isInteger(value.maxSecurityStaleRefreshes) ||
+      (value.maxSecurityStaleRefreshes as number) < 0)
+  )
+    throw new Error('config.maxSecurityStaleRefreshes must be a non-negative integer');
+  if (
+    value.securityWarmupBars != null &&
+    value.maxSecurityBars != null &&
+    (value.securityWarmupBars as number) > (value.maxSecurityBars as number)
+  )
+    throw new Error('config.securityWarmupBars must not exceed config.maxSecurityBars');
+  const data = assertProviderConfig(value.data);
+  if (value.tigerProfile != null && typeof value.tigerProfile !== 'string')
+    throw new Error('config.tigerProfile must be a string');
+  const tigerProfile = value.tigerProfile as string | undefined;
+  const brokerValue = value.broker === undefined ? { id: 'paper' } : value.broker;
+  if (!brokerValue || typeof brokerValue !== 'object' || Array.isArray(brokerValue))
+    throw new Error('config.broker must be an object');
+  const broker = brokerValue as Record<string, unknown>;
+  if (broker.id !== 'paper' && broker.id !== 'tiger')
+    throw new Error('config.broker.id must be "paper" or "tiger"');
+  if (broker.id === 'paper') {
+    assertConfigKeys(
+      broker,
+      ['id', 'initialBalance', 'slippageBps', 'commissionPerUnit'],
+      'config.broker',
+    );
+    for (const field of ['initialBalance', 'slippageBps', 'commissionPerUnit'] as const) {
+      if (
+        broker[field] != null &&
+        (typeof broker[field] !== 'number' || !Number.isFinite(broker[field]))
+      )
+        throw new Error(`config.broker.${field} must be numeric`);
+    }
+  } else {
+    assertConfigKeys(
+      broker,
+      ['id', 'profile', 'account', 'orderPollIntervalMs', 'maxOrderPolls', 'cancelStuckOrders'],
+      'config.broker',
+    );
+    if (broker.profile != null && typeof broker.profile !== 'string')
+      throw new Error('config.broker.profile must be a string');
+    if (broker.account != null && typeof broker.account !== 'string')
+      throw new Error('config.broker.account must be a string');
+    for (const field of ['orderPollIntervalMs', 'maxOrderPolls'] as const)
+      if (
+        broker[field] != null &&
+        (!Number.isInteger(broker[field]) || (broker[field] as number) < 0)
+      )
+        throw new Error(`config.broker.${field} must be a non-negative integer`);
+    if (broker.cancelStuckOrders != null && typeof broker.cancelStuckOrders !== 'boolean')
+      throw new Error('config.broker.cancelStuckOrders must be boolean');
+    if (order?.type === 'limit' && broker.cancelStuckOrders !== true)
+      throw new Error('Tiger limit orders require config.broker.cancelStuckOrders=true');
+  }
+  if (value.armed != null && typeof value.armed !== 'boolean')
+    throw new Error('config.armed must be boolean');
+  if (value.reconcileOnStart != null && typeof value.reconcileOnStart !== 'boolean')
+    throw new Error('config.reconcileOnStart must be boolean');
+  if (value.resolveSecurity != null && typeof value.resolveSecurity !== 'boolean')
+    throw new Error('config.resolveSecurity must be boolean');
+  if (value.executionId != null && typeof value.executionId !== 'string')
+    throw new Error('config.executionId must be a string');
+  if (value.ledger != null && typeof value.ledger !== 'string')
+    throw new Error('config.ledger must be a string');
+  if (
+    value.inputs != null &&
+    (typeof value.inputs !== 'object' || value.inputs == null || Array.isArray(value.inputs))
+  )
+    throw new Error('config.inputs must be an object');
+  const alerts = normalizeAlerts(value.alerts);
+  return {
+    ...(value as unknown as RunConfig),
+    configVersion: 1,
+    ...(alerts ? { alerts } : { alerts: undefined }),
+    order,
+    // One profile path covers both sections; an explicit section value still wins.
+    data:
+      tigerProfile != null && data.provider === 'tiger' && data.profile == null
+        ? { ...data, profile: tigerProfile }
+        : data,
+    broker: (tigerProfile != null && broker.id === 'tiger' && broker.profile == null
+      ? { ...broker, profile: tigerProfile }
+      : broker) as unknown as RunConfig['broker'],
+  };
+}
+
+function assertConfigKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  path: string,
 ): void {
-  const unknownValue = [...args.values.keys()].find((name) => !allowedValues.includes(name));
-  if (unknownValue) throw new Error(`${command} does not allow --${unknownValue}`);
-  const unknownFlag = [...args.flags].find((name) => !allowedFlags.includes(name));
-  if (unknownFlag) throw new Error(`${command} does not allow --${unknownFlag}`);
-  if (args.positional.length > 0 && command !== 'parity')
-    throw new Error(`${command} does not allow positional arguments`);
-  if (command === 'parity' && args.positional.length > 2)
-    throw new Error('parity accepts exactly two positional paths');
+  const unknown = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unknown) throw new Error(`${path}.${unknown} is not allowed`);
 }
 
 const defaultCliDependencies: CliDependencies = {
   readConfig,
   readSource: (path) => readFile(path, 'utf8'),
+  normalizeRunConfig,
   prepareIntrabarRun,
+  runForwardServer,
   runIntrabarServer,
   createMarketDataProvider: createNodeMarketDataProvider,
   createTigerBroker: createNodeTigerBroker,
-  createAccountInstrumentClaim: createNodeAccountInstrumentClaim,
   createPaperBroker: (options) => new PaperBroker(options),
   createWebhookAlertChannel: (options) => new WebhookAlertChannel(options),
   createTelegramAlertChannel: (options) => new TelegramAlertChannel(options),
@@ -163,8 +366,7 @@ const defaultCliDependencies: CliDependencies = {
   createFileExecutionLease: (path, options) => new FileExecutionLease(path, options),
   readJsonl,
   readJsonlPrefix,
-  readPineliveStatus,
-  recoverStalePineliveClaims,
+  readTigerProfileOverride: () => process.env.TIGEROPEN_CONFIG_PATH,
   readTigerDataCredentials: tigerDataCredentialsFromEnvironment,
   readTigerTradingCredentials: tigerTradingCredentialsFromEnvironment,
   log: (message) => console.log(message),
@@ -207,12 +409,8 @@ export async function main(
   const dependencies = { ...defaultCliDependencies, ...overrides };
   const [command, ...rest] = argv;
   if (!command || command === '--help' || command === '-h' || command === 'help') {
-    dependencies.log('pinelive run --config <pinelive.json>');
+    dependencies.log('pinelive run --config <pinelive.json> [--tiger-profile <path>]');
     dependencies.log('pinelive validate --config <pinelive.json>');
-    dependencies.log('pinelive status --ledger <path> [--json] [--recent <n>]');
-    dependencies.log(
-      'pinelive recover --ledger <path> --lease <path> [--account-claim <path>] --confirm',
-    );
     dependencies.log('pinelive parity <live.jsonl> <expected.jsonl>');
     dependencies.log('pinelive upgrade [--check]');
     dependencies.log('pinelive --version');
@@ -227,76 +425,38 @@ export async function main(
   // against the release's checksums.txt, same atomic swap — asked to operate
   // on the `pinelive` asset.
   if (command === 'upgrade') {
-    const args = parseArgs(rest);
-    assertCommandArgs(args, 'upgrade', [], ['check']);
     const { runUpgrade } = await import('@heyphat/pinerun');
     await runUpgrade({
-      check: args.flags.has('check'),
+      check: rest.includes('--check'),
       currentVersion: resolveVersion(),
       binary: 'pinelive',
     });
     return;
   }
-  if (command === 'status') {
-    const args = parseArgs(rest);
-    assertCommandArgs(args, 'status', ['ledger', 'recent'], ['json']);
-    const ledgerPath = args.values.get('ledger');
-    if (!ledgerPath) throw new Error('status requires --ledger <path>');
-    const recentValue = args.values.get('recent');
-    const recent = recentValue == null ? undefined : Number(recentValue);
-    const status = await dependencies.readPineliveStatus({
-      ledgerPath,
-      ...(recent == null ? {} : { recent }),
-    });
-    if (args.flags.has('json')) dependencies.log(JSON.stringify(status));
-    else
-      dependencies.log(
-        `ledger=${status.ledger.path} schema=${status.ledger.ledgerSchemaVersion ?? 'none'} sequence=${status.ledger.lastSequence ?? 0} partialTail=${status.ledger.partialTail}`,
-      );
-    return;
-  }
-  if (command === 'recover') {
-    const args = parseArgs(rest);
-    assertCommandArgs(args, 'recover', ['ledger', 'lease', 'account-claim'], ['confirm', 'json']);
-    const ledgerPath = args.values.get('ledger');
-    const leasePath = args.values.get('lease');
-    if (!ledgerPath || !leasePath)
-      throw new Error('recover requires --ledger <path> and --lease <path>');
-    if (!args.flags.has('confirm'))
-      throw new Error('recover requires --confirm after verifying the recorded process is gone');
-    const recovered = await dependencies.recoverStalePineliveClaims({
-      ledgerPath,
-      leasePath,
-      ...(args.values.has('account-claim')
-        ? { accountClaimPath: args.values.get('account-claim')! }
-        : {}),
-      confirmed: true,
-    });
-    dependencies.log(
-      args.flags.has('json')
-        ? JSON.stringify(recovered)
-        : `recovered ledger=${recovered.ledgerPath} sequence=${recovered.finalSequence} quarantined=${recovered.quarantinedPaths.length}`,
-    );
-    return;
-  }
   if (command === 'parity') {
     const args = parseArgs(rest);
-    assertCommandArgs(args, 'parity', [], []);
     const [livePath, expectedPath] = args.positional;
     if (!livePath || !expectedPath)
       throw new Error('parity requires <live.jsonl> <expected.jsonl>');
     const [ledger, expected] = await Promise.all([
-      dependencies.readJsonl<unknown>(livePath),
+      dependencies.readJsonl<LedgerRecord>(livePath),
       dependencies.readJsonl<ExpectedPositionRecord>(expectedPath),
     ]);
-    const differences = compareLedgerParity(ledger, expected);
+    const live = ledger.filter(
+      (row): row is ForwardRecord =>
+        row.schemaVersion !== 3 &&
+        row.recordType !== 'binding' &&
+        row.recordType !== 'startup' &&
+        row.recordType !== 'security' &&
+        row.recordType !== 'alert',
+    );
+    const differences = compareLedgerParity(live, expected);
     dependencies.log(JSON.stringify({ matches: differences.length === 0, differences }, null, 2));
     if (differences.length > 0) process.exitCode = 2;
     return;
   }
   if (command === 'validate') {
     const args = parseArgs(rest);
-    assertCommandArgs(args, 'validate', ['config'], []);
     const configPath = args.values.get('config');
     if (!configPath) throw new Error('validate requires --config <path>');
     const rawConfig = await dependencies.readConfig(configPath);
@@ -307,42 +467,189 @@ export async function main(
   if (command !== 'run') throw new Error(`unknown command "${command}"`);
 
   const args = parseArgs(rest);
-  assertCommandArgs(args, 'run', ['config'], []);
   const configPath = args.values.get('config');
   if (!configPath)
     throw new Error('run requires --config <path>; direct --data CSV mode moved to pinery config');
   const rawConfig = await dependencies.readConfig(configPath);
-  await runConfig(rawConfig, dependencies);
+  if (rawConfig.configVersion === 2) {
+    await runV2Config(rawConfig, args, dependencies);
+    return;
+  }
+  const config = dependencies.normalizeRunConfig(rawConfig);
+  if (config.configVersion !== 1) throw new Error('internal v1 dispatch mismatch');
+  await runV1Config(config, args, dependencies);
 }
 
 async function validateConfig(
   rawConfig: Readonly<Record<string, unknown>>,
   dependencies: CliDependencies,
 ): Promise<{
-  configVersion: 3;
+  configVersion: 1 | 2;
   mode: 'mirrored' | 'compute-only';
   cadence: 'bar-close' | 'every-update';
   history: 'standard' | 'bar-magnifier';
 }> {
-  const source = await dependencies.readSource(strategyPath(rawConfig));
-  const prepared = dependencies.prepareIntrabarRun(rawConfig, source);
+  if (rawConfig.configVersion === 2) {
+    const source = await dependencies.readSource(strategyPath(rawConfig));
+    const prepared = dependencies.prepareIntrabarRun(rawConfig, source);
+    return {
+      configVersion: 2,
+      mode: prepared.config.execution.kind,
+      cadence: prepared.config.live.cadence,
+      history: prepared.config.historical.mode,
+    };
+  }
+
+  const normalized = dependencies.normalizeRunConfig(rawConfig);
+  if (normalized.configVersion !== 1) throw new Error('internal v1 validation mismatch');
+  const source = await dependencies.readSource(normalized.strategy);
+  validateV1Source(normalized, source);
   return {
-    configVersion: 3,
-    mode: prepared.config.execution.kind,
-    cadence: prepared.config.live.cadence,
-    history: prepared.config.historical.mode,
+    configVersion: 1,
+    mode: 'mirrored',
+    cadence: 'bar-close',
+    history: 'standard',
   };
 }
 
-async function runConfig(
+function validateV1Source(config: NormalizedV1RunConfig, source: string): void {
+  assertLiveSymbolMatchesConfig(config.symbol, config.data);
+  let compiled;
+  try {
+    compiled = compile(source);
+  } catch (error) {
+    throw new Error(error instanceof CompileError ? error.message : 'Pine compilation failed', {
+      cause: error,
+    });
+  }
+  const errors = compiled.diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+  if (errors.length > 0) {
+    throw new Error(`Pine compilation failed: ${errors.map((error) => error.message).join('; ')}`);
+  }
+  if (!compiled.metadata.isStrategy) {
+    throw new Error('Pine source must declare a strategy(), not an indicator()');
+  }
+  if (compiled.metadata.securityDependencies.length > 0 && config.resolveSecurity === false) {
+    throw new Error(
+      'this strategy uses request.security but resolveSecurity is disabled; those requests ' +
+        'would degrade to na and the strategy would trade differently than it backtested',
+    );
+  }
+}
+
+async function runV1Config(
+  config: NormalizedV1RunConfig,
+  args: Args,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const usesTiger = config.data.provider === 'tiger' || config.broker.id === 'tiger';
+  const tigerProfileOverride =
+    args.values.get('tiger-profile') ??
+    (usesTiger ? dependencies.readTigerProfileOverride() : undefined);
+  if (tigerProfileOverride != null && config.tigerProfile == null) {
+    if (config.data.provider === 'tiger' && config.data.profile == null)
+      config.data = { ...config.data, profile: tigerProfileOverride };
+    if (config.broker.id === 'tiger' && config.broker.profile == null)
+      config.broker = { ...config.broker, profile: tigerProfileOverride };
+  }
+  const runSymbol = assertLiveSymbolMatchesConfig(config.symbol, config.data);
+  const tradingCredentials =
+    config.broker.id === 'tiger' ? dependencies.readTigerTradingCredentials() : undefined;
+  const dataCredentials =
+    config.data.provider === 'tiger'
+      ? (tradingCredentials ?? dependencies.readTigerDataCredentials())
+      : undefined;
+  const data =
+    config.data.provider === 'tiger'
+      ? dependencies.createMarketDataProvider(config.data, {
+          tigerCredentials: tigerDataCredentialSlice(dataCredentials!),
+        })
+      : dependencies.createMarketDataProvider(config.data);
+  const armed = config.armed ?? false;
+
+  let broker: Broker;
+  if (config.broker.id === 'tiger') {
+    broker = dependencies.createTigerBroker(config.broker, armed, tradingCredentials);
+  } else {
+    broker = dependencies.createPaperBroker({
+      instrumentResolver: async (symbol) => {
+        const resolved = await data.resolve(runSymbol, { strict: true });
+        if (resolved.venueSymbol !== symbol)
+          throw new Error('paper broker requested a contract different from pinery resolution');
+        return paperInstrument(resolved);
+      },
+      initialBalance: config.broker.initialBalance,
+      slippageBps: config.broker.slippageBps,
+      commissionPerUnit: config.broker.commissionPerUnit,
+    });
+  }
+
+  const source = await dependencies.readSource(config.strategy);
+  const ledgerPath = config.ledger ?? '.pinelive/ledger.jsonl';
+  const ledger = dependencies.createJsonlLedger(ledgerPath);
+  const controller = new AbortController();
+  const stop = (): void => controller.abort();
+  dependencies.addSignalHandler('SIGINT', stop);
+  dependencies.addSignalHandler('SIGTERM', stop);
+  try {
+    const result = await dependencies.runForwardServer({
+      source,
+      symbol: runSymbol,
+      timeframe: config.timeframe,
+      data,
+      broker,
+      ledger,
+      warmupBars: config.warmupBars,
+      inputs: config.inputs,
+      executionId: config.executionId,
+      reconcileOnStart: config.reconcileOnStart,
+      resolveSecurity: config.resolveSecurity,
+      securityWarmupBars: config.securityWarmupBars,
+      maxSecurityBars: config.maxSecurityBars,
+      maxSecurityFeeds: config.maxSecurityFeeds,
+      securityConcurrency: config.securityConcurrency,
+      securityRequestTimeoutMs: config.securityRequestTimeoutMs,
+      maxSecurityStaleRefreshes: config.maxSecurityStaleRefreshes,
+      ...(config.alerts
+        ? {
+            alerts: config.alerts,
+            alertChannels: buildAlertChannels(config.alerts, dependencies),
+          }
+        : {}),
+      mirror: {
+        orderType: config.order?.type,
+        limitOffsetTicks: config.order?.limitOffsetTicks,
+      },
+      signal: controller.signal,
+      onLog: dependencies.log,
+    });
+    dependencies.log(
+      `stopped: contract=${result.binding.executionSymbol} position=${result.finalPosition} equity=${result.finalEquity} ledger=${ledgerPath}`,
+    );
+  } finally {
+    dependencies.removeSignalHandler('SIGINT', stop);
+    dependencies.removeSignalHandler('SIGTERM', stop);
+  }
+}
+
+async function runV2Config(
   rawConfig: Readonly<Record<string, unknown>>,
+  args: Args,
   dependencies: CliDependencies,
 ): Promise<void> {
   const source = await dependencies.readSource(strategyPath(rawConfig));
-  // The branded prepare result is the only normalized value used below. No runtime factory
+  // The branded prepare result is the only normalized v2 value used below. No runtime factory
   // exists before this pure source/config gate completes.
   const prepared = dependencies.prepareIntrabarRun(rawConfig, source);
+  if (args.values.has('tiger-profile')) {
+    throw new Error('v2 requires Tiger profiles inside the strict data/broker sections');
+  }
   const normalized = prepared.config;
+  if (normalized.execution.kind === 'mirrored' && normalized.execution.broker.id === 'tiger') {
+    throw new Error(
+      'Tiger v2 broker execution is unavailable until the credentialed release gate passes',
+    );
+  }
 
   const dataFactory = (): MarketDataProvider =>
     normalized.data.provider === 'tiger'
@@ -356,8 +663,8 @@ async function runConfig(
   dependencies.addSignalHandler('SIGINT', stop);
   dependencies.addSignalHandler('SIGTERM', stop);
   try {
-    const storage = await openRuntimeStorage(normalized, dependencies);
-    const result = await runWithStorage(
+    const storage = await openV2RuntimeStorage(normalized, dependencies);
+    const result = await runV2WithStorage(
       prepared,
       normalized,
       dataFactory,
@@ -365,26 +672,24 @@ async function runConfig(
       controller.signal,
       dependencies,
     );
-    printResult(result, storage.ledgerPath, dependencies.log);
+    printV2Result(result, storage.ledgerPath, dependencies.log);
   } finally {
     dependencies.removeSignalHandler('SIGINT', stop);
     dependencies.removeSignalHandler('SIGTERM', stop);
   }
 }
 
-async function runWithStorage(
+async function runV2WithStorage(
   prepared: ReturnType<typeof prepareIntrabarRun>,
-  normalized: NormalizedRunConfig,
+  normalized: NormalizedV2RunConfig,
   dataFactory: () => MarketDataProvider,
-  storage: CliRuntimeStorage,
+  storage: CliV2RuntimeStorage,
   signal: AbortSignal,
   dependencies: CliDependencies,
 ): Promise<IntrabarServerResult> {
   const ledger = new CliOwnedLedger(storage.ledger);
   const fileLease = new CliOwnedExecutionLease(storage.fileLease);
-  const administrativeLease = new CliOwnedExecutionLease(storage.administrativeLease);
   const lease = normalized.execution.kind === 'mirrored' ? fileLease : undefined;
-  let mirroredRuntimeOwnsLease = false;
   let result: IntrabarServerResult | undefined;
   let primaryError: unknown;
 
@@ -400,9 +705,8 @@ async function runWithStorage(
         onLog: dependencies.log,
       });
     } else {
-      if (!lease) throw new Error('mirrored runtime requires an execution lease');
+      if (!lease) throw new Error('mirrored v2 runtime requires an execution lease');
       const execution = normalized.execution;
-      mirroredRuntimeOwnsLease = true;
       result = await dependencies.runIntrabarServer({
         prepared: prepared as PreparedMirroredIntrabarRun,
         dataFactory,
@@ -418,29 +722,13 @@ async function runWithStorage(
               : { partialFinalLine: refreshed.partialFinalLine }),
           };
         },
-        releaseAdministrativeLeaseAfterOwnershipRecorded: () => administrativeLease.release(),
         lease,
         signal,
         onLog: dependencies.log,
-        ...(execution.broker.id === 'tiger'
-          ? {
-              accountClaimFactory: (context: AccountInstrumentClaimFactoryContext) =>
-                dependencies.createAccountInstrumentClaim(
-                  {
-                    identity: context.identity,
-                    executionSymbol: context.executionSymbol,
-                  },
-                  { ownerId: context.ownerId },
-                ),
-            }
-          : {}),
         brokerFactory: ({ resolved, authority }) => {
           if (execution.broker.id === 'tiger') {
-            return dependencies.createTigerBroker(
-              execution.broker,
-              execution.armed ?? false,
-              dependencies.readTigerTradingCredentials(),
-              { requireExecutionSafety: true },
+            throw new Error(
+              'Tiger v2 broker execution is unavailable until the credentialed release gate passes',
             );
           }
           assertPaperAuthority(resolved, authority);
@@ -467,20 +755,9 @@ async function runWithStorage(
       cleanupErrors.push(error);
     }
   }
-  if (fileLease.snapshot && !fileLease.releaseAttempted && !mirroredRuntimeOwnsLease) {
+  if (fileLease.snapshot && !fileLease.releaseAttempted) {
     try {
       await fileLease.release();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  }
-  if (
-    administrativeLease.snapshot &&
-    !administrativeLease.releaseAttempted &&
-    !(mirroredRuntimeOwnsLease && fileLease.snapshot)
-  ) {
-    try {
-      await administrativeLease.release();
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -490,22 +767,22 @@ async function runWithStorage(
     if (cleanupErrors.length > 0) {
       throw new AggregateError(
         [primaryError, ...cleanupErrors],
-        'pinelive runtime and ownership cleanup failed',
+        'pinelive v2 runtime and ownership cleanup failed',
       );
     }
     throw primaryError;
   }
   if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, 'pinelive ownership cleanup failed');
+    throw new AggregateError(cleanupErrors, 'pinelive v2 ownership cleanup failed');
   }
-  if (!result) throw new Error('pinelive runtime stopped without a result');
+  if (!result) throw new Error('pinelive v2 runtime stopped without a result');
   return result;
 }
 
-async function openRuntimeStorage(
-  config: NormalizedRunConfig,
+async function openV2RuntimeStorage(
+  config: NormalizedV2RunConfig,
   dependencies: CliDependencies,
-): Promise<CliRuntimeStorage> {
+): Promise<CliV2RuntimeStorage> {
   const paths =
     config.execution.kind === 'mirrored'
       ? {
@@ -513,18 +790,11 @@ async function openRuntimeStorage(
           leasePath: config.execution.lease.path,
         }
       : defaultComputeStatePaths(config);
-  const runtimeOwnerId = `pinelive-runtime:${globalThis.crypto.randomUUID()}`;
-  const administrativeLease = dependencies.createFileExecutionLease(
-    `${paths.leasePath}.admin.lock`,
-    { resource: `pinelive-admin:${paths.ledgerPath}`, ownerId: runtimeOwnerId },
-  );
   const fileLease = dependencies.createFileExecutionLease(paths.leasePath, {
     resource: paths.ledgerPath,
-    ownerId: runtimeOwnerId,
   });
 
   try {
-    await administrativeLease.acquire();
     // Direct compute options intentionally contain no execution lease. Hold the ledger's repair
     // lease before reading so its recovery prefix cannot become stale before sequence allocation.
     if (config.execution.kind === 'compute-only') await fileLease.acquire();
@@ -533,37 +803,23 @@ async function openRuntimeStorage(
       durability: 'sync',
       tailPolicy: 'repair',
       lease: fileLease,
-      releaseLeaseOnClose: config.execution.kind === 'compute-only',
     });
-    if (config.execution.kind === 'compute-only') await administrativeLease.release();
     return {
       ledgerPath: paths.ledgerPath,
       ledger,
       recoveredEvents: prefix.records,
-      administrativeLease,
       fileLease,
     };
   } catch (error) {
-    const cleanupErrors: unknown[] = [];
-    if (fileLease.snapshot) {
-      try {
-        await fileLease.release();
-      } catch (releaseError) {
-        cleanupErrors.push(releaseError);
-      }
-    }
-    if (administrativeLease.snapshot) {
-      try {
-        await administrativeLease.release();
-      } catch (releaseError) {
-        cleanupErrors.push(releaseError);
-      }
-    }
-    if (cleanupErrors.length > 0)
+    if (!fileLease.snapshot) throw error;
+    try {
+      await fileLease.release();
+    } catch (releaseError) {
       throw new AggregateError(
-        [error, ...cleanupErrors],
-        'storage preparation and ownership cleanup failed',
+        [error, releaseError],
+        'v2 storage preparation and lease cleanup failed',
       );
+    }
     throw error;
   }
 }
@@ -638,7 +894,7 @@ class CliOwnedExecutionLease implements ExecutionLease {
   }
 }
 
-function printResult(
+function printV2Result(
   result: IntrabarServerResult,
   ledgerPath: string,
   log: (message: string) => void,
@@ -658,24 +914,11 @@ function printResult(
     return;
   }
   if (!result.executionSafe) {
-    log(
-      JSON.stringify({
-        ...common,
-        posture: result.posture,
-        executionEligibility: result.executionEligibility,
-        eligibilityReasons: result.eligibilityReasons,
-        executionSafe: false,
-        unsafeReason: result.unsafeReason,
-      }),
-    );
-    return;
+    throw new Error(`mirrored v2 execution stopped unsafe: ${result.unsafeReason}`);
   }
   log(
     JSON.stringify({
       ...common,
-      posture: result.posture,
-      executionEligibility: result.executionEligibility,
-      eligibilityReasons: result.eligibilityReasons,
       executionSafe: true,
       finalPosition: result.finalPosition,
       finalAccount: result.finalAccount,
@@ -722,7 +965,7 @@ function strategyPath(config: Readonly<Record<string, unknown>>): string {
   return config.strategy;
 }
 
-function defaultComputeStatePaths(config: NormalizedRunConfig): {
+function defaultComputeStatePaths(config: NormalizedV2RunConfig): {
   ledgerPath: string;
   leasePath: string;
 } {
@@ -730,7 +973,7 @@ function defaultComputeStatePaths(config: NormalizedRunConfig): {
     /[^a-z0-9_.-]+/gi,
     '_',
   );
-  const ledgerPath = `.pinelive/${key}.jsonl`;
+  const ledgerPath = `.pinelive/${key}.v2.jsonl`;
   return { ledgerPath, leasePath: `${ledgerPath}.lock` };
 }
 

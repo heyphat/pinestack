@@ -14,11 +14,9 @@ import {
 } from '../src/index.js';
 
 const instrument = { symbol: 'X', minQty: 1, qtyStep: 1, minOrderQty: 1, mintick: 0.01 };
-const bindingId = `binding-v2-${'a'.repeat(64)}`;
 const binding: RunInstrumentBinding = {
-  bindingVersion: 2,
-  id: bindingId,
-  fingerprint: bindingId,
+  id: 'binding-test',
+  fingerprint: 'binding-test',
   strategySymbol: 'ROOT',
   providerId: 'test',
   providerHandle: 'test:X',
@@ -27,11 +25,6 @@ const binding: RunInstrumentBinding = {
   minOrderQty: 1,
   mintick: 0.01,
   brokerId: 'paper',
-  authority: {
-    algorithm: 'sha256',
-    identity: `sha256-${'b'.repeat(64)}`,
-    prepared: {},
-  } as never,
 };
 
 function context(barTime = 1): ReconcileContext {
@@ -103,7 +96,7 @@ test('scheduler durably accepts and records exact intent/attempt before broker e
   const trace: string[] = [];
   const sink: LedgerSink = {
     append: async (record) => {
-      trace.push(record.recordType);
+      trace.push(record.schemaVersion === 3 ? record.recordType : 'legacy');
       await memory.append(record);
     },
   };
@@ -1282,7 +1275,7 @@ test('lease is rechecked after attempt durability and before submit', async () =
   ).toBe(true);
 });
 
-test('initialization durability failure retains an uncertain physical lease', async () => {
+test('initialization durability failure releases only the lease acquired by the scheduler', async () => {
   const broker = paper();
   const lease = new InMemoryExecutionLease('initialization-failure', {
     ownerId: 'scheduler',
@@ -1295,8 +1288,7 @@ test('initialization durability failure retains an uncertain physical lease', as
   };
   const targetScheduler = scheduler(broker, sink, { lease });
   await expect(targetScheduler.initialize()).rejects.toThrow('lease event sync failed');
-  expect(lease.snapshot).toBeDefined();
-  await lease.release();
+  expect(lease.snapshot).toBeUndefined();
 
   const successor = new InMemoryExecutionLease('initialization-failure', {
     ownerId: 'successor',
@@ -1304,36 +1296,6 @@ test('initialization durability failure retains an uncertain physical lease', as
   });
   expect((await successor.acquire()).ownerId).toBe('successor');
   await successor.release();
-});
-
-test('release durability failure retains the physical lease after a possibly-written row', async () => {
-  const broker = paper();
-  const lease = new InMemoryExecutionLease('release-failure', {
-    ownerId: 'scheduler-release',
-    leaseId: 'scheduler-release-lease',
-  });
-  const memory = new MemoryLedger();
-  const sink: LedgerSink = {
-    append: async (record) => {
-      await memory.append(record);
-      if (
-        record.schemaVersion === 3 &&
-        record.recordType === 'lease' &&
-        record.action === 'released'
-      ) {
-        throw new Error('release row sync failed after write');
-      }
-    },
-    flush: () => memory.flush(),
-  };
-  const targetScheduler = scheduler(broker, sink, { lease });
-  await targetScheduler.initialize();
-  await expect(targetScheduler.releaseLease()).rejects.toThrow(
-    'execution lease journal/release failed',
-  );
-  expect(lease.snapshot).toBeDefined();
-  expect(recoverLedger(memory.events).activeLease).toBeUndefined();
-  await lease.release();
 });
 
 test('concurrent duplicate decision is read-only and cannot finalize twice', async () => {
@@ -1820,7 +1782,7 @@ test('replacement durability failure leaves the old pending target terminal', as
   expect(restartedReads).toBe(0);
 });
 
-test('recovery durably coalesces recovered middle accepted targets before broker access', async () => {
+test('recovery durably coalesces legacy middle accepted targets before broker access', async () => {
   const broker = paper();
   const memory = new MemoryLedger();
   const getPosition = broker.getPosition.bind(broker);
@@ -1835,29 +1797,28 @@ test('recovery durably coalesces recovered middle accepted targets before broker
     return getPosition(symbol, signal);
   };
   const original = scheduler(broker, memory);
-  const active = original.schedule(1, context(1), { decisionId: 'recovered-active' });
+  const active = original.schedule(1, context(1), { decisionId: 'legacy-active' });
   await waitFor(() => reads === 1);
-  const pending = original.schedule(2, context(2), { decisionId: 'recovered-stale' });
+  const pending = original.schedule(2, context(2), { decisionId: 'legacy-stale' });
   await waitFor(() =>
     memory.events.some(
-      (event) =>
-        event.recordType === 'evaluation.accepted' && event.decisionId === 'recovered-stale',
+      (event) => event.recordType === 'evaluation.accepted' && event.decisionId === 'legacy-stale',
     ),
   );
-  const recoveredPrefix = structuredClone(memory.events);
-  const stale = recoveredPrefix.find(
-    (event) => event.recordType === 'evaluation.accepted' && event.decisionId === 'recovered-stale',
+  const legacyPrefix = structuredClone(memory.events);
+  const stale = legacyPrefix.find(
+    (event) => event.recordType === 'evaluation.accepted' && event.decisionId === 'legacy-stale',
   )!;
-  recoveredPrefix.push({
+  legacyPrefix.push({
     ...stale,
     sequence: stale.sequence + 1,
     recordedAt: stale.recordedAt,
-    decisionId: 'recovered-newest',
+    decisionId: 'legacy-newest',
     barTime: 3,
     cursor: 3,
     update: {
       ...stale.update,
-      eventId: 'close-only:recovered-newest',
+      eventId: 'close-only:legacy-newest',
     },
     target: 3,
   });
@@ -1865,9 +1826,9 @@ test('recovery durably coalesces recovered middle accepted targets before broker
   await active;
   await pending;
 
-  const prefixLedger = await ledgerFrom(recoveredPrefix);
+  const prefixLedger = await ledgerFrom(legacyPrefix);
   const recovery = recoverLedger(prefixLedger.events, { requireBinding: true });
-  expect(recovery.supersededDecisionIds).toEqual(['recovered-stale']);
+  expect(recovery.supersededDecisionIds).toEqual(['legacy-stale']);
   const restartedBroker = paper();
   let brokerReads = 0;
   restartedBroker.getPosition = async () => {
@@ -1881,12 +1842,12 @@ test('recovery durably coalesces recovered middle accepted targets before broker
     prefixLedger.events.some(
       (event) =>
         event.recordType === 'evaluation.skipped' &&
-        event.decisionId === 'recovered-stale' &&
+        event.decisionId === 'legacy-stale' &&
         event.reason === 'coalesced',
     ),
   ).toBe(true);
   const duplicate = await restarted.schedule(2, context(2), {
-    decisionId: 'recovered-stale',
+    decisionId: 'legacy-stale',
   });
   expect(duplicate).toMatchObject({ status: 'skipped', reason: 'duplicate' });
   expect(brokerReads).toBe(0);
@@ -2123,7 +2084,7 @@ test('malformed exact rejection remains ambiguous, latched, and replayable', asy
   expect(recovery.unresolvedIntents.has('malformed-rejection:1')).toBe(true);
 });
 
-test('recovered close-only event identity is independent of target economics', async () => {
+test('legacy close-only event identity is independent of target economics', async () => {
   const broker = paper();
   const memory = new MemoryLedger();
   const targetScheduler = scheduler(broker, memory);
@@ -2398,7 +2359,7 @@ test('recovery rejects an unmarked same-process discontinuity provenance change'
   );
 });
 
-test('recovered scheduler calls persist explicit close-only final identity', async () => {
+test('legacy scheduler calls persist explicit close-only final identity', async () => {
   const broker = paper();
   const memory = new MemoryLedger();
   const result = await scheduler(broker, memory).schedule(0, context(30));

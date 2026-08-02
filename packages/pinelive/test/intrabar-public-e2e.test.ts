@@ -66,7 +66,7 @@ function replayFixture(options: ReplayFixtureOptions): ReplayProvider {
   const source = new StaticProvider(series, {
     alignment: 'utc-24x7',
     timeframes: ['10m', '1h'],
-    cacheIdentity: 'pinelive-public-intrabar-e2e',
+    cacheIdentity: 'pinelive-public-intrabar-e2e-v1',
   }).setInstrument('X', { minQty: 1, mintick: 0.01 });
   return new ReplayProvider(source, {
     cutoverTime: 7_200,
@@ -77,7 +77,7 @@ function replayFixture(options: ReplayFixtureOptions): ReplayProvider {
 
 function magnifiedComputeConfig() {
   return {
-    configVersion: 3,
+    configVersion: 2,
     strategy: 'public-replay.pine',
     symbol: 'X',
     timeframe: '1h',
@@ -117,7 +117,7 @@ interface SecurityBudgetOptions {
 
 function paperSecurityConfig(budgets: SecurityBudgetOptions) {
   return {
-    configVersion: 3,
+    configVersion: 2,
     strategy: 'public-exact-security.pine',
     symbol: 'X',
     timeframe: '1h',
@@ -183,7 +183,7 @@ function decisionEvents(events: readonly LedgerEventV3[]) {
   );
 }
 
-test('public Replay preserves exact warmup, update identity, and interrupted-bar recovery', async () => {
+test('public v2 Replay preserves exact warmup, update identity, and interrupted-bar recovery', async () => {
   const final7_200 = bar(7_200, 11);
   const final10_800 = bar(10_800, 9);
   const prepared = prepareIntrabarRun(magnifiedComputeConfig(), magnifiedEveryUpdateSource);
@@ -264,7 +264,7 @@ test('public Replay preserves exact warmup, update identity, and interrupted-bar
   expect(recoverLedger(ledger.events).activeBars.size).toBe(0);
 });
 
-test('public close-only magnified exact-security run lazily effects one Paper correction', async () => {
+test('public v2 close-only magnified exact-security run lazily effects one Paper correction', async () => {
   const source = securitySource(['AAPL']);
   const prepared = prepareIntrabarRun(
     paperSecurityConfig({

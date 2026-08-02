@@ -45,7 +45,7 @@ function minuteReplay(updates: readonly BarUpdate[] = []): ReplayProvider {
     {
       alignment: 'utc-24x7',
       timeframes: ['1m'],
-      cacheIdentity: 'intrabar-minute',
+      cacheIdentity: 'intrabar-minute-v1',
     },
   ).setInstrument('X', { minQty: 1, mintick: 0.01 });
   return new ReplayProvider(source, {
@@ -261,7 +261,7 @@ function magnifierReplay(): ReplayProvider {
     {
       alignment: 'utc-24x7',
       timeframes: ['1h', '10m'],
-      cacheIdentity: 'intrabar-magnifier',
+      cacheIdentity: 'intrabar-magnifier-v1',
     },
   ).setInstrument('X', { minQty: 1, mintick: 0.01 });
   return new ReplayProvider(source, {
@@ -506,7 +506,7 @@ function exactSecurityReplay(): ReplayProvider {
     {
       alignment: 'utc-24x7',
       timeframes: ['10m', '1h'],
-      cacheIdentity: 'intrabar-exact-security',
+      cacheIdentity: 'intrabar-exact-security-v1',
     },
   ).setInstrument('X', { minQty: 1, mintick: 0.01 });
   return new ReplayProvider(source, {

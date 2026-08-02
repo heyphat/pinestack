@@ -1,10 +1,10 @@
 # Pinery market-data and pinelive Broker adapter contracts
 
-Market data adapters belong to `@heyphat/pinery`; execution adapters belong to `@heyphat/pinelive`. Pinelive has one current runtime and configuration contract, explicitly `configVersion: 3`. A broker must not expose history or live-bar methods, and pinelive must not implement venue data recovery.
+Market data adapters belong to `@heyphat/pinery`; execution adapters belong to `@heyphat/pinelive`. A broker must not expose history or live-bar methods, and pinelive must not implement venue data recovery.
 
 ## MarketDataProvider
 
-A live provider implements `HistoryProvider` and adds strict `resolve`, resolved-only `historyResolved`, `closedBars({ after, signal })`, and optional `disconnect`. `ResolvedDataInstrument` includes strategy symbol, opaque provider handle, exact venue symbol, tick size, quantity step, minimum order quantity, and available point-value/exchange/expiry metadata.
+A live provider preserves `HistoryProvider` compatibility and adds strict `resolve`, resolved-only `historyResolved`, `closedBars({ after, signal })`, and optional `disconnect`. `ResolvedDataInstrument` includes strategy symbol, opaque provider handle, exact venue symbol, tick size, quantity step, minimum order quantity, and available point-value/exchange/expiry metadata.
 
 Providers emit valid unix-second bars that are closed, ascending and unique. `after` is exclusive. Polling adapters intentionally overlap the previous timestamp, suppress duplicates, backfill every returned missed bar, and own retry/reconnect policy. Failures are redacted `MarketDataError` values classified as connectivity, auth, rate-limit, invalid-symbol, entitlement, or malformed-data. Cancellation must stop waits and in-flight transport calls where supported.
 
@@ -36,28 +36,6 @@ The Node entry defaults to an official Tiger TypeScript SDK adapter and keeps re
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `connect()` / `disconnect()` | Repeat-safe. `connect` verifies the configured account is the one returned.                                                                                                                                                                                                                                                                                                                                                                                         |
 | `cancel(clientId)`           | Addressed by pinelive's client id, not a venue order id. A cancel is a **request, never a guarantee**: the adapter must re-read the order afterwards and let that read decide. A fill that beat the cancel resolves as `filled`, not an error; an unknown id resolves as `not-found`; an order still working afterwards raises a retryable timeout. Gated by arming exactly like `submit` and `flatten`. Required whenever `capabilities().supportsCancel` is true. |
-| `lookupOrder(order)`         | Strictly read-only exact lookup of the complete durable request identity. Terminal `filled`, `rejected`, or `not-found` is allowed only when authoritative. A bounded/recent search returns `ambiguous` or `unsupported`; it must never infer absence or mutate the venue.                                                                                                                                                                                          |
-
-### Armed production-safety requirements
-
-An armed real-money runtime requires a `ProductionSafetyBroker`, not merely the
-baseline `Broker`. Missing any member makes armed production execution
-ineligible:
-
-| Member                           | Obligation                                                                                                                                                                                       |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `getCanonicalAccountIdentity()`  | Return a broker-confirmed opaque account identity plus environment. It feeds a same-host claim; no clear-text account id belongs in a path or claim ledger row.                                  |
-| `synchronizeAccount(symbol)`     | Return either explicit blocking reasons or a complete account/exact-position/open-order snapshot tied to an already established resumable account stream. Unrelated REST reads are insufficient. |
-| `setExecutionSafetyGuard(guard)` | Install the runtime interlock before mutation is enabled. Submit, cancel, flatten, and internal stuck-order cancellation must recheck it immediately before crossing the transport boundary.     |
-| `clearExecutionSafetyGuard()`    | Synchronously revoke mutation capability before synchronization or ownership teardown.                                                                                                           |
-| `lookupOrder(order)`             | Required here, with authoritative exact terminal/absence semantics. Inconclusive lookup leaves durable effect uncertainty unresolved.                                                            |
-
-The synchronization session must fail its assertion after disconnect, rejected
-resume, sequence gap, overflow, or staleness. Its initial snapshot must prove a
-complete working/uncertain-order inventory, exact-symbol position, authoritative
-exact lookup, and the stream resume point as one logical boundary. Returning
-`synchronized` while any of those claims is only best-effort is a contract
-violation.
 
 ### Capability declaration
 
@@ -77,8 +55,7 @@ violation.
 - Expected failures are classified `BrokerError` values. Credentials and account ids are redacted, and error causes must not retain secret-bearing values.
 - Order identity covers symbol, side, quantity, type, and requested limit price. Every deterministic client-id component must be framed injectively; lossy character replacement and delimiter-only joining are forbidden. Reusing a client id with different economics is a non-retryable precondition failure. Quantity and limit price are validated against the exact bound instrument before transmission.
 - Every in-flight method accepts an `AbortSignal` and checks it before any order-creating step.
-- At the submit boundary, retransmission is permitted only after explicit `definitely-not-sent` proof. Any other error is possibly sent, becomes durable unresolved effect state, and must not be retransmitted. A recent-orders miss is not proof of absence.
-- Real adapters receive `armed`. `submit`, `flatten`, and `cancel` each fail independently with a non-retryable precondition while unarmed, even if a caller bypasses CLI/registry checks. An armed production adapter additionally requires the installed execution safety guard; unavailable or failed guards must fail before transmission.
+- Real adapters receive `armed`. `submit`, `flatten`, and `cancel` each fail independently with a non-retryable precondition while unarmed, even if a caller bypasses CLI/registry checks.
 - A broker must not expose history or live-bar methods; market data belongs to pinery.
 
 ### Reference implementations
@@ -89,12 +66,10 @@ violation.
 
 Pinelive compares provider and broker symbols, tick size, quantity step, minimum order and point value before warmup reconciliation or any order. The immutable `RunInstrumentBinding` and client ids preserve strategy and execution identities.
 
-For armed Tiger, the ledger lease is not enough: startup derives a same-host account/exact-instrument claim from broker-confirmed opaque identity, records that claim durably, synchronizes venue state, and installs one composite ledger-lease/claim/stream guard. Existing claim files are never stolen automatically. This is cooperative same-host exclusion, not venue fencing or distributed consensus. Shutdown revokes the guard before stream and claim teardown and never flattens. Futures contract changes require a stopped run and reviewed exposure handoff; automatic rolling is deferred.
+Real adapters receive `armed`. `submit`, `flatten`, and `cancel` each independently fail with a non-retryable precondition while unarmed, even if a caller bypasses CLI/registry checks. Shutdown never flattens. Futures contract changes require a stopped run and reviewed exposure migration; automatic rolling is deferred.
 
 ## Conformance
 
 Use `runBrokerConformance()` from `@heyphat/pinelive/testing` with a controllable transport. It is the enforcement mechanism for the baseline Broker contract above: every new integration must pass it before being wired into a run. It covers noop/open/add/reduce/close/flip, rejection, market-order idempotency, restart/capped progression, and capability-declaration honesty (`supportsCancel` matching the implemented surface, a non-empty `orderTypes` including `market`). An adapter that advertises `limit` must additionally verify tick/price validation, same-id/different-price rejection, no-worse-than-limit fills, terminal cancellation of remainders, and unresolved-order suppression in its adapter suite. Adapter tests must also cover auth/connectivity/unknown outcomes, cancellation, exact-symbol metadata mismatch, unarmed submit/flatten/cancel, and redaction.
 
-TigerBroker passes the baseline harness through its injected transport and has focused production-safety guard tests. The Node entry defaults to the official Tiger TypeScript SDK adapter, with offline facade coverage for account/contract/position mapping, deterministic hashed `userMark` search, official working/partial/terminal states, scaled quantities, int64 ids, polling, cancellation checkpoints, and same-process suppression. Durable scheduler tests record `schemaVersion: 3` and additionally prove that a possibly sent attempt is not retransmitted after restart.
-
-The built-in official transport is intentionally blocked and ineligible for armed production execution: the SDK's bounded recent-order query cannot prove complete open-order inventory or authoritative exact absence, and it exposes no resumable account event sequence for snapshot/account-stream gap closure. `TigerBroker.synchronizeAccount()` therefore returns blocked and exact lookup returns unsupported. The Node broker factory requires the safety guard by default. The opt-in credentialed test is read-only: it seeds ambiguity only against an offline transport, then proves an official credentialed restart remains blocked without mutation or another attempt. Demo/live mutation, cancellation/fill validation, and real after-send recovery remain unauthorized; the integration must not be represented as sandbox- or production-approved. See [Pinelive production-safety operations](./pinelive-production-safety.md).
+TigerBroker passes this harness through its injected transport. The Node entry defaults to the official Tiger TypeScript SDK adapter, with offline-only facade coverage for account/contract/position mapping, deterministic hashed `userMark` lookup, official working/partial/terminal statuses, scaled quantities, int64 ids, eventual polling, cancellation checkpoints, and same-process ambiguous-submission no-retransmit behavior. `userMark` is not a server-enforced idempotency key and the pending marker is not durable across crashes. Credentialed quote/history and demo-order validation plus durable armed-restart/stale-contract preflight remain unresolved; the integration must not be represented as sandbox- or production-approved.

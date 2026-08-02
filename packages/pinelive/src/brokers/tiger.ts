@@ -1,14 +1,5 @@
 import { BrokerError } from '../core/broker.js';
-import type {
-  AccountSynchronizationSession,
-  Broker,
-  CancelOutcome,
-  CanonicalAccountIdentity,
-  Capabilities,
-  ExactOrderLookupResult,
-  ExecutionSafetyGuard,
-  ProductionSynchronizationResult,
-} from '../core/broker.js';
+import type { Broker, CancelOutcome, Capabilities } from '../core/broker.js';
 import type { Account, Fill, Instrument, OrderRequest, Position, Side } from '../core/types.js';
 import { isStepAligned } from '../core/units.js';
 
@@ -45,7 +36,7 @@ export interface TigerOrderResult {
   orderId?: string;
   symbol: string;
   side: Side;
-  /** Optional for market responses; required when validating a limit order. */
+  /** Optional for legacy market transports; required when validating a limit order. */
   type?: 'market' | 'limit';
   limitPrice?: number;
   /** `working` and `partially-filled` are non-terminal; the cancelled variant is terminal. */
@@ -71,8 +62,6 @@ export interface TigerOrderResult {
 export interface TigerTradingTransport {
   /** Exact transport-resolved account identity, when known from a credential profile. */
   readonly accountId?: string;
-  /** Distinguishes demo/live/region when the same account text can name different resources. */
-  readonly accountEnvironment?: string;
   connect?(signal?: AbortSignal): Promise<void>;
   disconnect?(): Promise<void>;
   account(accountId?: string, signal?: AbortSignal): Promise<TigerTradingAccount>;
@@ -83,24 +72,6 @@ export interface TigerTradingTransport {
     clientId: string,
     signal?: AbortSignal,
   ): Promise<TigerOrderResult | undefined>;
-  /**
-   * Authoritative lookup of the complete durable order identity. A recent/bounded userMark scan
-   * does not implement this method. Returning not-found proves absence at the venue boundary.
-   */
-  lookupOrderExact?(
-    accountId: string,
-    order: Readonly<OrderRequest>,
-    signal?: AbortSignal,
-  ): Promise<ExactOrderLookupResult>;
-  /**
-   * Resolve only after account, position, complete open-order inventory, exact terminal lookup,
-   * and a gap-free resumable account stream are established as one logical boundary.
-   */
-  synchronizeAccount?(
-    accountId: string,
-    symbol: string,
-    signal?: AbortSignal,
-  ): Promise<AccountSynchronizationSession>;
   submitMarket(
     accountId: string,
     request: { symbol: string; side: Side; qty: number; clientId: string },
@@ -121,7 +92,7 @@ export interface TigerTradingTransport {
   /**
    * Cancel a still-working order by its broker order id. Cancellation is a request,
    * not a guarantee: a fill may already be in flight, so callers must re-read state.
-   * Optional so transports can omit cancellation when the venue does not support it.
+   * Optional so existing/custom transports stay source-compatible.
    */
   cancelOrder?(accountId: string, orderId: string, signal?: AbortSignal): Promise<void>;
 }
@@ -142,11 +113,6 @@ export interface TigerBrokerOptions {
    * races an in-flight fill, so it is an explicit operator choice.
    */
   cancelStuckOrders?: boolean;
-  /**
-   * Require a runtime-installed claim/synchronization guard in addition to operator arming.
-   * Armed production runtimes set this to true.
-   */
-  requireExecutionSafety?: boolean;
 }
 
 interface CachedFill {
@@ -169,7 +135,6 @@ export class TigerBroker implements Broker {
   private readonly retiredClientIds = new Map<string, RetiredClientId>();
   private readonly pending = new Map<string, string>();
   private submitTail: Promise<void> = Promise.resolve();
-  private executionSafetyGuard?: ExecutionSafetyGuard;
 
   constructor(private readonly options: TigerBrokerOptions) {
     if (!options.transport) throw new Error('tiger broker: a trading transport is required');
@@ -279,99 +244,9 @@ export class TigerBroker implements Broker {
     return { ...account };
   }
 
-  async getCanonicalAccountIdentity(signal?: AbortSignal): Promise<CanonicalAccountIdentity> {
-    const account = await this.ensureAccount(signal);
-    return {
-      identityVersion: 1,
-      brokerId: this.id,
-      opaqueAccountId: account.id,
-      ...(this.options.transport.accountEnvironment
-        ? { environment: this.options.transport.accountEnvironment }
-        : {}),
-    };
-  }
-
-  async synchronizeAccount(
-    symbol: string,
-    signal?: AbortSignal,
-  ): Promise<ProductionSynchronizationResult> {
-    const synchronize = this.options.transport.synchronizeAccount;
-    const missingGuarantees: string[] = [];
-    if (!synchronize) {
-      missingGuarantees.push(
-        'Tiger transport cannot prove complete open-order inventory and snapshot-to-stream continuity',
-      );
-    }
-    if (!this.options.transport.lookupOrderExact) {
-      missingGuarantees.push('Tiger transport cannot perform authoritative exact order lookup');
-    }
-    if (missingGuarantees.length > 0) {
-      return { status: 'blocked', reasons: missingGuarantees };
-    }
-
-    const synchronizeAccount = synchronize!;
-    let session: AccountSynchronizationSession | undefined;
-    try {
-      const account = await this.ensureAccount(signal);
-      session = await synchronizeAccount.call(this.options.transport, account.id, symbol, signal);
-      validateSynchronizationSession(session, account.id, symbol, this.options.transport);
-      await session.assertSynchronized(signal);
-      await session.assertSafeToExecute(signal);
-      return { status: 'synchronized', session };
-    } catch (error) {
-      const reasons = [
-        `Tiger account synchronization failed: ${classifyTigerBrokerError(error, 'synchronize').message}`,
-      ];
-      if (session && typeof session.close === 'function') {
-        try {
-          await session.close();
-        } catch (closeError) {
-          reasons.push(
-            `Tiger account synchronization cleanup failed: ${classifyTigerBrokerError(closeError, 'synchronize cleanup').message}`,
-          );
-        }
-      }
-      return { status: 'blocked', reasons };
-    }
-  }
-
-  async lookupOrder(
-    order: Readonly<OrderRequest>,
-    signal?: AbortSignal,
-  ): Promise<ExactOrderLookupResult> {
-    const lookup = this.options.transport.lookupOrderExact;
-    if (!lookup) {
-      return {
-        status: 'unsupported',
-        detail: 'Tiger transport exposes only a bounded recent-order search',
-      };
-    }
-    try {
-      validateOrderRequest(order);
-      const account = await this.ensureAccount(signal);
-      const result = await lookup.call(this.options.transport, account.id, order, signal);
-      return validateExactLookupResult(result, order);
-    } catch (error) {
-      return {
-        status: 'ambiguous',
-        detail: classifyTigerBrokerError(error, 'exact order lookup').message,
-      };
-    }
-  }
-
-  setExecutionSafetyGuard(guard: ExecutionSafetyGuard): void {
-    if (!guard || typeof guard.assertExecutionSafe !== 'function')
-      throw new TypeError('tiger: execution safety guard is invalid');
-    this.executionSafetyGuard = guard;
-  }
-
-  clearExecutionSafetyGuard(): void {
-    this.executionSafetyGuard = undefined;
-  }
-
   async submit(order: OrderRequest, signal?: AbortSignal): Promise<Fill> {
     try {
-      await this.assertExecutionSafe('submit', signal);
+      this.ensureArmed('submit');
       this.throwIfAborted(signal);
       validateOrderRequest(order);
       return await this.withSubmitLock(() => this.submitLocked(order, signal), signal);
@@ -447,10 +322,6 @@ export class TigerBroker implements Broker {
         });
       }
       if (!result) {
-        // Recheck both cooperative claims and stream health at the final pre-transmission
-        // boundary. A failure here remains definitely-not-sent because no pending marker or
-        // transport call has occurred yet.
-        await this.assertExecutionSafe('submit', signal);
         // Reserve before transmission. From this assignment onward every failure is possibly sent.
         this.pending.set(order.clientId, fingerprint);
         possiblySent = true;
@@ -539,7 +410,7 @@ export class TigerBroker implements Broker {
   }
 
   async flatten(symbol: string, signal?: AbortSignal): Promise<void> {
-    await this.assertExecutionSafe('flatten', signal);
+    this.ensureArmed('flatten');
     const operationId =
       this.options.operationIdFactory?.() ?? globalThis.crypto.randomUUID().replaceAll('-', '');
     if (!operationId) throw new BrokerError('precondition', 'tiger: flatten operation id is empty');
@@ -571,7 +442,7 @@ export class TigerBroker implements Broker {
   cancel?: (clientId: string, signal?: AbortSignal) => Promise<CancelOutcome>;
 
   private async cancelByClientId(clientId: string, signal?: AbortSignal): Promise<CancelOutcome> {
-    await this.assertExecutionSafe('cancel', signal);
+    this.ensureArmed('cancel');
     this.throwIfAborted(signal);
     const cancelOrder = this.options.transport.cancelOrder!;
     const account = await this.ensureAccount(signal);
@@ -598,7 +469,6 @@ export class TigerBroker implements Broker {
       ) {
         this.throwIfAborted(signal);
         try {
-          await this.assertExecutionSafe('cancel', signal);
           await cancelOrder.call(this.options.transport, account.id, existing.orderId, signal);
         } catch (error) {
           const classified = classifyTigerBrokerError(error, 'cancel');
@@ -681,7 +551,8 @@ export class TigerBroker implements Broker {
     if (!this.options.cancelStuckOrders) return undefined;
     const cancel = this.options.transport.cancelOrder;
     if (!cancel || !working.orderId) return undefined;
-    await this.assertExecutionSafe('cancel', signal);
+    this.ensureArmed('cancel');
+    this.throwIfAborted(signal);
     try {
       await cancel.call(this.options.transport, accountId, working.orderId, signal);
     } catch (error) {
@@ -713,27 +584,6 @@ export class TigerBroker implements Broker {
     return this.accountValue!;
   }
 
-  private async assertExecutionSafe(operation: string, signal?: AbortSignal): Promise<void> {
-    this.ensureArmed(operation);
-    this.throwIfAborted(signal);
-    const guard = this.executionSafetyGuard;
-    if (this.options.requireExecutionSafety && !guard) {
-      throw new BrokerError(
-        'precondition',
-        `tiger: ${operation} is blocked until production safety synchronization completes`,
-        { retryable: false },
-      );
-    }
-    try {
-      await guard?.assertExecutionSafe(signal);
-    } catch {
-      throw new BrokerError('precondition', `tiger: ${operation} safety interlock is unavailable`, {
-        retryable: false,
-      });
-    }
-    this.throwIfAborted(signal);
-  }
-
   private ensureArmed(operation: string): void {
     if (!this.options.armed)
       throw new BrokerError('precondition', `tiger: ${operation} requires explicit arming`, {
@@ -749,98 +599,6 @@ export class TigerBroker implements Broker {
   private sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
     return (this.options.sleep ?? abortableSleep)(milliseconds, signal);
   }
-}
-
-function validateSynchronizationSession(
-  session: AccountSynchronizationSession,
-  accountId: string,
-  symbol: string,
-  transport: TigerTradingTransport,
-): void {
-  if (
-    !session ||
-    typeof session !== 'object' ||
-    typeof session.assertSynchronized !== 'function' ||
-    typeof session.assertSafeToExecute !== 'function'
-  )
-    throw new BrokerError('precondition', 'tiger: synchronization session is invalid');
-  if (typeof session.close !== 'function')
-    throw new BrokerError('precondition', 'tiger: synchronization session cannot be closed');
-  const snapshot = session.snapshot;
-  if (
-    !snapshot ||
-    snapshot.synchronizationVersion !== 1 ||
-    snapshot.inventoryComplete !== true ||
-    snapshot.exactOrderLookup !== 'authoritative' ||
-    !snapshot.snapshotToken ||
-    !snapshot.resumeFrom ||
-    !Number.isFinite(Date.parse(snapshot.observedAt))
-  )
-    throw new BrokerError('precondition', 'tiger: account snapshot is incomplete');
-  if (
-    snapshot.accountIdentity.identityVersion !== 1 ||
-    snapshot.accountIdentity.brokerId !== 'tiger' ||
-    snapshot.accountIdentity.opaqueAccountId !== accountId ||
-    snapshot.accountIdentity.environment !== transport.accountEnvironment ||
-    snapshot.account.id !== accountId
-  )
-    throw new BrokerError('precondition', 'tiger: synchronized account identity changed');
-  if (snapshot.position.symbol !== symbol || !Number.isFinite(snapshot.position.qty))
-    throw new BrokerError('precondition', 'tiger: synchronized position is invalid');
-  if (!Array.isArray(snapshot.openOrders))
-    throw new BrokerError('precondition', 'tiger: synchronized order inventory is invalid');
-  for (const order of snapshot.openOrders) {
-    if (
-      order.symbol !== symbol ||
-      !['buy', 'sell'].includes(order.side) ||
-      !['market', 'limit'].includes(order.type) ||
-      !['working', 'partially-filled', 'unknown'].includes(order.status) ||
-      !Number.isFinite(order.requestedQty) ||
-      order.requestedQty <= 0 ||
-      !Number.isFinite(order.filledQty) ||
-      order.filledQty < 0 ||
-      order.filledQty > order.requestedQty ||
-      !Number.isFinite(Date.parse(order.observedAt))
-    )
-      throw new BrokerError('precondition', 'tiger: synchronized open order is invalid');
-  }
-}
-
-function validateExactLookupResult(
-  result: ExactOrderLookupResult,
-  order: Readonly<OrderRequest>,
-): ExactOrderLookupResult {
-  if (!result || typeof result !== 'object')
-    return { status: 'ambiguous', detail: 'exact lookup returned an invalid response' };
-  if (result.status === 'filled') {
-    const fill = result.fill;
-    if (
-      fill.clientId !== order.clientId ||
-      fill.symbol !== order.symbol ||
-      fill.side !== order.side ||
-      fill.requestedQty !== order.qty ||
-      (fill.status !== 'filled' && fill.status !== 'partially-filled') ||
-      !Number.isFinite(fill.filledQty) ||
-      fill.filledQty <= 0 ||
-      fill.filledQty > order.qty ||
-      !Number.isFinite(fill.price) ||
-      !Number.isFinite(fill.commission) ||
-      !Number.isFinite(fill.time)
-    )
-      return { status: 'ambiguous', detail: 'exact lookup returned a mismatched fill' };
-    return { status: 'filled', fill: structuredClone(fill) };
-  }
-  if (result.status === 'rejected') {
-    return result.message.trim()
-      ? { status: 'rejected', message: result.message }
-      : { status: 'ambiguous', detail: 'exact lookup returned an empty rejection' };
-  }
-  if (result.status === 'not-found') return { status: 'not-found' };
-  if (result.status === 'ambiguous' || result.status === 'unsupported')
-    return result.detail
-      ? { status: result.status, detail: result.detail }
-      : { status: result.status };
-  return { status: 'ambiguous', detail: 'exact lookup returned an unknown status' };
 }
 
 function isProvenTerminal(status: TigerOrderResult['status']): boolean {

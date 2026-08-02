@@ -1,7 +1,11 @@
 import { expect, test } from 'bun:test';
+import { ReplayProvider, StaticProvider, type MarketDataProvider } from '@heyphat/pinery';
 import {
   AlertDispatcher,
+  ForwardRunner,
   MAX_ALERT_MESSAGE_LENGTH,
+  MemoryLedger,
+  PaperBroker,
   WebhookAlertChannel,
   alertFrequencyGate,
   coarseReason,
@@ -9,6 +13,9 @@ import {
   normalizeRunConfig,
   webhookAlertPayload,
   type AlertChannel,
+  type AlertDispatchRecord,
+  type LedgerRecord,
+  type LedgerSink,
   type StrategyAlert,
 } from '../src/index.js';
 import { runAlertChannelConformance } from '../src/testing/index.js';
@@ -315,21 +322,21 @@ test('the webhook channel passes alert channel conformance', async () => {
 // Config — strict validation of the shared alerts section.
 // ---------------------------------------------------------------------------
 
-const configBase = {
-  configVersion: 3,
+const v1Base = {
+  configVersion: 1,
   strategy: 's.pine',
   symbol: 'X',
   timeframe: '1m',
   data: { provider: 'csv', dataDir: 'data', cutoverTime: 100 },
-  execution: { kind: 'compute-only' },
+  broker: { id: 'paper' },
 } as const;
 
 test('config.alerts normalizes defaults and rejects malformed sections', () => {
   const normalized = normalizeRunConfig({
-    ...configBase,
+    ...v1Base,
     alerts: { channels: [{ id: 'webhook', url: 'https://example.com/h' }] },
   });
-  expect(normalized.configVersion).toBe(3);
+  if (normalized.configVersion !== 1) throw new Error('expected v1');
   expect(normalized.alerts).toEqual({
     channels: [{ id: 'webhook', name: 'webhook-1', url: 'https://example.com/h' }],
     frequency: 'once_per_bar_close',
@@ -340,7 +347,7 @@ test('config.alerts normalizes defaults and rejects malformed sections', () => {
   });
 
   const bad = (alerts: unknown, message: string) =>
-    expect(() => normalizeRunConfig({ ...configBase, alerts })).toThrow(message);
+    expect(() => normalizeRunConfig({ ...v1Base, alerts })).toThrow(message);
   bad({ channels: [{ id: 'slack', url: 'https://x.y' }] }, 'must be "webhook" or "telegram"');
   bad({ channels: [{ id: 'webhook', url: 'nope' }] }, 'valid URL');
   bad({ channels: [{ id: 'webhook', url: 'ftp://x.y' }] }, 'http(s)');
@@ -366,4 +373,108 @@ test('config.alerts normalizes defaults and rejects malformed sections', () => {
     },
     'at most 8',
   );
+});
+
+// ---------------------------------------------------------------------------
+// v1 runner integration — warmup stays data; trading first; fail-open.
+// ---------------------------------------------------------------------------
+
+const alertStrategy = `//@version=6
+strategy("alerts", default_qty_type=strategy.fixed, default_qty_value=1)
+if close > open
+    alert("bull close")
+    alert("bull close")
+    alert("second message")
+    strategy.entry("L", strategy.long)
+if close <= open
+    alert("bear close")
+    strategy.close("L")`;
+
+const bars = [
+  { time: 100, open: 2, high: 2, low: 1, close: 1, volume: 1 }, // warmup: bear close (data only)
+  { time: 200, open: 1, high: 2, low: 1, close: 2, volume: 1 }, // live: bull ×2 + second
+  { time: 300, open: 2, high: 2, low: 1, close: 1, volume: 1 }, // live: bear
+  { time: 400, open: 2, high: 2, low: 1, close: 1, volume: 1 }, // live: bear (new bar → fires again)
+];
+
+function data(): MarketDataProvider {
+  const source = new StaticProvider({ X: bars }).setInstrument('X', { minQty: 1, mintick: 0.01 });
+  return new ReplayProvider(source, { cutoverTime: 200, instrument: { minOrderQty: 1 } });
+}
+
+const instrument = { symbol: 'X', minQty: 1, qtyStep: 1, minOrderQty: 1, mintick: 0.01 };
+
+test('v1 runner dispatches live alerts only, after the cycle, with durable outcomes', async () => {
+  const broker = new PaperBroker({ instruments: { X: instrument } });
+  const { channel, sent } = capture('ops');
+  const trace: string[] = [];
+  const memory = new MemoryLedger();
+  const sink: LedgerSink = {
+    append: async (record: LedgerRecord) => {
+      trace.push('recordType' in record ? String(record.recordType) : 'cycle');
+      await memory.append(record);
+    },
+  };
+  const records: AlertDispatchRecord[] = [];
+  const runner = new ForwardRunner(data(), broker, {
+    source: alertStrategy,
+    symbol: 'X',
+    timeframe: '1m',
+    warmupBars: 1,
+    alertDispatcher: new AlertDispatcher({ channels: [channel] }),
+    onRecord: (record) => void sink.append(record),
+    onAlertRecord: async (record) => {
+      records.push(record);
+      await sink.append(record);
+    },
+  });
+  await runner.start();
+
+  // Warmup bar 100 fired "bear close" in replay — it must NOT be delivered.
+  expect(sent.map((entry) => `${entry.barTime}:${entry.message}`)).toEqual([
+    '200:bull close',
+    '200:second message',
+    '300:bear close',
+    '400:bear close',
+  ]);
+  // Duplicate "bull close" within bar 200 collapsed by once_per_bar_close.
+  expect(records.map((record) => [record.barTime, record.ordinal, record.message])).toEqual([
+    [200, 1, 'bull close'],
+    [200, 2, 'second message'],
+    [300, 1, 'bear close'],
+    [400, 1, 'bear close'],
+  ]);
+  expect(records.every((record) => record.deliveries[0]!.outcome === 'sent')).toBe(true);
+  expect(memory.alerts).toHaveLength(4);
+  // Trading first: the bar's cycle record precedes its alert records.
+  expect(trace.indexOf('cycle')).toBeLessThan(trace.indexOf('alert'));
+});
+
+test('v1 runner survives a dead channel: outcomes failed, run completes', async () => {
+  const broker = new PaperBroker({ instruments: { X: instrument } });
+  const failing: AlertChannel = {
+    name: 'down',
+    async send() {
+      throw new Error('http-503');
+    },
+  };
+  const memory = new MemoryLedger();
+  const runner = new ForwardRunner(data(), broker, {
+    source: alertStrategy,
+    symbol: 'X',
+    timeframe: '1m',
+    warmupBars: 1,
+    alertDispatcher: new AlertDispatcher({ channels: [failing] }),
+    onAlertRecord: (record) => void memory.append(record),
+  });
+  await runner.start();
+  expect(memory.alerts).toHaveLength(4);
+  expect(
+    memory.alerts.every(
+      (record) =>
+        record.deliveries[0]!.outcome === 'failed' && record.deliveries[0]!.error === 'http-503',
+    ),
+  ).toBe(true);
+  // Trading was unaffected.
+  expect((await broker.getPosition('X')).qty).toBe(0);
 });

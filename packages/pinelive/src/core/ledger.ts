@@ -1,9 +1,93 @@
 import type { AlertDeliveryOutcome, AlertSource } from './alerts.js';
-import type { Fill, OrderRequest } from './types.js';
+import type { ReconcileError } from './mirror.js';
+import type { SecurityFeedHealth } from './security.js';
+import type { Bar, Fill, OrderRequest } from './types.js';
 import type { RunInstrumentBinding } from './binding.js';
 import type { PreparedIntrabarAuthorityEnvelope } from './intrabar-authority.js';
 
 export type ReconcileAction = 'noop' | 'order' | 'reject';
+
+export interface BindingRecord {
+  schemaVersion: 2;
+  recordType: 'binding';
+  configVersion: 1;
+  runId: string;
+  binding: RunInstrumentBinding;
+  recordedAt: string;
+}
+
+/** Current cycle schema. schemaVersion 1 remains readable through optional identity fields. */
+export interface ForwardRecord {
+  schemaVersion: 1 | 2;
+  recordType?: 'cycle';
+  runId: string;
+  strategyId: string;
+  cycleId: string;
+  sequence: number;
+  /** v1 compatibility alias for strategySymbol. */
+  symbol: string;
+  strategySymbol?: string;
+  executionSymbol?: string;
+  bindingId?: string;
+  timeframe: string;
+  bar: Bar;
+  target: number;
+  actualBefore: number | null;
+  actualAfter: number | null;
+  delta: number | null;
+  action: ReconcileAction;
+  clientId?: string;
+  /** Full requested economics for execution audit, including limitPrice when applicable. */
+  order?: OrderRequest;
+  fill?: Fill;
+  error?: ReconcileError;
+  /** Health of every injected request.security feed at this decision point. */
+  securityFeeds?: SecurityFeedHealth[];
+  recordedAt: string;
+}
+
+/** Durable feed-health event emitted before a stale feed can stop reconciliation. */
+export interface SecurityFeedHealthRecord {
+  schemaVersion: 2;
+  recordType: 'security';
+  runId: string;
+  strategyId: string;
+  key: string;
+  error: string;
+  feeds: SecurityFeedHealth[];
+  recordedAt: string;
+}
+
+export interface StartupRecord extends Omit<ForwardRecord, 'recordType' | 'schemaVersion'> {
+  schemaVersion: 2;
+  recordType: 'startup';
+}
+
+/**
+ * One gated Pine alert with its per-channel delivery outcomes (v1 path).
+ * Written after dispatch so it carries real outcomes; restart cannot duplicate
+ * a delivery because v1 resumes strictly after the last processed bar.
+ */
+export interface AlertDispatchRecord {
+  schemaVersion: 2;
+  recordType: 'alert';
+  runId: string;
+  strategyId: string;
+  strategySymbol: string;
+  timeframe: string;
+  /** Bar open, unix seconds. */
+  barTime: number;
+  /** 1-based among the bar's gated alerts. */
+  ordinal: number;
+  message: string;
+  source: AlertSource;
+  /** The evaluated bar's close. */
+  price: number;
+  /** Bar close, unix milliseconds — sample time, never wall clock. */
+  firedAt: number;
+  deliveries: readonly AlertDeliveryOutcome[];
+  recordedAt: string;
+}
 
 /**
  * An opaque, JSON-safe provider cursor. Pinelive never interprets it; equality is exact during
@@ -22,7 +106,7 @@ export type LedgerError = Readonly<{
 
 /** Durable identity of the chart update that produced one target decision. */
 export interface ChartUpdateIdentityV3 {
-  /** Whether updates can be intrabar or are always authoritative closes. */
+  /** Explicit compatibility mode for callers that only ever schedule authoritative closes. */
   kind: 'intrabar' | 'close-only';
   /** Stable upstream event identity, independent of the derived target value. */
   eventId: string;
@@ -90,8 +174,7 @@ export type EvaluationSkipReasonV3 =
   | 'forming'
   | 'recovered-final'
   | 'startup-discontinuity'
-  | 'mirror-cadence'
-  | 'execution-ineligible';
+  | 'mirror-cadence';
 
 export interface EvaluationSkippedEventV3 extends DecisionEventV3 {
   recordType: 'evaluation.skipped';
@@ -170,13 +253,11 @@ export type BreakerReasonV3 =
   | 'intent-limit'
   | 'ledger-failure'
   | 'lease-lost'
-  | 'execution-interlock-lost'
   | 'position-unknown'
   | 'submission-unknown'
   | 'recovery-unresolved'
   /** An authoritative final was refused by the per-bar target limit; execution must stop loudly. */
   | 'target-limit'
-  | 'venue-reconciled'
   | 'operator';
 
 export interface BreakerEventV3 extends LedgerEventBaseV3 {
@@ -207,32 +288,8 @@ export interface LeaseEventV3 extends LedgerEventBaseV3 {
   detail?: string;
 }
 
-/** Independent same-host ownership of one broker-confirmed account/exact-instrument resource. */
-export interface AccountClaimEventV3 extends LedgerEventBaseV3 {
-  recordType: 'account-claim';
-  /** `release-started` keeps ownership active until physical release is durably confirmed. */
-  action: 'acquired' | 'release-started' | 'released' | 'lost';
-  /** Domain-separated digest only; raw account identity and symbol are forbidden. */
-  resourceDigest: string;
-  claimId: string;
-  ownerId: string;
-  detail?: string;
-}
-
-export type EffectiveRunPosture = 'live' | 'monitor' | 'compute-only';
-export type ExecutionEligibilityState = 'enabled' | 'disabled-by-posture' | 'blocked';
-
-/** Durable posture/eligibility evidence. It reports capability; it never grants capability. */
-export interface ExecutionEligibilityEventV3 extends LedgerEventBaseV3 {
-  recordType: 'execution-eligibility';
-  posture: EffectiveRunPosture;
-  state: ExecutionEligibilityState;
-  reasons: string[];
-  accountClaim: 'held' | 'not-applicable' | 'not-held';
-  synchronization: 'synchronized' | 'not-applicable' | 'blocked';
-}
-
-/** One gated Pine alert with delivery outcomes. Recovery validates the shape but derives no decision state from it. */
+/** One gated Pine alert with delivery outcomes (schema-v3 stream). Advisory:
+ * recovery validates the shape but derives no decision state from it. */
 export interface AlertDispatchEventV3 extends LedgerEventBaseV3 {
   recordType: 'alert';
   decisionId: string;
@@ -265,13 +322,18 @@ export type LedgerEventV3 =
   | BreakerEventV3
   | RecoveryEventV3
   | LeaseEventV3
-  | AccountClaimEventV3
-  | ExecutionEligibilityEventV3
   | AlertDispatchEventV3;
 
+export type SchemaV3Event = LedgerEventV3;
 export type LedgerEventTypeV3 = LedgerEventV3['recordType'];
 
-export type LedgerRecord = LedgerEventV3;
+export type LedgerRecord =
+  | BindingRecord
+  | ForwardRecord
+  | StartupRecord
+  | SecurityFeedHealthRecord
+  | AlertDispatchRecord
+  | LedgerEventV3;
 
 export interface LedgerSink {
   append(record: LedgerRecord): Promise<void>;
@@ -404,9 +466,20 @@ export class SequencedLedger {
 }
 
 export class MemoryLedger implements LedgerSink {
+  readonly records: ForwardRecord[] = [];
+  readonly bindings: BindingRecord[] = [];
+  readonly startups: StartupRecord[] = [];
+  readonly security: SecurityFeedHealthRecord[] = [];
+  readonly alerts: AlertDispatchRecord[] = [];
   readonly events: LedgerEventV3[] = [];
 
-  async append(record: LedgerEventV3): Promise<void> {
-    this.events.push(structuredClone(record));
+  async append(record: LedgerRecord): Promise<void> {
+    const cloned = structuredClone(record);
+    if (cloned.schemaVersion === 3) this.events.push(cloned);
+    else if (cloned.recordType === 'binding') this.bindings.push(cloned);
+    else if (cloned.recordType === 'startup') this.startups.push(cloned);
+    else if (cloned.recordType === 'security') this.security.push(cloned);
+    else if (cloned.recordType === 'alert') this.alerts.push(cloned);
+    else this.records.push(cloned);
   }
 }

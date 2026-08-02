@@ -13,12 +13,9 @@ if ta.crossover(fast, slow)
 ```
 
 ```jsonc
-// Current pinelive config excerpt
-{
-  "configVersion": 3,
-  "alerts": {
-    "channels": [{ "id": "webhook", "name": "ops", "url": "https://example.com/hook" }],
-  },
+// pinelive config — v1 or v2, same top-level section
+"alerts": {
+  "channels": [{ "id": "webhook", "name": "ops", "url": "https://example.com/hook" }]
 }
 ```
 
@@ -58,41 +55,43 @@ pinelive collects NEW alerts for this evaluation      (committed-cursor slice)
 frequency gate (host policy, per message identity)    (fractal frequencyGate)
       │  per-bar cap (maxPerBar) → overflow = suppressed
       ▼
-durable decision/reconcile completes FIRST            (trading is never delayed)
+reconcile / decision journaling completes FIRST       (trading is never delayed)
       ▼
 channel dispatch (fail-open, bounded, redacted)
       ▼
-one sequenced durable alert event with per-channel outcomes
+one durable ledger record per alert, with per-channel outcomes
 ```
 
 ### When alerts fire — the gating matrix
 
-| Evaluation                 | Dispatched? | Why                                                                                   |
-| -------------------------- | ----------- | ------------------------------------------------------------------------------------- |
-| Warmup / historical replay | No          | History is data, not events; the collection cursor starts after warmup.               |
-| Fresh authoritative final  | Yes         | It is the fresh committed bar-close evaluation eligible for outward effects.          |
-| Forming revision           | No          | It is provisional; piner rolls its alerts back on the next revision.                  |
-| Recovered final            | No          | It represents an already-processed bar; dispatch would duplicate delivery on restart. |
-| Startup discontinuity      | No          | Continuity was not proven, so the bar is inhibited for execution and alerts alike.    |
+| Evaluation                                | Dispatched? | Why                                                                                    |
+| ----------------------------------------- | ----------- | -------------------------------------------------------------------------------------- |
+| Warmup / historical replay                | No          | History is data, not events — the collection cursor starts after the warmup run.       |
+| v1 closed-bar cycle                       | Yes         | Each cycle is one authoritative bar close.                                             |
+| v2 fresh authoritative final (`eligible`) | Yes         | The one executable evaluation of the bar.                                              |
+| v2 forming revision                       | No          | Provisional by definition; piner rolls its alerts back on the next revision anyway.    |
+| v2 recovered final (`recovered-final`)    | No          | A replay of an already-processed bar; re-dispatching would duplicate on every restart. |
+| v2 startup discontinuity                  | No          | Continuity was not proven; the bar is inhibited for execution and alerts alike.        |
+| `reconcileOnStart` startup correction     | No          | It re-reads the warmup bar; no new evaluation occurred.                                |
 
-Only a fresh authoritative final produces an outward alert effect. This is the
-same eligibility boundary used for close-only execution mirroring.
+This is the delivery analog of the mirror gate: only fresh authoritative
+finals produce outward effects.
 
 ## Frequency semantics
 
 TradingView's `alert(message, freq)` carries a per-call frequency. **piner
 0.11.1 accepts and discards the `freq` argument** (`(message, _freq) =>`), so
-per-call fidelity is impossible downstream until piner forwards it. When it
-does, the per-call value takes precedence over the host default; the gate below
-already accepts it per alert. Until then pinelive applies one configured
-frequency to every alert, with the same pure, sample-time-driven gate fractal
-uses (`frequencyGate` — never wall clock):
+per-call fidelity is impossible downstream until piner forwards it; when it
+does, the per-call value will take precedence over the host default and the
+gate below already accepts it per alert. Until then pinelive applies one
+configured frequency to every alert, with the same pure, sample-time-driven
+gate fractal uses (`frequencyGate` — never wall clock):
 
-| `alerts.frequency`   | Behavior                                                                                    |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| `once_per_bar_close` | Default. At most one delivery per distinct message per authoritative closed bar.            |
-| `once_per_bar`       | Alias of the above while dispatch is close-only; distinct if forming dispatch is added.     |
-| `all`                | Every eligible `alert()` call delivers, including identical messages within one closed bar. |
+| `alerts.frequency`   | Behavior                                                                                     |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| `once_per_bar_close` | Default. At most one delivery per distinct message per closed bar.                           |
+| `once_per_bar`       | Alias of the above while dispatch is close-only; distinct once forming dispatch exists.      |
+| `all`                | Every `alert()` call delivers — including identical messages within one bar (TV `freq_all`). |
 
 The gate is keyed by **message identity**: two different messages on one bar
 both fire under any frequency; the same message twice on one bar collapses
@@ -103,10 +102,10 @@ and restarts cannot leak wall-clock behavior into it.
 
 ### Ordering: trading first
 
-Alert dispatch runs **after** the bar's decision is durably journaled and its
-reconcile completes or is durably scheduled. A slow or failing webhook can
-never delay an order correction; worst-case alert latency is one bar behind the
-venue by design.
+Alert dispatch runs **after** the bar's reconcile completes (v1) or after the
+decision is durably journaled/scheduled (v2). A slow or failing webhook can
+never delay an order correction; worst-case alert latency is one bar behind
+the venue by design.
 
 ### Fail-open, bounded
 
@@ -124,22 +123,25 @@ never touched by alerting. Boundedness comes from three caps:
 
 ### Durability and restart safety
 
-Every gated alert (sent, failed, or suppressed) follows one durable event path:
-`recordType: "alert"`, `schemaVersion: 3`, sequence-stamped by the same ledger
-as decisions and reconcile evidence. The event carries the alert identity and
-per-channel outcomes; recovery validates it and excludes it from decision
-state.
+Every gated alert (sent, failed, or suppressed) gets **one durable ledger
+record** carrying the alert identity and the per-channel outcomes:
 
-The event is written after dispatch so it can carry real outcomes. At-most-once
-delivery across restarts is structural: a recovered final is not eligible, so
-the same bar's alerts cannot be dispatched twice. The one crash window (after
-send, before the event is durable) can lose the _record_ of a delivered alert,
-never duplicate a delivery — the safe side for an advisory channel, and the
-reverse of the order path's journal-before-effect discipline, deliberately: an
-order is a liability, an alert is information.
+- v1 path: `recordType: "alert"`, `schemaVersion: 2` — alongside cycle records.
+- v2 path: `recordType: "alert"` in the schema-v3 event stream, sequence-stamped
+  by the same `SequencedLedger` as decisions, validated (and ignored for
+  decision state) by recovery.
 
-`firedAt` on the wire is the **bar close time** (sample time, matching fractal),
-not wall clock; `recordedAt` in the ledger is wall clock.
+The record is written after dispatch so it can carry real outcomes.
+At-most-once delivery across restarts is **structural**, not bookkept: v1
+resumes strictly after the last processed bar, and v2 recovered finals are not
+`eligible`, so the same bar's alerts can never be dispatched twice. The one
+crash window (after send, before the record) can lose the _record_ of a
+delivered alert, never duplicate a delivery — the safe side for an advisory
+channel, and the reverse of the order path's journal-before-effect discipline,
+deliberately: an order is a liability, an alert is information.
+
+`firedAt` on the wire is the **bar close time** (sample time, matching
+fractal), not wall clock; `recordedAt` in the ledger is wall clock.
 
 ## Channels
 
@@ -183,11 +185,11 @@ payload with strategy identity in place of chart identity:
 }
 ```
 
-Delivery follows fractal's contract: coarse non-PII error reasons
-(`http-503`, `AbortError`, `network-error` — never the URL, headers, or payload)
-and bounded retries on transient failures only. The URL and headers are
-construction secrets: they never appear in the ledger, logs, or error messages;
-the ledger sees only the channel `name`.
+Delivery is fractal's contract verbatim: never throws, coarse non-PII error
+reasons (`http-503`, `AbortError`, `network-error` — never the URL, headers,
+or payload), bounded retries on transient failures only. The URL and headers
+are construction secrets: they never appear in the ledger, logs, or error
+messages — the ledger sees only the channel `name`.
 
 ### The telegram channel
 
@@ -205,18 +207,18 @@ price 2412.3 · bar close 2024-01-02T00:05:00.000Z · pine-58abb08d
 Setup: create a bot with [@BotFather](https://core.telegram.org/bots#botfather)
 to get the token, then obtain the target `chatId` — for a direct message, your
 own user id (the bot cannot message a user who has never started it; send it
-`/start` first); for a group or channel, add the bot and use the negative group
-id or the `@channelusername`.
+`/start` first); for a group or channel, add the bot and use the negative
+group id or the `@channelusername`.
 
-Delivery policy is the shared contract plus one Telegram-specific behavior: a
-`429 Too Many Requests` body carries `parameters.retry_after` (seconds) —
+Delivery policy is the shared contract plus one Telegram-specific behavior:
+a `429 Too Many Requests` body carries `parameters.retry_after` (seconds) —
 Telegram allows roughly one message per second per chat — and the retry honors
-that server-requested delay, capped at 10 s, inside the same per-alert deadline.
-Client errors (`telegram-400`, `telegram-403` — e.g. the bot was blocked) are
-permanent. Failure reasons are coarse (`telegram-<code>`, `http-<status>`,
-`AbortError`); the bot token (which is embedded in the request URL) and the chat
-id are construction secrets that appear in no ledger row, log, or thrown
-message.
+that server-requested delay, capped at 10 s, inside the same per-alert
+deadline. Client errors (`telegram-400`, `telegram-403` — e.g. the bot was
+blocked) are permanent. Failure reasons are coarse (`telegram-<code>`,
+`http-<status>`, `AbortError`); the bot token (which is embedded in the
+request URL) and the chat id are construction secrets that appear in no
+ledger row, log, or thrown message.
 
 ### Writing a custom channel
 
@@ -228,35 +230,30 @@ constructs the built-in `webhook` and `telegram` kinds from config.
 
 ## Configuration
 
-The current strict top-level configuration uses `"configVersion": 3` and one
-`alerts` section:
+Top-level `alerts` section, identical in v1 and v2 configs:
 
 ```jsonc
-{
-  "configVersion": 3,
-  // strategy, symbol, timeframe, data, historical, live, security, and execution omitted here
-  "alerts": {
-    "channels": [
-      {
-        "id": "webhook", // channel kind: "webhook" | "telegram"
-        "name": "ops", // unique ledger-safe name; defaults to <id>-<n>
-        "url": "https://example.com/hook",
-        "headers": { "x-token": "…" }, // optional; never journaled or logged
-      },
-      {
-        "id": "telegram",
-        "name": "tg",
-        "botToken": "123456789:AAE…", // BotFather token; never journaled or logged
-        "chatId": "-1001234567890", // user/group/channel id or @channelusername
-        "disableNotification": false, // optional: deliver silently
-      },
-    ],
-    "frequency": "once_per_bar_close",
-    "sendTimeoutMs": 8000,
-    "attempts": 2,
-    "retryDelayMs": 400,
-    "maxPerBar": 20,
-  },
+"alerts": {
+  "channels": [
+    {
+      "id": "webhook",              // channel kind: "webhook" | "telegram"
+      "name": "ops",                // unique ledger-safe name; defaults to <id>-<n>
+      "url": "https://example.com/hook",
+      "headers": { "x-token": "…" } // optional; never journaled or logged
+    },
+    {
+      "id": "telegram",
+      "name": "tg",
+      "botToken": "123456789:AAE…", // BotFather token; never journaled or logged
+      "chatId": "-1001234567890",   // user/group/channel id or @channelusername
+      "disableNotification": false  // optional: deliver silently
+    }
+  ],
+  "frequency": "once_per_bar_close",
+  "sendTimeoutMs": 8000,
+  "attempts": 2,
+  "retryDelayMs": 400,
+  "maxPerBar": 20
 }
 ```
 
@@ -285,8 +282,8 @@ gating, journaling, or dispatch.
 | Channel timeout / network / 5xx            | Retried within the per-alert deadline; then `failed` outcome, journaled, run continues. |
 | Channel 4xx (non-408/429)                  | Permanent for that alert; `failed` outcome immediately.                                 |
 | More than `maxPerBar` alerts on one bar    | Overflow journaled as `suppressed`, not sent, one log line.                             |
-| Ledger append for the alert event fails    | Propagates like any ledger failure — durability problems are never advisory.            |
-| Crash between dispatch and durable event   | Delivery may be unrecorded; never duplicated (structural at-most-once).                 |
+| Ledger append for the alert record fails   | Propagates like any ledger failure — durability problems are never advisory.            |
+| Crash between dispatch and record          | Delivery may be unrecorded; never duplicated (structural at-most-once).                 |
 | Config declares channels, runtime has none | Startup error (fail-closed): the config promised alerting.                              |
 
 ## Relationship to the fractal alerting module
@@ -300,7 +297,7 @@ map, so behavior stays consistent across the web and headless surfaces:
 | "backtest alerts stay data"                  | warmup alerts never dispatch; pinerun reports only     |
 | `frequencyGate` (pure, sample-time)          | `alertFrequencyGate` (same shape, `closed` flag ready) |
 | `webhook.ts` delivery contract               | `WebhookAlertChannel` (same retries/timeouts/reasons)  |
-| `triggeredHistory` (persisted firings)       | durable sequenced `alert` events                       |
+| `triggeredHistory` (persisted firings)       | durable `alert` ledger records                         |
 | Channel settings (toast/sound/webhook)       | `AlertChannel` protocol (webhook built in)             |
 | Price/channel/comparison condition builder   | out of scope — conditions live in Pine                 |
 
@@ -310,14 +307,15 @@ map, so behavior stays consistent across the web and headless surfaces:
   the second argument to `alert()`; forwarding it (and `alertcondition()`
   metadata) belongs in piner, at which point the host gate honors it per call
   with `alerts.frequency` as the fallback.
-- **Every-update dispatch is not offered.** Alert delivery is close-only: only
-  fresh authoritative finals can dispatch. The gate and event shapes retain a
-  `closed` flag for a future explicitly designed forming-tick policy.
+- **Every-update dispatch is not offered.** The gate and event shapes carry a
+  `closed` flag so forming-tick alerting (`freq_all` fidelity) can be added
+  when the every-update mirror cadence opens up; today dispatch is close-only
+  in both runtimes.
 - **`alert()` only.** `alertcondition()` is a TradingView server-side
   declaration; piner records nothing actionable for it today.
 - **More channels.** Slack/email/push adapters are `AlertChannel`
   implementations plus conformance — deliberately left to demand (Telegram
-  ships as the second built-in).
+  shipped as the second built-in).
 - **pinerun reporting.** Exposing collected alert events in backtest `--json`
-  as data is planned separately because it changes the result shape of cached
-  jobs.
+  (as data) is planned but versioned separately because it changes the result
+  shape of cached jobs.

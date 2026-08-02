@@ -8,14 +8,15 @@ import {
   type PreparedIntrabarAuthorityEnvelope,
 } from './intrabar-authority.js';
 
-export type ExecutionPolicyBinding = Readonly<
+export type V2ExecutionPolicyBinding = Readonly<
   Pick<NormalizedMirroredExecutionConfig, 'mirrorOn' | 'order' | 'broker'>
 >;
 
 export interface RunInstrumentBinding {
-  /** The binding contract is versioned independently of run configuration and ledger schemas. */
-  readonly bindingVersion: 2;
+  /** Omitted on the byte-compatible v1/FNV binding. */
+  readonly bindingVersion?: 2;
   readonly id: string;
+  /** Legacy FNV display fingerprint; never restart authority for bindingVersion 2. */
   readonly fingerprint: string;
   readonly strategySymbol: string;
   readonly providerId: string;
@@ -28,9 +29,10 @@ export interface RunInstrumentBinding {
   readonly exchange?: string;
   readonly expiry?: string;
   readonly brokerId: string;
-  readonly authority: PreparedIntrabarAuthorityEnvelope;
-  /** Normalized broker/order economics bound before any position read, mark, or submit. */
-  readonly execution?: ExecutionPolicyBinding;
+  /** Complete prepared authority is persisted only on v2 bindings. */
+  readonly authority?: PreparedIntrabarAuthorityEnvelope;
+  /** Normalized broker/order economics bound before any v2 position read, mark, or submit. */
+  readonly execution?: V2ExecutionPolicyBinding;
 }
 
 export class InstrumentBindingError extends Error {
@@ -40,94 +42,12 @@ export class InstrumentBindingError extends Error {
   }
 }
 
-export async function createRunInstrumentBinding(
+export function createRunInstrumentBinding(
   provider: MarketDataProvider,
   resolved: ResolvedDataInstrument,
   broker: Broker,
   brokerInstrument: Instrument,
-  authority: PreparedIntrabarAuthorityEnvelope,
-  execution?: ExecutionPolicyBinding,
-): Promise<RunInstrumentBinding> {
-  const identity = validatedBindingIdentity(provider, resolved, broker, brokerInstrument);
-  return createStrongRunInstrumentBinding(identity, authority, execution);
-}
-
-async function createStrongRunInstrumentBinding(
-  identity: ReturnType<typeof validatedBindingIdentity>,
-  authority: PreparedIntrabarAuthorityEnvelope,
-  execution?: ExecutionPolicyBinding,
-): Promise<RunInstrumentBinding> {
-  const frozenExecution = execution ? deepFreeze(structuredClone(execution)) : undefined;
-  const digest = await canonicalSha256({
-    bindingVersion: 2,
-    strategySymbol: identity.strategySymbol,
-    providerId: identity.providerId,
-    providerHandle: identity.providerHandle,
-    executionSymbol: identity.executionSymbol,
-    qtyStep: identity.qtyStep,
-    minOrderQty: identity.minOrderQty,
-    mintick: identity.mintick,
-    pointValue: identity.pointValue ?? null,
-    exchange: identity.exchange ?? null,
-    expiry: identity.expiry ?? null,
-    brokerId: identity.brokerId,
-    authorityIdentity: authority.identity,
-    ...(frozenExecution ? { execution: frozenExecution } : {}),
-  });
-  const id = `binding-v2-${digest.slice('sha256-'.length)}`;
-  return deepFreeze({
-    ...identity,
-    bindingVersion: 2 as const,
-    id,
-    fingerprint: id,
-    authority,
-    ...(frozenExecution ? { execution: frozenExecution } : {}),
-  });
-}
-
-/** Broker-free route used only for durable compute decisions. */
-export async function createComputeInstrumentBinding(
-  provider: MarketDataProvider,
-  resolved: ResolvedDataInstrument,
-  authority: PreparedIntrabarAuthorityEnvelope,
-): Promise<RunInstrumentBinding> {
-  const identity = {
-    strategySymbol: resolved.strategySymbol,
-    providerId: provider.id,
-    providerHandle: resolved.providerHandle,
-    executionSymbol: resolved.venueSymbol,
-    qtyStep: resolved.qtyStep,
-    minOrderQty: resolved.minOrderQty,
-    mintick: resolved.mintick,
-    ...(resolved.pointValue !== undefined ? { pointValue: resolved.pointValue } : {}),
-    ...(resolved.exchange !== undefined ? { exchange: resolved.exchange } : {}),
-    ...(resolved.expiry !== undefined ? { expiry: resolved.expiry } : {}),
-    brokerId: 'compute-only',
-  };
-  const digest = await canonicalSha256({
-    bindingVersion: 2,
-    ...identity,
-    pointValue: identity.pointValue ?? null,
-    exchange: identity.exchange ?? null,
-    expiry: identity.expiry ?? null,
-    authorityIdentity: authority.identity,
-  });
-  const id = `binding-v2-${digest.slice('sha256-'.length)}`;
-  return deepFreeze({
-    bindingVersion: 2 as const,
-    id,
-    fingerprint: id,
-    ...identity,
-    authority,
-  });
-}
-
-function validatedBindingIdentity(
-  provider: MarketDataProvider,
-  resolved: ResolvedDataInstrument,
-  broker: Broker,
-  brokerInstrument: Instrument,
-) {
+): RunInstrumentBinding {
   const executionSymbol = brokerInstrument.brokerSymbol ?? brokerInstrument.symbol;
   if (executionSymbol !== resolved.venueSymbol)
     throw new InstrumentBindingError(
@@ -145,8 +65,12 @@ function validatedBindingIdentity(
       throw new InstrumentBindingError('broker metadata is missing pointValue');
     compare('pointValue', brokerInstrument.pointValue, resolved.pointValue);
   } else if (brokerInstrument.pointValue != null) {
+    // compare is also the generic positivity/finiteness gate. A custom broker's
+    // execution-only multiplier must pass it even when there is no provider value.
     compare('pointValue', brokerInstrument.pointValue, brokerInstrument.pointValue);
   }
+  // The broker instrument's pointValue scales PnL even when the data provider reports none,
+  // so the binding must attest whichever value execution will actually use.
   const attestedPointValue = resolved.pointValue ?? brokerInstrument.pointValue;
   if (
     resolved.exchange &&
@@ -157,7 +81,7 @@ function validatedBindingIdentity(
   if (resolved.expiry && brokerInstrument.expiry && resolved.expiry !== brokerInstrument.expiry)
     throw new InstrumentBindingError('broker expiry does not match resolved expiry');
 
-  return {
+  const identity = {
     strategySymbol: resolved.strategySymbol,
     providerId: provider.id,
     providerHandle: resolved.providerHandle,
@@ -165,11 +89,100 @@ function validatedBindingIdentity(
     qtyStep: resolved.qtyStep,
     minOrderQty: resolved.minOrderQty,
     mintick: resolved.mintick,
-    ...(attestedPointValue !== undefined ? { pointValue: attestedPointValue } : {}),
-    ...(resolved.exchange !== undefined ? { exchange: resolved.exchange } : {}),
-    ...(resolved.expiry !== undefined ? { expiry: resolved.expiry } : {}),
+    pointValue: attestedPointValue,
+    exchange: resolved.exchange,
+    expiry: resolved.expiry,
     brokerId: broker.id,
   };
+  const fingerprint = `binding-${fnv1a(JSON.stringify(identity))}`;
+  return Object.freeze({ id: fingerprint, fingerprint, ...identity });
+}
+
+/** V2 execution binding: SHA-256 is authoritative; the FNV field is display-only. */
+export async function createV2RunInstrumentBinding(
+  provider: MarketDataProvider,
+  resolved: ResolvedDataInstrument,
+  broker: Broker,
+  brokerInstrument: Instrument,
+  authority: PreparedIntrabarAuthorityEnvelope,
+  execution?: V2ExecutionPolicyBinding,
+): Promise<RunInstrumentBinding> {
+  const legacy = createRunInstrumentBinding(provider, resolved, broker, brokerInstrument);
+  const frozenExecution = execution ? deepFreeze(structuredClone(execution)) : undefined;
+  const base = {
+    fingerprint: legacy.fingerprint,
+    strategySymbol: legacy.strategySymbol,
+    providerId: legacy.providerId,
+    providerHandle: legacy.providerHandle,
+    executionSymbol: legacy.executionSymbol,
+    qtyStep: legacy.qtyStep,
+    minOrderQty: legacy.minOrderQty,
+    mintick: legacy.mintick,
+    ...(legacy.pointValue !== undefined ? { pointValue: legacy.pointValue } : {}),
+    ...(legacy.exchange !== undefined ? { exchange: legacy.exchange } : {}),
+    ...(legacy.expiry !== undefined ? { expiry: legacy.expiry } : {}),
+    brokerId: legacy.brokerId,
+  };
+  const digest = await canonicalSha256({
+    bindingVersion: 2,
+    strategySymbol: base.strategySymbol,
+    providerId: base.providerId,
+    providerHandle: base.providerHandle,
+    executionSymbol: base.executionSymbol,
+    qtyStep: base.qtyStep,
+    minOrderQty: base.minOrderQty,
+    mintick: base.mintick,
+    pointValue: base.pointValue ?? null,
+    exchange: base.exchange ?? null,
+    expiry: base.expiry ?? null,
+    brokerId: base.brokerId,
+    authorityIdentity: authority.identity,
+    ...(frozenExecution ? { execution: frozenExecution } : {}),
+  });
+  return deepFreeze({
+    ...base,
+    bindingVersion: 2 as const,
+    id: `binding-v2-${digest.slice('sha256-'.length)}`,
+    authority,
+    ...(frozenExecution ? { execution: frozenExecution } : {}),
+  });
+}
+
+/** Broker-free v2 route used only for durable compute decisions. */
+export async function createV2ComputeInstrumentBinding(
+  provider: MarketDataProvider,
+  resolved: ResolvedDataInstrument,
+  authority: PreparedIntrabarAuthorityEnvelope,
+): Promise<RunInstrumentBinding> {
+  const identity = {
+    strategySymbol: resolved.strategySymbol,
+    providerId: provider.id,
+    providerHandle: resolved.providerHandle,
+    executionSymbol: resolved.venueSymbol,
+    qtyStep: resolved.qtyStep,
+    minOrderQty: resolved.minOrderQty,
+    mintick: resolved.mintick,
+    ...(resolved.pointValue !== undefined ? { pointValue: resolved.pointValue } : {}),
+    ...(resolved.exchange !== undefined ? { exchange: resolved.exchange } : {}),
+    ...(resolved.expiry !== undefined ? { expiry: resolved.expiry } : {}),
+    brokerId: 'compute-only',
+  };
+  const fingerprint = `binding-${fnv1a(JSON.stringify(identity))}`;
+  const digest = await canonicalSha256({
+    bindingVersion: 2,
+    ...identity,
+    pointValue: identity.pointValue ?? null,
+    exchange: identity.exchange ?? null,
+    expiry: identity.expiry ?? null,
+    authorityIdentity: authority.identity,
+  });
+  return deepFreeze({
+    bindingVersion: 2 as const,
+    id: `binding-v2-${digest.slice('sha256-'.length)}`,
+    fingerprint,
+    ...identity,
+    authority,
+  });
 }
 
 function compare(name: string, brokerValue: number, dataValue: number): void {
@@ -180,4 +193,13 @@ function compare(name: string, brokerValue: number, dataValue: number): void {
     throw new InstrumentBindingError(
       `broker ${name} ${brokerValue} does not match resolved ${name} ${dataValue}`,
     );
+}
+
+function fnv1a(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }

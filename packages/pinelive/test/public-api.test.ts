@@ -34,13 +34,10 @@ import {
 import {
   FileExecutionLease,
   JsonlLedger,
-  NodeAccountInstrumentClaim,
   NodeIntrabarPersistence,
   parseJsonlPrefix,
   readJsonl,
   readJsonlPrefix,
-  readPineliveStatus,
-  recoverStalePineliveClaims,
 } from '@heyphat/pinelive/node';
 
 type RequiredPublicContracts = readonly [
@@ -68,7 +65,7 @@ type RequiredPublicContracts = readonly [
 
 const contractsCompile: RequiredPublicContracts | undefined = undefined;
 
-test('browser-safe and Node entry points expose the production API', () => {
+test('browser-safe and Node entry points expose the v2 production API', () => {
   expect(contractsCompile).toBeUndefined();
   expect(typeof normalizeRunConfig).toBe('function');
   expect(typeof validateCompiledIntrabarConfig).toBe('function');
@@ -84,9 +81,6 @@ test('browser-safe and Node entry points expose the production API', () => {
   expect(typeof JsonlLedger).toBe('function');
   expect(typeof NodeIntrabarPersistence).toBe('function');
   expect(typeof FileExecutionLease).toBe('function');
-  expect(typeof NodeAccountInstrumentClaim).toBe('function');
-  expect(typeof readPineliveStatus).toBe('function');
-  expect(typeof recoverStalePineliveClaims).toBe('function');
   expect(typeof readJsonl).toBe('function');
   expect(typeof readJsonlPrefix).toBe('function');
   expect(parseJsonlPrefix).toBe(readJsonlPrefix);
@@ -105,9 +99,9 @@ const publicEveryUpdate = {
   source: { kind: 'native' },
 } as const;
 
-function publicConfig(execution: Readonly<Record<string, unknown>>) {
+function publicV2(execution: Readonly<Record<string, unknown>>) {
   return {
-    configVersion: 3,
+    configVersion: 2,
     strategy: 'public.pine',
     symbol: 'X',
     timeframe: '1m',
@@ -117,10 +111,10 @@ function publicConfig(execution: Readonly<Record<string, unknown>>) {
   } as const;
 }
 
-test('public preparation unadvertises Paper every-update effects but keeps supported modes', () => {
+test('public v2 preparation unadvertises Paper every-update effects but keeps supported modes', () => {
   const lifecycleMessage =
     'Paper mirrorOn "every-update" is unavailable because the public piner runtime does not expose a provable pending-order/fill lifecycle';
-  const unsupported = publicConfig({
+  const unsupported = publicV2({
     kind: 'mirrored',
     mirrorOn: 'every-update',
     broker: { id: 'paper' },
@@ -132,17 +126,14 @@ test('public preparation unadvertises Paper every-update effects but keeps suppo
   expect(() => normalizeRunConfig(unsupported)).toThrow(lifecycleMessage);
   expect(() => prepareIntrabarRun(unsupported, publicEveryUpdateSource)).toThrow(lifecycleMessage);
 
-  const compute = prepareIntrabarRun(
-    publicConfig({ kind: 'compute-only' }),
-    publicEveryUpdateSource,
-  );
+  const compute = prepareIntrabarRun(publicV2({ kind: 'compute-only' }), publicEveryUpdateSource);
   expect(compute.config).toMatchObject({
     live: { cadence: 'every-update' },
     execution: { kind: 'compute-only' },
   });
 
   const finalOnly = prepareIntrabarRun(
-    publicConfig({
+    publicV2({
       kind: 'mirrored',
       mirrorOn: 'bar-close',
       broker: { id: 'paper' },

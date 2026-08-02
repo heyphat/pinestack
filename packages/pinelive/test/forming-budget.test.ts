@@ -10,11 +10,9 @@ import {
 } from '../src/index.js';
 
 const instrument = { symbol: 'X', minQty: 1, qtyStep: 1, minOrderQty: 1, mintick: 0.01 };
-const bindingId = `binding-v2-${'a'.repeat(64)}`;
 const binding: RunInstrumentBinding = {
-  bindingVersion: 2,
-  id: bindingId,
-  fingerprint: bindingId,
+  id: 'binding-test',
+  fingerprint: 'binding-test',
   strategySymbol: 'ROOT',
   providerId: 'test',
   providerHandle: 'test:X',
@@ -23,11 +21,6 @@ const binding: RunInstrumentBinding = {
   minOrderQty: 1,
   mintick: 0.01,
   brokerId: 'paper',
-  authority: {
-    algorithm: 'sha256',
-    identity: `sha256-${'b'.repeat(64)}`,
-    prepared: {},
-  } as never,
 };
 
 function context(barTime = 1): ReconcileContext {

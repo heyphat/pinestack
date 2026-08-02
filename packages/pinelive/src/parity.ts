@@ -1,5 +1,4 @@
-import type { EvaluationCompletedEventV3, LedgerEventV3 } from './core/ledger.js';
-import { assertLedgerEvent } from './core/recovery.js';
+import type { ForwardRecord } from './core/ledger.js';
 
 export interface ExpectedPositionRecord {
   barTime: number;
@@ -24,30 +23,23 @@ export interface ParityDifference {
 }
 
 /**
- * Pure comparator for durable evaluation completions. One invocation compares exactly one
- * run/strategy/binding/timeframe scope; duplicate completions are reported rather than overwritten.
- * Expected rows can come from piner/pinerun.
+ * Pure ledger comparator. One invocation compares exactly one live
+ * run/strategy/symbol/timeframe scope; duplicate cycles are reported rather
+ * than silently overwritten. Expected rows can come from piner/pinerun.
  */
 export function compareLedgerParity(
-  live: readonly unknown[],
+  live: readonly ForwardRecord[],
   expected: readonly ExpectedPositionRecord[],
   epsilon = 1e-9,
 ): ParityDifference[] {
   if (!Number.isFinite(epsilon) || epsilon < 0)
     throw new RangeError('epsilon must be a non-negative finite number');
 
-  const events = live.map((event, index): LedgerEventV3 => {
-    assertLedgerEvent(event, index);
-    return event;
-  });
-  const completed = events.filter(
-    (event): event is EvaluationCompletedEventV3 => event.recordType === 'evaluation.completed',
-  );
   const differences: ParityDifference[] = [];
   const scopes = new Set(
-    completed.map(
-      (event) =>
-        `${event.runId}\u0000${event.strategyId}\u0000${event.bindingId}\u0000${event.timeframe}`,
+    live.map(
+      (row) =>
+        `${row.runId}\u0000${row.strategyId}\u0000${row.bindingId ?? `${row.strategySymbol ?? row.symbol}:${row.executionSymbol ?? row.symbol}`}\u0000${row.timeframe}`,
     ),
   );
   if (scopes.size > 1) {
@@ -58,18 +50,18 @@ export function compareLedgerParity(
     return differences;
   }
 
-  const liveByTime = new Map<number, EvaluationCompletedEventV3>();
-  for (const event of completed) {
-    const prior = liveByTime.get(event.barTime);
+  const liveByTime = new Map<number, ForwardRecord>();
+  for (const row of live) {
+    const prior = liveByTime.get(row.bar.time);
     if (prior) {
       differences.push({
-        barTime: event.barTime,
-        liveTarget: event.target,
-        actualAfter: event.actualAfter,
-        error: `duplicate live evaluations ${prior.decisionId} and ${event.decisionId}`,
+        barTime: row.bar.time,
+        liveTarget: row.target,
+        actualAfter: row.actualAfter,
+        error: `duplicate live cycles ${prior.cycleId} and ${row.cycleId}`,
         kind: 'duplicate-live',
       });
-    } else liveByTime.set(event.barTime, event);
+    } else liveByTime.set(row.bar.time, row);
   }
 
   const expectedByTime = new Map<number, ExpectedPositionRecord>();
@@ -105,7 +97,7 @@ export function compareLedgerParity(
         actualAfter: actual.actualAfter,
         kind: 'target-mismatch',
       });
-    } else if (actual.outcome === 'reject') {
+    } else if (actual.action === 'reject') {
       differences.push({
         barTime,
         liveTarget: actual.target,

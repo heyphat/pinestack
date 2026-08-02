@@ -117,12 +117,12 @@ export interface PositionMirrorOptions {
   epsilon?: number;
   transientRetries?: number;
   retryDelayMs?: number;
-  /** Execution order type. Market is the default. */
+  /** Execution order type. Market remains the backward-compatible default. */
   orderType?: 'market' | 'limit';
   /** Passive offset from the closed-bar reference. Buy subtracts; sell adds. Default 0. */
   limitOffsetTicks?: number;
   sleep?: (milliseconds: number) => Promise<void>;
-  /** Optional orchestration hooks around durable execution boundaries. */
+  /** Additive orchestration hooks; absent hooks preserve all v1/v2 behavior. */
   hooks?: PositionMirrorHooks;
 }
 

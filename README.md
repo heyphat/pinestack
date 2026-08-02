@@ -53,15 +53,12 @@ against the release's `checksums.txt`, and swaps the executable atomically
 
 > **Pinelive is not installed by default.** Releases also carry a standalone
 > `pinelive` binary (the forward runner), but the installer only fetches it with
-> an explicit opt-in — `PINESTACK_BINS="pinerun pinetop pinelive"` — because it
-> can place orders. Paper is its default broker. The built-in official Tiger
-> adapter is intentionally blocked and ineligible for armed production
-> execution because it cannot prove complete open-order inventory,
-> authoritative exact order absence, or closure of the snapshot/account-stream
-> gap. See the [production-safety runbook](./docs/pinelive-production-safety.md)
-> and [Paper quick start](./packages/pinelive/README.md#paper-quick-start).
+> an explicit opt-in — `PINESTACK_BINS="pinerun pinetop pinelive"` — because its
+> Tiger adapters are offline-tested only and not sandbox- or production-approved.
+> Paper is its default broker. See the
+> [quick start](./packages/pinelive/README.md#paper-quick-start).
 
-Prefer to build them yourself? See [Getting started](#getting-started-with-pinerun) below, then
+Prefer to build them yourself? See [Getting started](#getting-started) below, then
 `bun run build:bin --install`.
 
 ## Packages
@@ -194,12 +191,9 @@ a data or brokerage service. From a source checkout, follow the
 `examples/rsi-mean-reversion.pine`, `examples/data`, a 20-bar warmup, and the
 source CLI.
 
-The built-in official Tiger adapter is intentionally blocked and ineligible
-for armed production execution because it cannot prove complete open-order
-inventory, authoritative exact order absence, or closure of the
-snapshot/account-stream gap. Its credentialed test is read-only and does not
-authorize mutation. See the
-[production-safety runbook](./docs/pinelive-production-safety.md).
+Tiger adapters are covered by offline injected-facade tests only. No
+credentialed data, entitlement, order, cancellation, or fill workflow has been
+validated, and the adapters are not sandbox- or production-approved.
 
 ### Developing from source
 

@@ -7,11 +7,12 @@ import {
   type MarketDataProvider,
   type ResolvedDataInstrument,
 } from '@heyphat/pinery';
-import { main, type CliDependencies } from '../src/cli.js';
+import { main, parseRunConfig, type CliDependencies } from '../src/cli.js';
 import { PaperBroker } from '../src/brokers/paper.js';
 import { InMemoryExecutionLease } from '../src/core/lease.js';
 import type { LedgerEventV3, LedgerRecord, LedgerSink } from '../src/core/ledger.js';
 import { recoverLedger } from '../src/core/recovery.js';
+import { normalizeRunConfig } from '../src/core/config.js';
 import type { Broker } from '../src/core/broker.js';
 import {
   createNodeTigerBroker,
@@ -19,20 +20,102 @@ import {
   registerTigerTradingTransport,
 } from '../src/node.js';
 
+const baseConfig = {
+  strategy: 'strategy.pine',
+  symbol: 'X',
+  timeframe: '1m',
+  data: { provider: 'csv', dataDir: 'data', cutoverTime: 1 },
+  broker: { id: 'paper' },
+};
+
+test('run config requires boolean reconcileOnStart and exact broker fields', () => {
+  expect(() => parseRunConfig({ ...baseConfig, reconcileOnStart: 'false' })).toThrow(
+    'reconcileOnStart must be boolean',
+  );
+  expect(() => parseRunConfig({ ...baseConfig, broker: { id: 'paper', profile: 'demo' } })).toThrow(
+    'config.broker.profile is not allowed',
+  );
+  expect(() => parseRunConfig({ ...baseConfig, unexpected: true })).toThrow(
+    'config.unexpected is not allowed',
+  );
+  expect(parseRunConfig({ ...baseConfig, reconcileOnStart: false }).reconcileOnStart).toBe(false);
+});
+
+test('run config validates request.security safety controls', () => {
+  for (const field of [
+    'securityWarmupBars',
+    'maxSecurityBars',
+    'maxSecurityFeeds',
+    'securityConcurrency',
+    'securityRequestTimeoutMs',
+  ] as const) {
+    expect(() => parseRunConfig({ ...baseConfig, [field]: 0 })).toThrow(
+      `config.${field} must be a positive integer`,
+    );
+  }
+  expect(() => parseRunConfig({ ...baseConfig, maxSecurityStaleRefreshes: -1 })).toThrow(
+    'config.maxSecurityStaleRefreshes must be a non-negative integer',
+  );
+  expect(() =>
+    parseRunConfig({ ...baseConfig, securityWarmupBars: 10, maxSecurityBars: 5 }),
+  ).toThrow('securityWarmupBars must not exceed config.maxSecurityBars');
+  expect(
+    parseRunConfig({
+      ...baseConfig,
+      maxSecurityFeeds: 8,
+      securityConcurrency: 2,
+      securityRequestTimeoutMs: 1000,
+      maxSecurityStaleRefreshes: 1,
+    }),
+  ).toMatchObject({
+    maxSecurityFeeds: 8,
+    securityConcurrency: 2,
+    securityRequestTimeoutMs: 1000,
+    maxSecurityStaleRefreshes: 1,
+  });
+});
+
+test('one tigerProfile applies to both Tiger data and broker sections', () => {
+  const tigerData = { provider: 'tiger', assetClass: 'futures' } as const;
+  const applied = parseRunConfig({
+    ...baseConfig,
+    symbol: 'TG:FU:MGC',
+    data: tigerData,
+    broker: { id: 'tiger' },
+    tigerProfile: '/tmp/tiger_openapi_config.properties',
+  });
+  expect(applied.data).toMatchObject({ profile: '/tmp/tiger_openapi_config.properties' });
+  expect(applied.broker).toMatchObject({ profile: '/tmp/tiger_openapi_config.properties' });
+
+  // An explicit section value still wins over the shared default.
+  const explicit = parseRunConfig({
+    ...baseConfig,
+    symbol: 'TG:FU:MGC',
+    data: { ...tigerData, profile: '/data.properties' },
+    broker: { id: 'tiger', profile: '/broker.properties' },
+    tigerProfile: '/shared.properties',
+  });
+  expect(explicit.data).toMatchObject({ profile: '/data.properties' });
+  expect(explicit.broker).toMatchObject({ profile: '/broker.properties' });
+
+  expect(() => parseRunConfig({ ...baseConfig, tigerProfile: 7 })).toThrow(
+    'config.tigerProfile must be a string',
+  );
+});
+
 test('official Tiger trading transport rejects a missing credential profile path', () => {
   expect(() =>
     createOfficialTigerTradingTransport({ propertiesFilePath: '/nonexistent/tiger.properties' }),
   ).toThrow('credential profile not found');
 });
 
-test('Tiger trading registry validates config, receives only credentials, and guards by default', async () => {
+test('Tiger trading registry validates config and receives only credential fields', () => {
   expect(() =>
     createNodeTigerBroker({ id: 'tiger', unrelatedSecret: 'nope' } as never, true, {}),
   ).toThrow('does not allow');
 
   let receivedConfig: unknown;
   let receivedCredentials: unknown;
-  let submitCalls = 0;
   registerTigerTradingTransport((config, credentials) => {
     receivedConfig = config;
     receivedCredentials = credentials;
@@ -50,7 +133,6 @@ test('Tiger trading registry validates config, receives only credentials, and gu
         return undefined;
       },
       async submitMarket(_accountId, request) {
-        submitCalls++;
         return {
           ...request,
           requestedQty: request.qty,
@@ -61,7 +143,7 @@ test('Tiger trading registry validates config, receives only credentials, and gu
       },
     };
   });
-  const broker = createNodeTigerBroker({ id: 'tiger', profile: 'demo', account: 'paper' }, true, {
+  createNodeTigerBroker({ id: 'tiger', profile: 'demo', account: 'paper' }, true, {
     tigerId: 'id',
     privateKey: 'key',
     account: 'paper',
@@ -79,14 +161,10 @@ test('Tiger trading registry validates config, receives only credentials, and gu
     license: 'license',
     token: 'token',
   });
-  await expect(
-    broker.submit({ symbol: 'X', side: 'buy', qty: 1, type: 'market', clientId: 'safety-bypass' }),
-  ).rejects.toThrow('blocked until production safety synchronization completes');
-  expect(submitCalls).toBe(0);
 });
 
-const strategySource = `//@version=6
-strategy("cli-current", calc_on_every_tick=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
+const v2Strategy = `//@version=6
+strategy("cli-v2", calc_on_every_tick=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
 if close > open
     strategy.entry("L", strategy.long)
 else
@@ -116,10 +194,10 @@ function testUpdate(value: Bar, revision: number, isClose: boolean): BarUpdate {
   };
 }
 
-function computeConfig(overrides: Readonly<Record<string, unknown>> = {}) {
+function computeV2Config(overrides: Readonly<Record<string, unknown>> = {}) {
   return {
-    configVersion: 3,
-    strategy: 'cli-current.pine',
+    configVersion: 2,
+    strategy: 'cli-v2.pine',
     symbol: 'X',
     timeframe: '1m',
     warmupBars: 2,
@@ -129,14 +207,14 @@ function computeConfig(overrides: Readonly<Record<string, unknown>> = {}) {
   } as const;
 }
 
-function paperConfig(overrides: Readonly<Record<string, unknown>> = {}) {
-  return computeConfig({
+function paperV2Config(overrides: Readonly<Record<string, unknown>> = {}) {
+  return computeV2Config({
     execution: {
       kind: 'mirrored',
       mirrorOn: 'bar-close',
       broker: { id: 'paper', initialBalance: 10_000 },
-      ledger: { path: '/virtual/cli-current.jsonl', durability: 'sync' },
-      lease: { path: '/virtual/cli-current.lock' },
+      ledger: { path: '/virtual/cli-v2.jsonl', durability: 'sync' },
+      lease: { path: '/virtual/cli-v2.lock' },
     },
     ...overrides,
   });
@@ -158,7 +236,7 @@ function replayProvider(options: ReplayHarnessOptions = {}): MarketDataProvider 
     {
       alignment: 'utc-24x7',
       timeframes: ['1m'],
-      cacheIdentity: 'cli-current-replay',
+      cacheIdentity: 'cli-v2-replay-v1',
     },
   ).setInstrument('X', { minQty: 1, mintick: 0.01 });
   const replay = new ReplayProvider(source, {
@@ -228,6 +306,7 @@ interface CliHarness {
     lease: number;
     dataCredentials: number;
     tradingCredentials: number;
+    profile: number;
     flatten: number;
   };
 }
@@ -253,12 +332,13 @@ function createCliHarness(
     lease: 0,
     dataCredentials: 0,
     tradingCredentials: 0,
+    profile: 0,
     flatten: 0,
   };
   const sequence = ++harnessSequence;
   const dependencies: Partial<CliDependencies> = {
     readConfig: async () => config,
-    readSource: async () => options.source ?? strategySource,
+    readSource: async () => options.source ?? v2Strategy,
     createMarketDataProvider: (() => {
       counts.provider++;
       return providerFactory(counts.provider);
@@ -295,7 +375,7 @@ function createCliHarness(
     createFileExecutionLease: (path, leaseOptions) => {
       counts.lease++;
       return new InMemoryExecutionLease(leaseOptions?.resource ?? path, {
-        ownerId: leaseOptions?.ownerId ?? `cli-owner-${sequence}-${counts.lease}`,
+        ownerId: `cli-owner-${sequence}-${counts.lease}`,
         leaseId: `cli-lease-${sequence}-${counts.lease}`,
       });
     },
@@ -306,6 +386,10 @@ function createCliHarness(
     readTigerTradingCredentials: () => {
       counts.tradingCredentials++;
       throw new Error('Tiger trading credentials must remain untouched');
+    },
+    readTigerProfileOverride: () => {
+      counts.profile++;
+      throw new Error('Tiger profile environment must remain untouched');
     },
     log: (message) => logs.push(message),
     addSignalHandler: (signal) => addedSignals.push(signal),
@@ -324,10 +408,8 @@ test('CLI help advertises run, validate, parity, upgrade, and version', async ()
   const logs: string[] = [];
   await main(['help'], { log: (message) => logs.push(message) });
   expect(logs).toEqual([
-    'pinelive run --config <pinelive.json>',
+    'pinelive run --config <pinelive.json> [--tiger-profile <path>]',
     'pinelive validate --config <pinelive.json>',
-    'pinelive status --ledger <path> [--json] [--recent <n>]',
-    'pinelive recover --ledger <path> --lease <path> [--account-claim <path>] --confirm',
     'pinelive parity <live.jsonl> <expected.jsonl>',
     'pinelive upgrade [--check]',
     'pinelive --version',
@@ -343,8 +425,8 @@ test('CLI --version self-reports without touching any dependency factory', async
   expect(logs[0]!).toMatch(/^pinelive \d+\.\d+\.\d+/);
 });
 
-test('validate performs only pure config/source gates and prints the current summary', async () => {
-  const harness = createCliHarness(computeConfig(), () => {
+test('validate performs only pure config/source gates and prints the v2 summary', async () => {
+  const harness = createCliHarness(computeV2Config(), () => {
     throw new Error('provider factory must remain untouched');
   });
 
@@ -352,7 +434,7 @@ test('validate performs only pure config/source gates and prints the current sum
 
   expect(finalJsonLog(harness.logs)).toEqual({
     valid: true,
-    configVersion: 3,
+    configVersion: 2,
     mode: 'compute-only',
     cadence: 'bar-close',
     history: 'standard',
@@ -366,34 +448,15 @@ test('validate performs only pure config/source gates and prints the current sum
     lease: 0,
     dataCredentials: 0,
     tradingCredentials: 0,
+    profile: 0,
     flatten: 0,
   });
   expect(harness.addedSignals).toEqual([]);
 });
 
-test('CLI validate and run reject config versions 1 and 2 before runtime construction', async () => {
-  for (const configVersion of [1, 2]) {
-    for (const command of ['validate', 'run'] as const) {
-      const harness = createCliHarness(computeConfig({ configVersion }), () => {
-        throw new Error('provider factory must remain untouched');
-      });
-
-      await expect(
-        main([command, '--config', `config-${configVersion}.json`], harness.dependencies),
-      ).rejects.toThrow('unsupported configVersion; expected 3');
-      expect(harness.counts.provider).toBe(0);
-      expect(harness.counts.paperBroker).toBe(0);
-      expect(harness.counts.tigerBroker).toBe(0);
-      expect(harness.counts.ledger).toBe(0);
-      expect(harness.counts.lease).toBe(0);
-      expect(harness.addedSignals).toEqual([]);
-    }
-  }
-});
-
-test('invalid current compilation rejects before every runtime factory and signal handler', async () => {
+test('invalid v2 compilation rejects before every runtime factory and signal handler', async () => {
   const harness = createCliHarness(
-    computeConfig(),
+    computeV2Config(),
     () => {
       throw new Error('provider factory must remain untouched');
     },
@@ -413,7 +476,7 @@ test('invalid current compilation rejects before every runtime factory and signa
 });
 
 test('CLI validate and run reject Paper every-update effects before runtime construction', async () => {
-  const base = paperConfig({
+  const base = paperV2Config({
     live: { cadence: 'every-update', source: nativeSource },
   });
   const config = {
@@ -443,6 +506,7 @@ test('CLI validate and run reject Paper every-update effects before runtime cons
       lease: 0,
       dataCredentials: 0,
       tradingCredentials: 0,
+      profile: 0,
       flatten: 0,
     });
     expect(harness.addedSignals).toEqual([]);
@@ -450,9 +514,102 @@ test('CLI validate and run reject Paper every-update effects before runtime cons
   }
 });
 
-test('current compute-only runs bar-close through Replay without broker or account output', async () => {
+test('v1 dispatch stays on runForwardServer and does not touch v2 or Tiger-only resources', async () => {
+  const trace: string[] = [];
+  const logs: string[] = [];
+  let normalized = 0;
+  let captured: Record<string, unknown> | undefined;
+  const data = { id: 'v1-data' } as MarketDataProvider;
+  const broker = { id: 'paper' } as Broker;
+  const ledger: LedgerSink = { async append() {} };
+
+  await main(['run', '--config', 'v1.json'], {
+    readConfig: async () => baseConfig,
+    normalizeRunConfig: (value) => {
+      trace.push('normalize');
+      normalized++;
+      return normalizeRunConfig(value);
+    },
+    prepareIntrabarRun: (() => {
+      throw new Error('v2 prepare must remain untouched');
+    }) as CliDependencies['prepareIntrabarRun'],
+    createMarketDataProvider: (() => {
+      trace.push('data');
+      return data;
+    }) as CliDependencies['createMarketDataProvider'],
+    createPaperBroker: () => {
+      trace.push('broker');
+      return broker;
+    },
+    readSource: async () => {
+      trace.push('source');
+      return v2Strategy;
+    },
+    createJsonlLedger: () => {
+      trace.push('ledger');
+      return ledger;
+    },
+    runForwardServer: (async (options) => {
+      trace.push('runForwardServer');
+      captured = options as unknown as Record<string, unknown>;
+      return {
+        binding: { executionSymbol: 'X' },
+        finalPosition: 1,
+        finalEquity: 10_001,
+      } as never;
+    }) as CliDependencies['runForwardServer'],
+    readJsonlPrefix: (async () => {
+      throw new Error('v2 recovery must remain untouched');
+    }) as CliDependencies['readJsonlPrefix'],
+    createFileExecutionLease: () => {
+      throw new Error('v2 lease must remain untouched');
+    },
+    createTigerBroker: (() => {
+      throw new Error('Tiger broker must remain untouched');
+    }) as CliDependencies['createTigerBroker'],
+    readTigerProfileOverride: () => {
+      throw new Error('Tiger profile must remain untouched');
+    },
+    readTigerDataCredentials: () => {
+      throw new Error('Tiger data credentials must remain untouched');
+    },
+    readTigerTradingCredentials: () => {
+      throw new Error('Tiger execution credentials must remain untouched');
+    },
+    log: (message) => logs.push(message),
+    addSignalHandler: (signal) => trace.push(`add:${signal}`),
+    removeSignalHandler: (signal) => trace.push(`remove:${signal}`),
+  });
+
+  expect(normalized).toBe(1);
+  expect(trace).toEqual([
+    'normalize',
+    'data',
+    'broker',
+    'source',
+    'ledger',
+    'add:SIGINT',
+    'add:SIGTERM',
+    'runForwardServer',
+    'remove:SIGINT',
+    'remove:SIGTERM',
+  ]);
+  expect(captured).toMatchObject({
+    source: v2Strategy,
+    symbol: 'X',
+    timeframe: '1m',
+    data,
+    broker,
+    ledger,
+  });
+  expect(logs.at(-1)).toBe(
+    'stopped: contract=X position=1 equity=10001 ledger=.pinelive/ledger.jsonl',
+  );
+});
+
+test('v2 compute-only runs bar-close through Replay without broker or account output', async () => {
   let resolves = 0;
-  const harness = createCliHarness(computeConfig(), () =>
+  const harness = createCliHarness(computeV2Config(), () =>
     replayProvider({ onResolve: () => resolves++ }),
   );
 
@@ -475,9 +632,9 @@ test('current compute-only runs bar-close through Replay without broker or accou
   expect(harness.events.some((event) => event.recordType === 'evaluation.skipped')).toBe(true);
 });
 
-test('current mirrored Paper runs bar-close through Replay, reuses authority resolution, and never flattens', async () => {
+test('v2 mirrored Paper runs bar-close through Replay, reuses authority resolution, and never flattens', async () => {
   let resolves = 0;
-  const harness = createCliHarness(paperConfig(), () =>
+  const harness = createCliHarness(paperV2Config(), () =>
     replayProvider({ onResolve: () => resolves++ }),
   );
 
@@ -502,7 +659,7 @@ test('current mirrored Paper runs bar-close through Replay, reuses authority res
 });
 
 test('recovered strong authority mismatch rejects before the Paper broker factory', async () => {
-  const config = paperConfig();
+  const config = paperV2Config();
   const sharedEvents: LedgerEventV3[] = [];
   const first = createCliHarness(config, () => replayProvider({ id: 'authority-a' }), {
     events: sharedEvents,
@@ -523,7 +680,7 @@ test('recovered strong authority mismatch rejects before the Paper broker factor
 });
 
 test('CLI direct recovery preserves an active bar and inhibits its first post-restart final', async () => {
-  const config = computeConfig({
+  const config = computeV2Config({
     live: { cadence: 'every-update', source: nativeSource },
   });
   const sharedEvents: LedgerEventV3[] = [];
@@ -563,38 +720,36 @@ test('CLI direct recovery preserves an active bar and inhibits its first post-re
   expect(recoverLedger(sharedEvents).lastFinalCursor).toBe(180);
 });
 
-test('Tiger current validation remains pure before credentials, providers, or storage', async () => {
-  const tigerConfig = paperConfig({
+test('Tiger v2 mirrored execution fails in pure prepare before credentials, providers, or storage', async () => {
+  const tigerConfig = paperV2Config({
     execution: {
       kind: 'mirrored',
       mirrorOn: 'bar-close',
       broker: { id: 'tiger', profile: '/must/not/be-read' },
       armed: false,
-      ledger: { path: '/virtual/tiger-current.jsonl', durability: 'sync' },
-      lease: { path: '/virtual/tiger-current.lock' },
+      ledger: { path: '/virtual/tiger-v2.jsonl', durability: 'sync' },
+      lease: { path: '/virtual/tiger-v2.lock' },
     },
   });
   const harness = createCliHarness(tigerConfig, () => {
     throw new Error('provider must remain untouched');
   });
 
-  await main(['validate', '--config', 'tiger.json'], harness.dependencies);
-  expect(finalJsonLog(harness.logs)).toMatchObject({
-    valid: true,
-    configVersion: 3,
-    mode: 'mirrored',
-  });
+  await expect(main(['run', '--config', 'tiger.json'], harness.dependencies)).rejects.toThrow(
+    'credentialed release gate',
+  );
   expect(harness.counts.provider).toBe(0);
   expect(harness.counts.tigerBroker).toBe(0);
   expect(harness.counts.ledger).toBe(0);
   expect(harness.counts.lease).toBe(0);
+  expect(harness.counts.profile).toBe(0);
   expect(harness.counts.dataCredentials).toBe(0);
   expect(harness.counts.tradingCredentials).toBe(0);
   expect(harness.addedSignals).toEqual([]);
 });
 
-test('invalid current config rejects before providers, credentials, ledger, lease, or signals', async () => {
-  const harness = createCliHarness(computeConfig({ unexpected: true }), () => {
+test('invalid v2 config rejects before providers, credentials, ledger, lease, or signals', async () => {
+  const harness = createCliHarness(computeV2Config({ unexpected: true }), () => {
     throw new Error('provider factory must remain untouched');
   });
 
@@ -610,8 +765,8 @@ test('invalid current config rejects before providers, credentials, ledger, leas
   expect(harness.addedSignals).toEqual([]);
 });
 
-test('unsafe mirrored results are printed as structured blocked data and storage is closed', async () => {
-  const harness = createCliHarness(paperConfig(), () => {
+test('unsafe mirrored results are not printed and pre-owned storage is still closed', async () => {
+  const harness = createCliHarness(paperV2Config(), () => {
     throw new Error('stub runtime must not invoke its data factory');
   });
   const dependencies: Partial<CliDependencies> = {
@@ -619,9 +774,6 @@ test('unsafe mirrored results are printed as structured blocked data and storage
     runIntrabarServer: (async () => ({
       mode: 'mirrored',
       executionSafe: false,
-      posture: 'live',
-      executionEligibility: 'blocked',
-      eligibilityReasons: ['breaker-open'],
       unsafeReason: 'breaker-open',
       authority: { identity: 'sha256-test' },
       binding: { id: 'binding-test' },
@@ -630,110 +782,16 @@ test('unsafe mirrored results are printed as structured blocked data and storage
     })) as CliDependencies['runIntrabarServer'],
   };
 
-  await main(['run', '--config', 'unsafe.json'], dependencies);
-  expect(finalJsonLog(harness.logs)).toMatchObject({
-    mode: 'mirrored',
-    posture: 'live',
-    executionEligibility: 'blocked',
-    executionSafe: false,
-    unsafeReason: 'breaker-open',
-  });
+  await expect(main(['run', '--config', 'unsafe.json'], dependencies)).rejects.toThrow(
+    'mirrored v2 execution stopped unsafe: breaker-open',
+  );
+  expect(harness.logs.some((line) => line.startsWith('{"mode":"mirrored"'))).toBe(false);
   expect(harness.counts.ledgerClose).toBe(1);
   expect(harness.removedSignals).toEqual(['SIGINT', 'SIGTERM']);
 });
 
-test('mirrored CLI preserves its lease when runtime ownership cleanup fails', async () => {
-  const harness = createCliHarness(paperConfig(), () => {
-    throw new Error('stub runtime must not invoke its data factory');
-  });
-  const administrativeLease = new InMemoryExecutionLease(
-    'pinelive-admin:/virtual/cli-current.jsonl',
-    {
-      ownerId: 'admin-owner',
-      leaseId: 'admin-lease',
-    },
-  );
-  const mirroredLease = new InMemoryExecutionLease('/virtual/cli-current.jsonl', {
-    ownerId: 'mirrored-owner',
-    leaseId: 'mirrored-lease',
-  });
-  let ledgerOptions: Parameters<CliDependencies['createJsonlLedger']>[1];
-  const createJsonlLedger = harness.dependencies.createJsonlLedger!;
-  const dependencies: Partial<CliDependencies> = {
-    ...harness.dependencies,
-    createJsonlLedger: (path, options) => {
-      ledgerOptions = options;
-      return createJsonlLedger(path, options);
-    },
-    createFileExecutionLease: (path) =>
-      path.endsWith('.admin.lock') ? administrativeLease : mirroredLease,
-    runIntrabarServer: (async (options) => {
-      if (!options.lease) throw new Error('test expected a mirrored execution lease');
-      await options.lease.acquire();
-      await options.releaseAdministrativeLeaseAfterOwnershipRecorded?.();
-      throw new Error('account claim release failed');
-    }) as CliDependencies['runIntrabarServer'],
-  };
-
-  try {
-    await expect(
-      main(['run', '--config', 'claim-release-failure.json'], dependencies),
-    ).rejects.toThrow('account claim release failed');
-    expect(ledgerOptions?.releaseLeaseOnClose).toBe(false);
-    expect(mirroredLease.snapshot).toMatchObject({
-      ownerId: 'mirrored-owner',
-      leaseId: 'mirrored-lease',
-    });
-    expect(() => mirroredLease.assertHeld()).not.toThrow();
-    expect(administrativeLease.snapshot).toBeUndefined();
-    expect(harness.counts.ledgerClose).toBe(1);
-  } finally {
-    if (mirroredLease.snapshot) await mirroredLease.release();
-    if (administrativeLease.snapshot) await administrativeLease.release();
-  }
-});
-
-test('mirrored CLI retains administrative and execution ownership when acquisition durability is uncertain', async () => {
-  const harness = createCliHarness(paperConfig(), () => {
-    throw new Error('stub runtime must not invoke its data factory');
-  });
-  const administrativeLease = new InMemoryExecutionLease(
-    'pinelive-admin:/virtual/cli-current.jsonl',
-    {
-      ownerId: 'shared-runtime-owner',
-      leaseId: 'uncertain-admin-lease',
-    },
-  );
-  const mirroredLease = new InMemoryExecutionLease('/virtual/cli-current.jsonl', {
-    ownerId: 'shared-runtime-owner',
-    leaseId: 'uncertain-execution-lease',
-  });
-  const dependencies: Partial<CliDependencies> = {
-    ...harness.dependencies,
-    createFileExecutionLease: (path) =>
-      path.endsWith('.admin.lock') ? administrativeLease : mirroredLease,
-    runIntrabarServer: (async (options) => {
-      if (!options.lease) throw new Error('test expected a mirrored execution lease');
-      await options.lease.acquire();
-      throw new Error('lease acquisition stable-storage acknowledgement failed');
-    }) as CliDependencies['runIntrabarServer'],
-  };
-
-  try {
-    await expect(
-      main(['run', '--config', 'uncertain-lease-acquisition.json'], dependencies),
-    ).rejects.toThrow('lease acquisition stable-storage acknowledgement failed');
-    expect(mirroredLease.snapshot).toBeDefined();
-    expect(administrativeLease.snapshot).toBeDefined();
-    expect(harness.counts.ledgerClose).toBe(1);
-  } finally {
-    if (mirroredLease.snapshot) await mirroredLease.release();
-    if (administrativeLease.snapshot) await administrativeLease.release();
-  }
-});
-
 test('mirrored handoff refreshes recovery after lease acquisition before broker construction', async () => {
-  const config = paperConfig();
+  const config = paperV2Config();
   const events: LedgerEventV3[] = [];
   const first = createCliHarness(config, () => replayProvider(), { events });
   await main(['run', '--config', 'handoff.json'], first.dependencies);
@@ -799,19 +857,13 @@ test('mirrored handoff refreshes recovery after lease acquisition before broker 
 
   await main(['run', '--config', 'handoff.json'], dependencies);
 
-  expect(trace.slice(0, 5)).toEqual([
-    'lease:acquire',
-    'read:1',
-    'lease:acquire',
-    'read:2',
-    'broker:factory',
-  ]);
+  expect(trace.slice(0, 4)).toEqual(['read:1', 'lease:acquire', 'read:2', 'broker:factory']);
   expect(finalJsonLog(handoff.logs).recoveredFromSequence).toBe(ownedRecovery.lastSequence);
   expect(() => recoverLedger(currentEvents)).not.toThrow();
 });
 
 test('mirrored handoff refresh accepts an old active row after its durable release', async () => {
-  const config = paperConfig();
+  const config = paperV2Config();
   const completedEvents: LedgerEventV3[] = [];
   const completed = createCliHarness(config, () => replayProvider(), {
     events: completedEvents,
@@ -874,124 +926,9 @@ test('mirrored handoff refresh accepts an old active row after its durable relea
 
   await main(['run', '--config', 'active-handoff.json'], dependencies);
 
-  expect(trace.slice(0, 4)).toEqual(['lease:acquire', 'read:1', 'lease:acquire', 'read:2']);
+  expect(trace.slice(0, 3)).toEqual(['read:1', 'lease:acquire', 'read:2']);
   expect(finalJsonLog(handoff.logs).recoveredFromSequence).toBe(
     recoverLedger(ownedPrefix).lastSequence,
   );
   expect(() => recoverLedger(currentEvents)).not.toThrow();
-});
-
-test('CLI rejects unknown command flags before config or runtime construction', async () => {
-  let configReads = 0;
-  await expect(
-    main(['run', '--config', 'ignored.json', '--force'], {
-      readConfig: async () => {
-        configReads++;
-        return computeConfig();
-      },
-    }),
-  ).rejects.toThrow('run does not allow --force');
-  expect(configReads).toBe(0);
-});
-
-test('status CLI is read-only and prints the versioned JSON payload', async () => {
-  const logs: string[] = [];
-  let statusReads = 0;
-  await main(['status', '--ledger', '/virtual/ledger.jsonl', '--json'], {
-    readPineliveStatus: async ({ ledgerPath }) => {
-      statusReads++;
-      return {
-        statusVersion: 1,
-        generatedAt: new Date(0).toISOString(),
-        identity: {},
-        posture: { availability: 'not-recorded', reason: 'none' },
-        executionEligibility: { availability: 'not-recorded', reason: 'none' },
-        ownership: {
-          durableLedgerLease: { availability: 'not-recorded', reason: 'none' },
-          durableAccountClaim: { availability: 'not-recorded', reason: 'none' },
-        },
-        breaker: { availability: 'not-recorded', reason: 'none' },
-        unresolvedEffects: { availability: 'not-recorded', reason: 'none' },
-        latestObservation: { availability: 'not-recorded', reason: 'none' },
-        counters: { availability: 'not-recorded', reason: 'none' },
-        recent: [],
-        ledger: {
-          path: ledgerPath,
-          bytes: 0,
-          validBytes: 0,
-          partialTail: false,
-        },
-        warnings: [],
-      };
-    },
-    createMarketDataProvider: (() => {
-      throw new Error('status must not create a provider');
-    }) as CliDependencies['createMarketDataProvider'],
-    createTigerBroker: (() => {
-      throw new Error('status must not create a broker');
-    }) as CliDependencies['createTigerBroker'],
-    createFileExecutionLease: (() => {
-      throw new Error('status must not create a claim');
-    }) as CliDependencies['createFileExecutionLease'],
-    log: (message) => logs.push(message),
-  });
-  expect(statusReads).toBe(1);
-  expect(JSON.parse(logs[0]!)).toMatchObject({
-    statusVersion: 1,
-    ledger: { path: '/virtual/ledger.jsonl', partialTail: false },
-  });
-});
-
-test('recover CLI requires explicit confirmation before calling recovery', async () => {
-  let recoveryCalls = 0;
-  await expect(
-    main(['recover', '--ledger', 'ledger.jsonl', '--lease', 'ledger.lock'], {
-      recoverStalePineliveClaims: async () => {
-        recoveryCalls++;
-        throw new Error('must not be called');
-      },
-    }),
-  ).rejects.toThrow('requires --confirm');
-  expect(recoveryCalls).toBe(0);
-});
-
-test('mirrored startup releases its administrative mutex only after durable lease ownership', async () => {
-  const events: LedgerEventV3[] = [];
-  const harness = createCliHarness(paperConfig(), () => replayProvider(), { events });
-  const createFileExecutionLease = harness.dependencies.createFileExecutionLease!;
-  let releaseObservedDurableOwner = false;
-  const dependencies: Partial<CliDependencies> = {
-    ...harness.dependencies,
-    createFileExecutionLease: (path, options) => {
-      const lease = createFileExecutionLease(path, options);
-      if (!path.endsWith('.admin.lock')) return lease;
-      return {
-        get resource() {
-          return lease.resource;
-        },
-        get ownerId() {
-          return lease.ownerId;
-        },
-        get snapshot() {
-          return lease.snapshot;
-        },
-        acquire() {
-          return lease.acquire();
-        },
-        assertHeld() {
-          return lease.assertHeld();
-        },
-        async release() {
-          const activeLease = recoverLedger(events).activeLease;
-          expect(activeLease).toBeDefined();
-          expect(activeLease?.ownerId).toBe(options?.ownerId);
-          releaseObservedDurableOwner = true;
-          await lease.release();
-        },
-      };
-    },
-  };
-
-  await main(['run', '--config', 'durable-handoff.json'], dependencies);
-  expect(releaseObservedDurableOwner).toBe(true);
 });

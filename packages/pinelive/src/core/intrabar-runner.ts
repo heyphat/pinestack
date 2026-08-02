@@ -106,7 +106,7 @@ export interface IntrabarRunnerOptions {
   readonly security?: IntrabarSecurityConfig;
   readonly strategyIdentity?: string;
   readonly configuredBrokerClass?: IntrabarBrokerClass;
-  /** Purely compiled source/preflight supplied by the run entry gate. Both must be supplied together. */
+  /** Purely compiled source/preflight supplied by the v2 entry gate. Both must be supplied together. */
   readonly compiled?: CompiledScript;
   readonly preflight?: MagnifierPreflight;
   readonly onBinding?: (binding: IntrabarHistoricalBinding) => void | Promise<void>;
@@ -271,7 +271,7 @@ export class IntrabarRunner {
     return this.runBinding;
   }
 
-  /** Exact resolved contract reused by the execution binding; no second resolution is allowed. */
+  /** Exact resolved contract reused by v2 execution binding; no second resolution is allowed. */
   get resolvedInstrument(): ResolvedDataInstrument | undefined {
     return this.resolved;
   }
@@ -1197,7 +1197,7 @@ function decisionId(binding: IntrabarHistoricalBinding, update: IntrabarUpdateId
         : `lower-bars:${update.source.timeframe}`
       : 'closed-bars';
   return [
-    'intrabar',
+    'intrabar-v2',
     binding.authority.identity,
     encodeURIComponent(binding.chart.providerHandle),
     binding.chart.pinerTimeframe,

@@ -1,5 +1,5 @@
 import { BrokerError, submitFailureCertainty } from './broker.js';
-import type { BrokerErrorCode, ExactOrderLookupResult, ExecutionSafetyGuard } from './broker.js';
+import type { BrokerErrorCode, ExactOrderLookupResult } from './broker.js';
 import type { RunInstrumentBinding } from './binding.js';
 import {
   DEFAULT_MAX_CONSECUTIVE_EXECUTION_ERRORS,
@@ -109,8 +109,6 @@ export interface TargetSchedulerOptions {
   recovery?: LedgerRecoveryState;
   limits?: SchedulerLimits;
   lease?: ExecutionLease;
-  /** Account claim plus synchronized venue stream, rechecked before each broker effect. */
-  executionSafetyGuard?: ExecutionSafetyGuard;
   /** The shared writer already contains the active acquired lease row. */
   leaseAlreadyRecorded?: boolean;
   /**
@@ -268,7 +266,6 @@ export class TargetScheduler {
   private readonly bindingBars = new Map<string, number[]>();
   private readonly retainBars: number;
   private readonly lease?: ExecutionLease;
-  private readonly executionSafetyGuard?: ExecutionSafetyGuard;
   private readonly binding?: RunInstrumentBinding;
   private readonly decisionIdFactory?: (evaluation: Readonly<TargetEvaluation>) => string;
   private readonly recoveredLease?: LedgerRecoveryState['activeLease'];
@@ -296,7 +293,6 @@ export class TargetScheduler {
     if (!options.runId) throw new RangeError('scheduler runId must not be empty');
     this.mirror = options.mirror;
     this.lease = options.lease;
-    this.executionSafetyGuard = options.executionSafetyGuard;
     this.binding = options.binding ?? options.recovery?.binding?.binding;
     this.decisionIdFactory = options.decisionIdFactory;
     this.now = options.now ?? Date.now;
@@ -436,7 +432,6 @@ export class TargetScheduler {
       | 'recovered-final'
       | 'startup-discontinuity'
       | 'mirror-cadence'
-      | 'execution-ineligible'
       | 'invalid'
     >,
     detail?: string,
@@ -486,7 +481,7 @@ export class TargetScheduler {
     const cursor = evaluation.cursor ?? evaluation.context.barTime;
     const update = evaluation.update
       ? normalizeChartUpdateIdentity(evaluation.update)
-      : defaultCloseOnlyUpdate(evaluation, cursor);
+      : legacyCloseOnlyUpdate(evaluation, cursor);
     const normalizedEvaluation = { ...evaluation, cursor, update };
     const decisionId =
       evaluation.decisionId ??
@@ -534,7 +529,6 @@ export class TargetScheduler {
     if (recoveredLease && !lease)
       throw new Error('recovery has an active execution lease but no lease was supplied');
     let acquiredHere = false;
-    let acquisitionRecordUncertain = false;
     try {
       if (lease && !this.leaseRecorded) {
         acquiredHere = lease.snapshot == null;
@@ -546,7 +540,6 @@ export class TargetScheduler {
         if (recoveredLease && !sameRecoveredLease)
           throw new Error('supplied execution lease does not match the active recovered lease');
         if (!sameRecoveredLease) {
-          acquisitionRecordUncertain = true;
           await this.writer.append({
             recordType: 'lease',
             action: 'acquired',
@@ -554,7 +547,6 @@ export class TargetScheduler {
             leaseId: snapshot.leaseId,
             ownerId: snapshot.ownerId,
           });
-          acquisitionRecordUncertain = false;
         }
         this.leaseRecorded = true;
       }
@@ -589,7 +581,7 @@ export class TargetScheduler {
         this.bindingRecorded = true;
       }
     } catch (error) {
-      if (!acquiredHere || !lease?.snapshot || acquisitionRecordUncertain) throw error;
+      if (!acquiredHere || !lease?.snapshot) throw error;
       this.leaseRecorded = false;
       try {
         await lease.release();
@@ -603,11 +595,8 @@ export class TargetScheduler {
     }
   }
 
-  /** Journaled reset only; it never invokes a broker method or drains queued work. */
-  async resetBreaker(
-    detail = 'operator reset',
-    reason: Extract<BreakerReasonV3, 'operator' | 'venue-reconciled'> = 'operator',
-  ): Promise<CircuitBreakerSnapshot> {
+  /** Explicit journaled reset only; it never invokes a broker method or drains queued work. */
+  async resetBreaker(detail = 'operator reset'): Promise<CircuitBreakerSnapshot> {
     // Wait outside lifecycle ownership: accept() may be waiting on initialize().
     await this.intakeTail;
     return this.runLifecycle(async () => {
@@ -625,7 +614,7 @@ export class TargetScheduler {
       const reset = await this.writer.append({
         recordType: 'breaker',
         state: 'reset',
-        reason,
+        reason: 'operator',
         consecutiveErrors: 0,
         detail,
       });
@@ -814,17 +803,23 @@ export class TargetScheduler {
         const lease = this.lease;
         if (!lease?.snapshot) return;
         const snapshot = lease.snapshot;
-        // Journal and flush ownership cessation before the physical effect. If either durability
-        // step fails, retain the physical lease for exact explicit recovery.
-        await this.writer.append({
-          recordType: 'lease',
-          action: 'released',
-          resource: snapshot.resource,
-          leaseId: snapshot.leaseId,
-          ownerId: snapshot.ownerId,
-        });
-        await this.writer.flush();
-        await lease.release();
+        try {
+          // Journal ownership cessation before the physical effect; a crash remains fail-closed.
+          await this.writer.append({
+            recordType: 'lease',
+            action: 'released',
+            resource: snapshot.resource,
+            leaseId: snapshot.leaseId,
+            ownerId: snapshot.ownerId,
+          });
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          await lease.release();
+        } catch (error) {
+          errors.push(error);
+        }
         this.leaseRecorded = false;
       });
     } catch (error) {
@@ -1040,17 +1035,8 @@ export class TargetScheduler {
       item.resume?.intent.correctionSeq ?? (recoveredDecision?.logicalOrderIds.length ?? 0) + 1;
     let beforeBrokerReadCompleted = false;
     for (;;) {
-      try {
-        await this.waitForInterval();
-        await this.assertLeaseBeforeEffect(item);
-      } catch (error) {
-        if (!(error instanceof SchedulerGateError)) throw error;
-        return {
-          decisionId: item.decisionId,
-          status: 'failed',
-          reason: error.message,
-        };
-      }
+      await this.waitForInterval();
+      await this.assertLeaseBeforeEffect(item);
       if (!beforeBrokerReadCompleted) {
         await item.beforeBrokerRead?.();
         beforeBrokerReadCompleted = true;
@@ -1694,33 +1680,18 @@ export class TargetScheduler {
   }
 
   private async assertLeaseBeforeEffect(item: PendingEvaluation, submitted = false): Promise<void> {
-    if (this.lease) {
-      try {
-        await this.lease.assertHeld();
-      } catch (error) {
-        await this.latchBreaker(
-          'lease-lost',
-          item,
-          item.resume?.intent.logicalOrderId,
-          errorMessage(error),
-          submitted,
-        );
-        throw new SchedulerGateError('execution lease was lost');
-      }
-    }
-    if (this.executionSafetyGuard) {
-      try {
-        await this.executionSafetyGuard.assertExecutionSafe();
-      } catch (error) {
-        await this.latchBreaker(
-          'execution-interlock-lost',
-          item,
-          item.resume?.intent.logicalOrderId,
-          errorMessage(error),
-          submitted,
-        );
-        throw new SchedulerGateError('execution safety interlock was lost');
-      }
+    if (!this.lease) return;
+    try {
+      await this.lease.assertHeld();
+    } catch (error) {
+      await this.latchBreaker(
+        'lease-lost',
+        item,
+        item.resume?.intent.logicalOrderId,
+        errorMessage(error),
+        submitted,
+      );
+      throw new SchedulerGateError('execution lease was lost');
     }
   }
 
@@ -2346,7 +2317,7 @@ function normalizeChartUpdateIdentity(
   return structuredClone(update);
 }
 
-function defaultCloseOnlyUpdate(
+function legacyCloseOnlyUpdate(
   evaluation: TargetEvaluation,
   cursor: LedgerCursor,
 ): ChartUpdateIdentityV3 {

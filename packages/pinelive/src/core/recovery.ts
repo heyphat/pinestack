@@ -1,4 +1,5 @@
 import type {
+  AccountClaimEventV3,
   AuthorityEventV3,
   BindingEventV3,
   BreakerEventV3,
@@ -7,6 +8,7 @@ import type {
   EvaluationAcceptedEventV3,
   EvaluationCompletedEventV3,
   EvaluationSkippedEventV3,
+  ExecutionEligibilityEventV3,
   LedgerCursor,
   LedgerError,
   LedgerEventV3,
@@ -110,7 +112,7 @@ export interface LedgerRecoveryState {
   attemptsInLastMinute: number;
   consecutiveErrors: number;
   breaker: RecoveredBreaker;
-  /** Newest durable operator reset, used to prove it followed position uncertainty. */
+  /** Newest durable authorized reset, used to prove it followed position uncertainty. */
   latestBreakerResetSequence?: number;
   unresolvedIntents: ReadonlyMap<string, RecoveredIntent>;
   /** Durable broker-client-id to logical-order mapping, including completed orders. */
@@ -125,6 +127,10 @@ export interface LedgerRecoveryState {
   /** True when restart may be resuming an operation whose exact start time is not durable. */
   hasOpenAcceptedEvaluations?: boolean;
   activeLease?: LeaseEventV3;
+  activeAccountClaim?: AccountClaimEventV3;
+  /** Durable proof that physical claim teardown began but was not yet confirmed complete. */
+  accountClaimReleaseStarted?: AccountClaimEventV3;
+  executionEligibility?: ExecutionEligibilityEventV3;
 }
 
 export interface RecoverLedgerOptions {
@@ -163,7 +169,7 @@ export function logicalClientId(decisionId: string, correctionSeq: number): stri
 }
 
 /** Runtime validation used before any event can influence restart behavior. */
-export function assertLedgerEventV3(
+export function assertLedgerEvent(
   value: unknown,
   eventIndex?: number,
 ): asserts value is LedgerEventV3 {
@@ -177,7 +183,7 @@ export function assertLedgerEventV3(
   nonEmptyString(event.runId, 'runId', fail);
   nonEmptyString(event.executionId, 'executionId', fail);
   const recordedAt = nonEmptyString(event.recordedAt, 'recordedAt', fail);
-  if (!Number.isFinite(Date.parse(recordedAt))) fail('recordedAt must be an ISO-compatible time');
+  if (!Number.isFinite(Date.parse(recordedAt))) fail('recordedAt must be a valid ISO timestamp');
 
   switch (event.recordType) {
     case 'authority': {
@@ -186,25 +192,21 @@ export function assertLedgerEventV3(
     }
     case 'binding': {
       const binding = objectValue(event.binding, 'binding', fail);
+      if (binding.bindingVersion !== 2) fail('binding.bindingVersion must be 2');
       const id = nonEmptyString(binding.id, 'binding.id', fail);
-      const fingerprint = nonEmptyString(binding.fingerprint, 'binding.fingerprint', fail);
-      if (binding.bindingVersion === 2) {
-        if (!/^binding-v2-[a-f0-9]{64}$/.test(id))
-          fail('v2 binding.id must be a SHA-256 binding identity');
-        const authority = objectValue(binding.authority, 'binding.authority', fail);
-        if (authority.algorithm !== 'sha256') fail('binding authority algorithm must be sha256');
-        const authorityIdentity = nonEmptyString(
-          authority.identity,
-          'binding.authority.identity',
-          fail,
-        );
-        if (!/^sha256-[a-f0-9]{64}$/.test(authorityIdentity))
-          fail('binding authority identity must be SHA-256');
-        objectValue(authority.prepared, 'binding.authority.prepared', fail);
-      } else {
-        if (id !== fingerprint) fail('legacy binding.id must match binding.fingerprint');
-        if (binding.authority != null) fail('legacy binding cannot contain prepared authority');
-      }
+      if (!/^binding-v2-[a-f0-9]{64}$/.test(id))
+        fail('binding.id must be a SHA-256 binding identity');
+      nonEmptyString(binding.fingerprint, 'binding.fingerprint', fail);
+      const authority = objectValue(binding.authority, 'binding.authority', fail);
+      if (authority.algorithm !== 'sha256') fail('binding authority algorithm must be sha256');
+      const authorityIdentity = nonEmptyString(
+        authority.identity,
+        'binding.authority.identity',
+        fail,
+      );
+      if (!/^sha256-[a-f0-9]{64}$/.test(authorityIdentity))
+        fail('binding authority identity must be SHA-256');
+      objectValue(authority.prepared, 'binding.authority.prepared', fail);
       nonEmptyString(binding.strategySymbol, 'binding.strategySymbol', fail);
       nonEmptyString(binding.providerId, 'binding.providerId', fail);
       nonEmptyString(binding.providerHandle, 'binding.providerHandle', fail);
@@ -239,6 +241,7 @@ export function assertLedgerEventV3(
           'recovered-final',
           'startup-discontinuity',
           'mirror-cadence',
+          'execution-ineligible',
         ].includes(String(event.reason))
       )
         fail('invalid evaluation skip reason');
@@ -327,18 +330,27 @@ export function assertLedgerEventV3(
           'intent-limit',
           'ledger-failure',
           'lease-lost',
+          'execution-interlock-lost',
           'position-unknown',
           'submission-unknown',
           'recovery-unresolved',
           'target-limit',
+          'venue-reconciled',
           'operator',
         ].includes(String(event.reason))
       )
         fail('invalid breaker reason');
-      if (event.state === 'reset' && event.reason !== 'operator')
-        fail('breaker reset reason must be operator');
-      if (event.state === 'latched' && event.reason === 'operator')
-        fail('operator reason is only valid for breaker reset');
+      if (
+        event.state === 'reset' &&
+        event.reason !== 'operator' &&
+        event.reason !== 'venue-reconciled'
+      )
+        fail('breaker reset reason must be operator or venue-reconciled');
+      if (
+        event.state === 'latched' &&
+        (event.reason === 'operator' || event.reason === 'venue-reconciled')
+      )
+        fail('reset-only reason is invalid for a latched breaker');
       nonNegativeInteger(event.consecutiveErrors, 'consecutiveErrors', fail);
       optionalString(event.decisionId, 'decisionId', fail);
       optionalString(event.logicalOrderId, 'logicalOrderId', fail);
@@ -388,8 +400,41 @@ export function assertLedgerEventV3(
       nonEmptyString(event.ownerId, 'ownerId', fail);
       optionalString(event.detail, 'detail', fail);
       break;
+    case 'account-claim':
+      if (!['acquired', 'release-started', 'released', 'lost'].includes(String(event.action)))
+        fail('invalid account claim action');
+      if (
+        !/^sha256-[a-f0-9]{64}$/.test(nonEmptyString(event.resourceDigest, 'resourceDigest', fail))
+      )
+        fail('account claim resourceDigest must be SHA-256');
+      nonEmptyString(event.claimId, 'claimId', fail);
+      nonEmptyString(event.ownerId, 'ownerId', fail);
+      optionalString(event.detail, 'detail', fail);
+      break;
+    case 'execution-eligibility': {
+      if (!['live', 'monitor', 'compute-only'].includes(String(event.posture)))
+        fail('invalid execution posture');
+      if (!['enabled', 'disabled-by-posture', 'blocked'].includes(String(event.state)))
+        fail('invalid execution eligibility state');
+      if (!['held', 'not-applicable', 'not-held'].includes(String(event.accountClaim)))
+        fail('invalid execution eligibility account claim');
+      if (!['synchronized', 'not-applicable', 'blocked'].includes(String(event.synchronization)))
+        fail('invalid execution eligibility synchronization');
+      const reasons = Array.isArray(event.reasons)
+        ? event.reasons
+        : fail('execution eligibility reasons must be an array');
+      for (const reason of reasons as unknown[])
+        nonEmptyString(reason, 'execution eligibility reason', fail);
+      if (event.state === 'enabled') {
+        if (event.posture !== 'live') fail('enabled execution requires live posture');
+        if (reasons.length > 0) fail('enabled execution cannot contain blocking reasons');
+        if (event.accountClaim === 'not-held') fail('enabled execution cannot omit account claim');
+        if (event.synchronization === 'blocked') fail('enabled execution requires synchronization');
+      }
+      break;
+    }
     default:
-      fail(`unknown schema-v3 recordType ${String(event.recordType)}`);
+      fail(`unknown ledger recordType ${String(event.recordType)}`);
   }
 }
 
@@ -406,17 +451,9 @@ export function recoverLedger(
     throw new RangeError('expectedFirstSequence must be a positive safe integer');
 
   const events: LedgerEventV3[] = [];
-  let seenV3 = false;
   for (let index = 0; index < records.length; index++) {
     const raw = records[index];
-    if (!isObject(raw)) throw new LedgerRecoveryError('record must be an object', index);
-    if (raw.schemaVersion === 1 || raw.schemaVersion === 2) {
-      if (seenV3)
-        throw new LedgerRecoveryError('legacy event cannot follow schema-v3 events', index);
-      continue;
-    }
-    assertLedgerEventV3(raw, index);
-    seenV3 = true;
+    assertLedgerEvent(raw, index);
     events.push(raw);
   }
 
@@ -443,6 +480,9 @@ export function recoverLedger(
   let breaker: RecoveredBreaker = { latched: false };
   let latestBreakerResetSequence: number | undefined;
   let activeLease: LeaseEventV3 | undefined;
+  let activeAccountClaim: AccountClaimEventV3 | undefined;
+  let accountClaimReleaseStarted: AccountClaimEventV3 | undefined;
+  let executionEligibility: ExecutionEligibilityEventV3 | undefined;
 
   for (let index = 0; index < events.length; index++) {
     const event = events[index]!;
@@ -459,12 +499,12 @@ export function recoverLedger(
       runId = event.runId;
       executionId = event.executionId;
     } else if (event.runId !== runId || event.executionId !== executionId) {
-      fail('runId/executionId changed within one v3 stream');
+      fail('runId/executionId changed within one ledger');
     }
 
     if (event.recordType === 'authority') {
       if (authority) fail('authority event appeared more than once');
-      if (binding || decisions.size > 0 || activeLease)
+      if (binding || decisions.size > 0 || activeLease || activeAccountClaim)
         fail('authority event appeared after runtime ownership or evaluation');
       authority = event;
       continue;
@@ -475,7 +515,7 @@ export function recoverLedger(
       if (decisions.size > 0) fail('binding event appeared after evaluation');
       if (authority) {
         if (event.binding.bindingVersion !== 2 || !event.binding.authority)
-          fail('authority event requires a v2 binding authority extension');
+          fail('authority event requires binding authority');
         if (canonical(event.binding.authority) !== canonical(authority.authority))
           fail('binding prepared authority does not match authority event');
       }
@@ -486,7 +526,13 @@ export function recoverLedger(
     if (decisionTypes.has(event.recordType)) {
       const decisionEvent = event as Exclude<
         LedgerEventV3,
-        AuthorityEventV3 | BindingEventV3 | BreakerEventV3 | RecoveryEventV3 | LeaseEventV3
+        | AuthorityEventV3
+        | BindingEventV3
+        | BreakerEventV3
+        | RecoveryEventV3
+        | LeaseEventV3
+        | AccountClaimEventV3
+        | ExecutionEligibilityEventV3
       >;
       if (
         binding &&
@@ -815,14 +861,53 @@ export function recoverLedger(
             activeLease.ownerId !== event.ownerId
           )
             fail(`${event.action} lease does not match active lease`);
+          if (activeAccountClaim)
+            fail(`${event.action} ledger lease occurred while an account claim is active`);
           activeLease = undefined;
         }
+        break;
+      case 'account-claim':
+        if (event.action === 'acquired') {
+          if (!activeLease) fail('account claim acquired without an active ledger lease');
+          if (event.ownerId !== activeLease?.ownerId)
+            fail('account claim owner does not match the active ledger lease owner');
+          if (activeAccountClaim)
+            fail('account claim acquired while another account claim is active');
+          activeAccountClaim = event;
+          accountClaimReleaseStarted = undefined;
+        } else {
+          if (
+            !activeAccountClaim ||
+            activeAccountClaim.resourceDigest !== event.resourceDigest ||
+            activeAccountClaim.claimId !== event.claimId ||
+            activeAccountClaim.ownerId !== event.ownerId
+          )
+            fail(`${event.action} account claim does not match active account claim`);
+          if (event.action === 'release-started') {
+            if (accountClaimReleaseStarted) fail('account claim release started more than once');
+            accountClaimReleaseStarted = event;
+          } else {
+            activeAccountClaim = undefined;
+            accountClaimReleaseStarted = undefined;
+          }
+        }
+        break;
+      case 'execution-eligibility':
+        if (!binding) fail('execution eligibility appeared before binding');
+        if (event.state === 'enabled') {
+          if (!activeLease) fail('execution enabled without an active ledger lease');
+          if (event.accountClaim === 'held' && !activeAccountClaim)
+            fail('execution enabled without its durable account claim');
+          if (accountClaimReleaseStarted)
+            fail('execution enabled after account claim release started');
+        }
+        executionEligibility = event;
         break;
     }
   }
 
   if (options.requireBinding && events.length > 0 && !binding)
-    throw new LedgerRecoveryError('schema-v3 stream has no binding event');
+    throw new LedgerRecoveryError('ledger stream has no binding event');
 
   // An attempt without a durable completion could have reached the broker even when the final
   // result row is absent. Recovery therefore always starts latched in that state.
@@ -896,10 +981,12 @@ export function recoverLedger(
     lastCompletedEvaluationAt,
     hasOpenAcceptedEvaluations: openAccepted.length > 0,
     activeLease,
+    activeAccountClaim,
+    accountClaimReleaseStarted,
+    executionEligibility,
   };
 }
 
-export const recoverLedgerV3 = recoverLedger;
 export const parseRecoveryState = recoverLedger;
 
 function chartUpdateFromEvent(event: DecisionEventV3): RecoveredChartUpdate {

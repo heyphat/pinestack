@@ -9,10 +9,17 @@ import {
 } from '@heyphat/pinery';
 import { preflightCompiledBarMagnifier, type MagnifierPreflight } from '@heyphat/pinerun';
 import { AlertDispatcher, type AlertChannel } from './alerts.js';
-import type { Broker } from './broker.js';
 import {
-  createV2ComputeInstrumentBinding,
-  createV2RunInstrumentBinding,
+  isProductionSafetyBroker,
+  type AccountSynchronizationSession,
+  type Broker,
+  type CanonicalAccountIdentity,
+  type ExecutionSafetyGuard,
+  type ProductionSafetyBroker,
+} from './broker.js';
+import {
+  createComputeInstrumentBinding,
+  createRunInstrumentBinding,
   type RunInstrumentBinding,
 } from './binding.js';
 import {
@@ -23,10 +30,10 @@ import {
   DEFAULT_MIN_RECONCILE_INTERVAL_MS,
   normalizeRunConfig,
   validateCompiledIntrabarConfig,
-  type NormalizedComputeOnlyV2RunConfig,
+  type NormalizedComputeOnlyRunConfig,
   type NormalizedMirroredExecutionConfig,
-  type NormalizedMirroredV2RunConfig,
-  type NormalizedV2RunConfig,
+  type NormalizedMirroredRunConfig,
+  type NormalizedRunConfig,
 } from './config.js';
 import {
   assertPreparedAuthorityEnvelope,
@@ -43,8 +50,11 @@ import {
 import type { ExecutionLease, ExecutionLeaseSnapshot } from './lease.js';
 import {
   SequencedLedger,
+  type BreakerReasonV3,
   type ChartUpdateIdentityV3,
+  type EffectiveRunPosture,
   type EvaluationSkipReasonV3,
+  type ExecutionEligibilityState,
   type LedgerEventV3,
   type LedgerSink,
   type LeaseEventV3,
@@ -60,32 +70,32 @@ import {
 import type { Account, Position } from './types.js';
 import { isMarkableBroker } from '../brokers/paper.js';
 
-export interface PreparedIntrabarRun<C extends NormalizedV2RunConfig = NormalizedV2RunConfig> {
+export interface PreparedIntrabarRun<C extends NormalizedRunConfig = NormalizedRunConfig> {
   readonly config: C;
   readonly source: string;
   readonly compiled: CompiledScript;
   readonly preflight: MagnifierPreflight;
 }
 
-export type PreparedComputeOnlyIntrabarRun = PreparedIntrabarRun<NormalizedComputeOnlyV2RunConfig>;
-export type PreparedMirroredIntrabarRun = PreparedIntrabarRun<NormalizedMirroredV2RunConfig>;
+export type PreparedComputeOnlyIntrabarRun = PreparedIntrabarRun<NormalizedComputeOnlyRunConfig>;
+export type PreparedMirroredIntrabarRun = PreparedIntrabarRun<NormalizedMirroredRunConfig>;
 
 const preparedRuns = new WeakSet<object>();
 
 /**
- * Complete pure v2 gate. It reads no file, provider, profile, environment variable, SDK, broker,
- * account, ledger, or lease. Runtime factories are intentionally absent from this contract.
+ * Complete pure config gate. It reads no file, provider, profile, environment variable, SDK,
+ * broker, account, ledger, or lease. Runtime factories are intentionally absent from this contract.
  */
 export function prepareIntrabarRun(
   configValue: {
-    readonly configVersion: 2;
+    readonly configVersion: 3;
     readonly execution: { readonly kind: 'compute-only' };
   },
   source: string,
 ): PreparedComputeOnlyIntrabarRun;
 export function prepareIntrabarRun(
   configValue: {
-    readonly configVersion: 2;
+    readonly configVersion: 3;
     readonly execution: { readonly kind: 'mirrored' };
   },
   source: string,
@@ -93,12 +103,7 @@ export function prepareIntrabarRun(
 export function prepareIntrabarRun(configValue: unknown, source: string): PreparedIntrabarRun;
 export function prepareIntrabarRun(configValue: unknown, source: string): PreparedIntrabarRun {
   const config = normalizeRunConfig(configValue);
-  if (config.configVersion !== 2) throw new Error('prepareIntrabarRun requires configVersion 2');
-  if (config.execution.kind === 'mirrored' && config.execution.broker.id === 'tiger') {
-    throw new Error(
-      'Tiger v2 broker execution is unavailable until the credentialed release gate passes',
-    );
-  }
+  if (config.configVersion !== 3) throw new Error('prepareIntrabarRun requires configVersion 3');
   if (typeof source !== 'string' || source.trim().length === 0)
     throw new Error('Pine source must be a nonblank string');
 
@@ -125,14 +130,14 @@ export function prepareIntrabarRun(configValue: unknown, source: string): Prepar
     config.execution.reconcileOnStart
   ) {
     throw new Error(
-      'v2 startup reconciliation is unavailable; execution requires a new authoritative final',
+      'startup reconciliation is unavailable; execution requires a new authoritative final',
     );
   }
 
   const parsed = parseCanonicalTimeframeExact(config.timeframe);
   if (parsed.kind !== 'ok' || parsed.value.domain !== 'fixed') {
     throw new Error(
-      parsed.kind === 'ok' ? 'v2 live chart timeframe must have a fixed duration' : parsed.message,
+      parsed.kind === 'ok' ? 'live chart timeframe must have a fixed duration' : parsed.message,
     );
   }
   const pineTimeframe = canonicalTimeframeToPineExact(parsed.value.canonical);
@@ -146,7 +151,7 @@ export function prepareIntrabarRun(configValue: unknown, source: string): Prepar
   const normalized = Object.freeze({
     ...config,
     symbol: runSymbol,
-  }) as NormalizedV2RunConfig;
+  }) as NormalizedRunConfig;
   const prepared = Object.freeze({ config: normalized, source, compiled, preflight });
   preparedRuns.add(prepared);
   return prepared;
@@ -177,6 +182,20 @@ export interface IntrabarBrokerFactoryContext {
 export type IntrabarBrokerFactory = (
   context: IntrabarBrokerFactoryContext,
 ) => Broker | Promise<Broker>;
+
+export interface AccountInstrumentClaimFactoryContext {
+  readonly identity: CanonicalAccountIdentity;
+  readonly executionSymbol: string;
+  readonly authority: PreparedIntrabarAuthorityEnvelope;
+  /** Must bind the specific account claim to the already-acquired execution-lease owner. */
+  readonly ownerId: string;
+  readonly signal?: AbortSignal;
+}
+
+/** Same-host cooperative claim factory. Implementations must never steal an existing claim. */
+export type AccountInstrumentClaimFactory = (
+  context: AccountInstrumentClaimFactoryContext,
+) => ExecutionLease | Promise<ExecutionLease>;
 
 interface IntrabarServerCallbacks {
   readonly signal?: AbortSignal;
@@ -216,7 +235,6 @@ export type ComputeOnlyIntrabarServerOptions = (DirectRuntimeOptions | ManagedRu
   readonly prepared: PreparedComputeOnlyIntrabarRun;
   /** Compute-only ownership cannot structurally contain any broker or broker factory. */
   readonly brokerFactory?: never;
-  readonly createBroker?: never;
   readonly lease?: never;
 };
 
@@ -224,6 +242,8 @@ export type MirroredIntrabarServerOptions =
   | (DirectRuntimeOptions & {
       readonly prepared: PreparedMirroredIntrabarRun;
       readonly brokerFactory: IntrabarBrokerFactory;
+      /** Required for armed Tiger; ignored for Paper and unarmed monitor posture. */
+      readonly accountClaimFactory?: AccountInstrumentClaimFactory;
       readonly lease: ExecutionLease;
       /**
        * Refresh durable recovery while the direct lease is held. File-backed callers should
@@ -231,15 +251,19 @@ export type MirroredIntrabarServerOptions =
        */
       readonly refreshRecoveryAfterLease?: () =>
         IntrabarPersistenceRead | Promise<IntrabarPersistenceRead>;
-      readonly createBroker?: never;
+      /**
+       * Releases the startup/recovery mutex only after physical execution ownership has a durable
+       * matching lease event. File-backed hosts should pair this with refreshRecoveryAfterLease.
+       */
+      readonly releaseAdministrativeLeaseAfterOwnershipRecorded?: () => void | Promise<void>;
     })
   | (ManagedRuntimeOptions & {
       readonly prepared: PreparedMirroredIntrabarRun;
-      /** @deprecated Legacy adapter alias retained only for the existing uncommitted CLI. */
-      readonly createBroker: IntrabarBrokerFactory;
-      readonly brokerFactory?: never;
+      readonly brokerFactory: IntrabarBrokerFactory;
+      readonly accountClaimFactory?: AccountInstrumentClaimFactory;
       readonly lease?: never;
       readonly refreshRecoveryAfterLease?: never;
+      readonly releaseAdministrativeLeaseAfterOwnershipRecorded?: never;
     });
 
 export type IntrabarServerOptions =
@@ -271,17 +295,19 @@ export interface ComputeOnlyIntrabarServerResult extends IntrabarServerResultBas
   readonly executionSafe?: never;
 }
 
-export type MirroredIntrabarServerResult = IntrabarServerResultBase &
-  (
+export type MirroredIntrabarServerResult = IntrabarServerResultBase & {
+  readonly mode: 'mirrored';
+  readonly posture: Exclude<EffectiveRunPosture, 'compute-only'>;
+  readonly executionEligibility: ExecutionEligibilityState;
+  readonly eligibilityReasons: readonly string[];
+} & (
     | {
-        readonly mode: 'mirrored';
         readonly executionSafe: true;
         readonly finalPosition: Readonly<Position>;
         readonly finalAccount: Readonly<Account>;
         readonly unsafeReason?: never;
       }
     | {
-        readonly mode: 'mirrored';
         readonly executionSafe: false;
         readonly unsafeReason: string;
         readonly finalPosition?: never;
@@ -292,7 +318,7 @@ export type MirroredIntrabarServerResult = IntrabarServerResultBase &
 export type IntrabarServerResult = ComputeOnlyIntrabarServerResult | MirroredIntrabarServerResult;
 
 /**
- * Real v2 finite-history + live runtime. No branch calls flatten. Exact preparation and authority
+ * Finite-history + live runtime. No branch calls flatten. Exact preparation and authority
  * comparison precede mirrored ownership; an acquired lease row precedes the lazy broker factory.
  */
 export function runIntrabarServer(
@@ -344,16 +370,39 @@ export async function runIntrabarServer(
           }
         ).refreshRecoveryAfterLease
       : undefined;
+  const releaseAdministrativeLeaseAfterOwnershipRecorded =
+    !managed && mirrored
+      ? (
+          options as DirectRuntimeOptions & {
+            readonly releaseAdministrativeLeaseAfterOwnershipRecorded?: () => void | Promise<void>;
+          }
+        ).releaseAdministrativeLeaseAfterOwnershipRecorded
+      : undefined;
 
   let data: MarketDataProvider | undefined;
   let runner: IntrabarRunner | undefined;
   let lease: ExecutionLease | undefined;
   let leaseRecorded = false;
+  let leaseAcquisitionRecordUncertain = false;
   let rawSink: LedgerSink | undefined;
   let writer: SequencedLedger | undefined;
   let broker: Broker | undefined;
+  let productionBroker: ProductionSafetyBroker | undefined;
+  let synchronizationSession: AccountSynchronizationSession | undefined;
+  let accountClaim: ExecutionLease | undefined;
+  let accountClaimRecorded = false;
+  let accountClaimAcquisitionRecordUncertain = false;
+  let executionSafetyGuard: ExecutionSafetyGuard | undefined;
   let scheduler: TargetScheduler | undefined;
   let computeJournal: ComputeDecisionJournal | undefined;
+  let executionEnabled = false;
+  const posture: Exclude<EffectiveRunPosture, 'compute-only'> =
+    mirrored && config.execution.broker.id === 'tiger' && !config.execution.armed
+      ? 'monitor'
+      : 'live';
+  let executionEligibility: ExecutionEligibilityState = mirrored ? 'blocked' : 'enabled';
+  let eligibilityReasons: string[] = [];
+  let eligibilityRecorded = false;
   let binding: RunInstrumentBinding | undefined;
   let historicalBinding: IntrabarHistoricalBinding | undefined;
   let recovery: LedgerRecoveryState | undefined;
@@ -394,6 +443,13 @@ export async function runIntrabarServer(
 
         if (!mirrored) {
           await computeJournal!.journal(target, computeSkipReason(evaluation), evaluation.reason);
+        } else if (!executionEnabled) {
+          const detail = eligibilityReasons.join('; ') || 'broker execution is not enabled';
+          if (scheduler) {
+            scheduled = await scheduler.journalSkipped(target, 'execution-ineligible', detail);
+          } else {
+            await computeJournal!.journal(target, 'execution-ineligible', detail);
+          }
         } else if (!evaluation.executable) {
           scheduled = await scheduler!.journalSkipped(
             target,
@@ -490,7 +546,7 @@ export async function runIntrabarServer(
     let recoveredMaterial = 0;
     if (managed) {
       const firstRead = await options.persistence.read();
-      recovery = recoverForV2(firstRead.records);
+      recovery = recoverRuntime(firstRead.records);
       recoveredMaterial = recoveryMaterialCount(firstRead);
       await assertRecoveredAuthority(recovery, historicalBinding.authority, recoveredMaterial > 0);
       lease = await options.persistence.createLease(recovery);
@@ -516,7 +572,7 @@ export async function runIntrabarServer(
 
     if (managed) {
       ownedRead = await options.persistence.read();
-      recovery = recoverForV2(ownedRead.records);
+      recovery = recoverRuntime(ownedRead.records);
       recoveredMaterial = recoveryMaterialCount(ownedRead);
       await assertRecoveredAuthority(recovery, historicalBinding.authority, recoveredMaterial > 0);
       assertRecoveryCanBind(recovery);
@@ -526,7 +582,7 @@ export async function runIntrabarServer(
       rawSink = await options.persistence.createLedger(lease!, ownedRead);
     } else if (mirrored && refreshRecoveryAfterLease) {
       ownedRead = await refreshRecoveryAfterLease();
-      recovery = recoverForV2(ownedRead.records);
+      recovery = recoverRuntime(ownedRead.records);
       recoveredMaterial = recoveryMaterialCount(ownedRead);
       await assertRecoveredAuthority(recovery, historicalBinding.authority, recoveredMaterial > 0);
       assertRecoveryCanBind(recovery);
@@ -565,6 +621,7 @@ export async function runIntrabarServer(
 
     if (lease && leaseSnapshot) {
       if (!recovery.activeLease) {
+        leaseAcquisitionRecordUncertain = true;
         await writer.append({
           recordType: 'lease',
           action: 'acquired',
@@ -572,8 +629,15 @@ export async function runIntrabarServer(
           leaseId: leaseSnapshot.leaseId,
           ownerId: leaseSnapshot.ownerId,
         });
+        leaseAcquisitionRecordUncertain = false;
       }
       leaseRecorded = true;
+      if (releaseAdministrativeLeaseAfterOwnershipRecorded) {
+        // Stable storage must prove the exact physical owner before the administrative mutex can
+        // be handed off. A crash earlier leaves both same-owner artifacts for explicit recovery.
+        await writer.flush();
+        await releaseAdministrativeLeaseAfterOwnershipRecorded();
+      }
     }
 
     if (ownedRead?.partialFinalLine) {
@@ -588,7 +652,7 @@ export async function runIntrabarServer(
     }
 
     if (!mirrored) {
-      binding = await createV2ComputeInstrumentBinding(data, resolved, historicalBinding.authority);
+      binding = await createComputeInstrumentBinding(data, resolved, historicalBinding.authority);
       await assertRecoveredBinding(recovery, binding);
       computeJournal = new ComputeDecisionJournal({
         writer,
@@ -602,9 +666,7 @@ export async function runIntrabarServer(
     } else {
       if (!lease || !lease.snapshot || !leaseRecorded)
         throw new Error('mirrored broker construction requires a durable acquired lease');
-      const brokerFactory: IntrabarBrokerFactory | undefined = managed
-        ? options.createBroker
-        : options.brokerFactory;
+      const brokerFactory = (options as MirroredIntrabarServerOptions).brokerFactory;
       if (!brokerFactory)
         throw new Error('mirrored intrabar runtime requires a lazy broker factory');
       // This is intentionally the first broker ownership point.
@@ -619,7 +681,7 @@ export async function runIntrabarServer(
       }
       await broker.connect?.(options.signal);
       const instrument = await broker.instrument(resolved.venueSymbol, options.signal);
-      binding = await createV2RunInstrumentBinding(
+      binding = await createRunInstrumentBinding(
         data,
         resolved,
         broker,
@@ -634,25 +696,227 @@ export async function runIntrabarServer(
       // Full route, policy, and economics comparison precedes mark, position read, or submit.
       await assertRecoveredBinding(recovery, binding);
 
-      const mirror = new PositionMirror(broker, instrument, {
-        transientRetries: 0,
-        orderType: config.execution.order.type,
-        ...(config.execution.order.type === 'limit'
-          ? { limitOffsetTicks: config.execution.order.limitOffsetTicks }
-          : {}),
+      const ensureScheduler = async (): Promise<TargetScheduler> => {
+        if (scheduler) return scheduler;
+        const runtimeMirror = new PositionMirror(broker!, instrument, {
+          transientRetries: 0,
+          orderType: config.execution.kind === 'mirrored' ? config.execution.order.type : 'market',
+          ...(config.execution.kind === 'mirrored' && config.execution.order.type === 'limit'
+            ? { limitOffsetTicks: config.execution.order.limitOffsetTicks }
+            : {}),
+        });
+        scheduler = new TargetScheduler({
+          mirror: runtimeMirror,
+          ledger: writer!,
+          runId: namespace.runId,
+          executionId: namespace.executionId,
+          binding: binding!,
+          recovery,
+          lease,
+          executionSafetyGuard,
+          leaseAlreadyRecorded: true,
+          limits: schedulerLimits(),
+        });
+        await scheduler.initialize();
+        return scheduler;
+      };
+
+      if (broker.id === 'tiger') {
+        if (posture === 'monitor') {
+          executionEligibility = 'disabled-by-posture';
+          eligibilityReasons = [
+            'Tiger execution is not armed; running broker-connected monitor posture',
+          ];
+        } else if (!isProductionSafetyBroker(broker)) {
+          executionEligibility = 'blocked';
+          eligibilityReasons = [
+            'Tiger broker does not implement the production synchronization contract',
+          ];
+        } else {
+          productionBroker = broker;
+          const accountClaimFactory = (options as MirroredIntrabarServerOptions)
+            .accountClaimFactory;
+          if (!accountClaimFactory) {
+            eligibilityReasons.push('armed Tiger requires an account/instrument claim factory');
+          } else {
+            const identity = await productionBroker.getCanonicalAccountIdentity(options.signal);
+            const claim = await accountClaimFactory({
+              identity,
+              executionSymbol: binding.executionSymbol,
+              authority: historicalBinding.authority,
+              ownerId: leaseSnapshot!.ownerId,
+              signal: options.signal,
+            });
+            accountClaim = claim;
+            try {
+              const claimSnapshot = await claim.acquire();
+              assertAccountClaimSnapshot(claimSnapshot, leaseSnapshot!.ownerId);
+              accountClaimAcquisitionRecordUncertain = true;
+              await writer.append({
+                recordType: 'account-claim',
+                action: 'acquired',
+                resourceDigest: claimSnapshot.resource,
+                claimId: claimSnapshot.leaseId,
+                ownerId: claimSnapshot.ownerId,
+              });
+              accountClaimAcquisitionRecordUncertain = false;
+              accountClaimRecorded = true;
+            } catch (error) {
+              eligibilityReasons.push(
+                `account/instrument claim unavailable: ${errorMessage(error)}`,
+              );
+            }
+          }
+
+          if (accountClaimRecorded) {
+            const synchronization = await productionBroker.synchronizeAccount(
+              binding.executionSymbol,
+              options.signal,
+            );
+            if (synchronization.status === 'blocked') {
+              eligibilityReasons.push(...synchronization.reasons);
+            } else {
+              synchronizationSession = synchronization.session;
+              executionSafetyGuard = createExecutionSafetyGuard(
+                lease,
+                accountClaim!,
+                synchronization.session,
+              );
+              const openOrderCount = synchronization.session.snapshot.openOrders.length;
+              if (openOrderCount > 0) {
+                eligibilityReasons.push(
+                  `synchronized account has ${openOrderCount} working or uncertain order(s)`,
+                );
+              }
+
+              const recoveredUnresolvedIds = [...recovery.unresolvedIntents.keys()].sort();
+              const resumedReconciliationPosition =
+                recoveredUnresolvedIds.length === 0
+                  ? venueReconciliationResumePosition(recovery)
+                  : undefined;
+              let resumedReconciliationPositionMatches = false;
+              if (resumedReconciliationPosition !== undefined) {
+                if (
+                  synchronization.session.snapshot.position.qty === resumedReconciliationPosition
+                ) {
+                  resumedReconciliationPositionMatches = true;
+                  await ensureScheduler();
+                } else {
+                  eligibilityReasons.push(
+                    'synchronized position does not match the durable terminal reconciliation',
+                  );
+                }
+              }
+
+              if (openOrderCount === 0 && recoveredUnresolvedIds.length > 0) {
+                const recoveryScheduler = await ensureScheduler();
+                for (const logicalOrderId of recoveredUnresolvedIds) {
+                  try {
+                    await executionSafetyGuard.assertExecutionSafe(options.signal);
+                    const resolution = await recoveryScheduler.resolveUnknownSubmission(
+                      logicalOrderId,
+                      options.signal,
+                    );
+                    await executionSafetyGuard.assertExecutionSafe(options.signal);
+                    if (!resolution.resolved) {
+                      eligibilityReasons.push(
+                        `durable order ${logicalOrderId} remains unresolved (exact lookup: ${resolution.status})`,
+                      );
+                    }
+                  } catch (error) {
+                    eligibilityReasons.push(
+                      `durable order ${logicalOrderId} reconciliation failed: ${errorMessage(error)}`,
+                    );
+                  }
+                }
+              }
+
+              const reconciledState = scheduler?.state;
+              if (
+                openOrderCount === 0 &&
+                reconciledState?.unresolvedLogicalOrderIds.length === 0 &&
+                reconciledState.breaker.latched &&
+                isVenueReconciliableBreaker(reconciledState.breaker.reason) &&
+                (recoveredUnresolvedIds.length > 0 || resumedReconciliationPositionMatches)
+              ) {
+                await executionSafetyGuard.assertExecutionSafe(options.signal);
+                await scheduler!.resetBreaker(
+                  resumedReconciliationPositionMatches
+                    ? 'resumed authoritative synchronized startup reconciliation'
+                    : 'authoritative synchronized startup reconciliation',
+                  'venue-reconciled',
+                );
+                await executionSafetyGuard.assertExecutionSafe(options.signal);
+              }
+
+              const safetyState = scheduler?.state;
+              const unresolvedAfter =
+                safetyState?.unresolvedLogicalOrderIds ?? recoveredUnresolvedIds;
+              if (unresolvedAfter.length > 0 && eligibilityReasons.length === 0) {
+                eligibilityReasons.push(
+                  `durable ledger has ${unresolvedAfter.length} unresolved broker effect(s)`,
+                );
+              }
+              if (
+                synchronization.session.snapshot.position.qty !== 0 &&
+                recoveredUnresolvedIds.length === 0 &&
+                !resumedReconciliationPositionMatches
+              ) {
+                eligibilityReasons.push('synchronized account has a non-zero unexplained position');
+              }
+              const breaker = safetyState?.breaker ?? recovery.breaker;
+              if (breaker.latched) {
+                eligibilityReasons.push(
+                  `durable execution breaker is latched${breaker.reason ? `: ${breaker.reason}` : ''}`,
+                );
+              }
+              if (eligibilityReasons.length === 0) {
+                productionBroker.setExecutionSafetyGuard(executionSafetyGuard);
+                executionEnabled = true;
+                executionEligibility = 'enabled';
+              }
+            }
+          }
+          if (!executionEnabled) executionEligibility = 'blocked';
+        }
+      } else {
+        executionEnabled = true;
+        executionEligibility = 'enabled';
+      }
+
+      if (executionEnabled) {
+        await ensureScheduler();
+      } else if (!scheduler) {
+        computeJournal = new ComputeDecisionJournal({
+          writer,
+          lease,
+          leaseRecorded,
+          recovery,
+          binding,
+          strategyId: config.strategy,
+        });
+        await computeJournal.initialize();
+      }
+
+      await writer.append({
+        recordType: 'execution-eligibility',
+        posture,
+        state: executionEligibility,
+        reasons: [...eligibilityReasons],
+        accountClaim:
+          broker.id === 'tiger' && posture === 'live'
+            ? accountClaimRecorded
+              ? 'held'
+              : 'not-held'
+            : 'not-applicable',
+        synchronization:
+          broker.id === 'tiger' && posture === 'live'
+            ? synchronizationSession
+              ? 'synchronized'
+              : 'blocked'
+            : 'not-applicable',
       });
-      scheduler = new TargetScheduler({
-        mirror,
-        ledger: writer,
-        runId: namespace.runId,
-        executionId: namespace.executionId,
-        binding,
-        recovery,
-        lease,
-        leaseAlreadyRecorded: true,
-        limits: schedulerLimits(),
-      });
-      await scheduler.initialize();
+      eligibilityRecorded = true;
     }
 
     options.onLog?.(
@@ -673,15 +937,34 @@ export async function runIntrabarServer(
 
     if (!mirrored) {
       result = deepFreeze({ mode: 'compute-only' as const, ...commonResult });
+    } else if (!executionEnabled) {
+      const unsafeReason = eligibilityReasons.join('; ') || 'broker execution is not enabled';
+      result = deepFreeze({
+        mode: 'mirrored' as const,
+        ...commonResult,
+        posture,
+        executionEligibility,
+        eligibilityReasons: [...eligibilityReasons],
+        executionSafe: false as const,
+        unsafeReason,
+      });
     } else {
       const finalState = await finalBrokerState(
         scheduler!,
         lease!,
         broker!,
         binding,
+        executionSafetyGuard,
         options.signal,
       );
-      result = deepFreeze({ mode: 'mirrored' as const, ...commonResult, ...finalState });
+      result = deepFreeze({
+        mode: 'mirrored' as const,
+        ...commonResult,
+        posture,
+        executionEligibility,
+        eligibilityReasons: [...eligibilityReasons],
+        ...finalState,
+      });
     }
   } catch (error) {
     primaryError = error;
@@ -704,13 +987,56 @@ export async function runIntrabarServer(
   if (alertDispatcher) await cleanup(() => alertDispatcher.close());
   if (writer) await cleanup(() => writer!.flush());
 
-  if (scheduler && lease?.snapshot) {
+  // Revoke mutation capability before stream or ownership teardown.
+  if (productionBroker) productionBroker.clearExecutionSafetyGuard();
+  if (synchronizationSession)
+    await cleanup(() =>
+      boundedCleanup(
+        () => synchronizationSession!.close(),
+        teardownTimeoutMs,
+        'account synchronization',
+      ),
+    );
+  if (writer && eligibilityRecorded && executionEnabled) {
+    await cleanup(async () => {
+      await writer!.append({
+        recordType: 'execution-eligibility',
+        posture,
+        state: 'blocked',
+        reasons: ['runtime stopped and execution capability was revoked'],
+        accountClaim: broker?.id === 'tiger' && accountClaim?.snapshot ? 'held' : 'not-applicable',
+        synchronization: broker?.id === 'tiger' ? 'blocked' : 'not-applicable',
+      });
+      await writer!.flush();
+    });
+  }
+  let accountClaimReleaseFailed = false;
+  if (accountClaim?.snapshot && !accountClaimAcquisitionRecordUncertain) {
+    try {
+      await releaseRecordedAccountClaim(writer, accountClaim, accountClaimRecorded);
+      accountClaimRecorded = false;
+    } catch (error) {
+      accountClaimReleaseFailed = true;
+      cleanupErrors.push(error);
+    }
+  }
+
+  const accountClaimStillHeld =
+    accountClaimAcquisitionRecordUncertain ||
+    accountClaimReleaseFailed ||
+    accountClaim?.snapshot != null;
+  if (!accountClaimStillHeld && !leaseAcquisitionRecordUncertain && scheduler && lease?.snapshot) {
     await cleanup(() => scheduler!.releaseLease());
     leaseRecorded = false;
-  } else if (computeJournal && lease?.snapshot) {
+  } else if (
+    !accountClaimStillHeld &&
+    !leaseAcquisitionRecordUncertain &&
+    computeJournal &&
+    lease?.snapshot
+  ) {
     await cleanup(() => computeJournal!.releaseLease());
     leaseRecorded = false;
-  } else if (lease?.snapshot) {
+  } else if (!accountClaimStillHeld && !leaseAcquisitionRecordUncertain && lease?.snapshot) {
     await cleanup(() => releaseRecordedLease(writer, lease!, leaseRecorded));
     leaseRecorded = false;
   }
@@ -909,7 +1235,7 @@ export class ComputeDecisionJournal {
 function toTargetEvaluation(
   evaluation: IntrabarEvaluation,
   binding: RunInstrumentBinding,
-  config: NormalizedV2RunConfig,
+  config: NormalizedRunConfig,
 ): TargetEvaluation {
   const update: ChartUpdateIdentityV3 = {
     kind: evaluation.update.kind === 'live-update' ? 'intrabar' : 'close-only',
@@ -985,7 +1311,7 @@ function schedulerLimits() {
   };
 }
 
-function recoverForV2(records: readonly unknown[]): LedgerRecoveryState {
+function recoverRuntime(records: readonly unknown[]): LedgerRecoveryState {
   return recoverLedger(records);
 }
 
@@ -997,7 +1323,7 @@ function recoverDirect(options: DirectRuntimeOptions): {
     throw new Error('provide recoveredEvents or recoveredState, not both');
   }
   const records = options.recoveredEvents ?? options.recoveredState?.events ?? [];
-  return { state: recoverForV2(records), materialCount: records.length };
+  return { state: recoverRuntime(records), materialCount: records.length };
 }
 
 function recoveryMaterialCount(read: IntrabarPersistenceRead): number {
@@ -1020,11 +1346,11 @@ async function assertRecoveredAuthority(
   if (dedicated) await assertPreparedAuthorityEnvelope(dedicated);
   if (extended) await assertPreparedAuthorityEnvelope(extended);
   if (dedicated && extended && !authorityEnvelopesEqual(dedicated, extended)) {
-    throw new Error('recovered authority event does not match the v2 binding extension');
+    throw new Error('recovered authority event does not match the binding authority extension');
   }
   const recovered = dedicated ?? extended;
   if (!recovered) {
-    if (required) throw new Error('recovered v2 run is missing prepared authority');
+    if (required) throw new Error('recovered run is missing prepared authority');
     return;
   }
   if (!authorityEnvelopesEqual(recovered, current)) {
@@ -1062,7 +1388,7 @@ async function assertRecoveredBinding(
   const recovered = recovery.binding?.binding;
   if (!recovered) return;
   if (recovered.bindingVersion !== 2 || !recovered.authority) {
-    throw new Error('recovered schema-v3 binding is not a strong v2 execution binding');
+    throw new Error('recovered schema-v3 binding is not a strong execution binding');
   }
   if (canonicalSerialize(recovered) !== canonicalSerialize(current)) {
     throw new Error('current execution binding does not match recovered schema-v3 binding');
@@ -1072,7 +1398,7 @@ async function assertRecoveredBinding(
 function configureRunnerRecovery(runner: IntrabarRunner, recovery: LedgerRecoveryState): void {
   const cursor = recovery.lastFinalCursor;
   if (cursor !== undefined && (!Number.isSafeInteger(cursor) || typeof cursor !== 'number')) {
-    throw new Error('v2 intrabar recovery requires a numeric authoritative-final cursor');
+    throw new Error('intrabar recovery requires a numeric authoritative-final cursor');
   }
   const startupDiscontinuity =
     recovery.activeBars.size > 0 ||
@@ -1084,7 +1410,7 @@ function configureRunnerRecovery(runner: IntrabarRunner, recovery: LedgerRecover
 }
 
 function ledgerNamespace(
-  config: NormalizedV2RunConfig,
+  config: NormalizedRunConfig,
   authority: PreparedIntrabarAuthorityEnvelope,
   recovery: LedgerRecoveryState,
   supplied: LedgerSink | SequencedLedger | undefined,
@@ -1093,12 +1419,12 @@ function ledgerNamespace(
   const brokerClass =
     config.execution.kind === 'mirrored' ? config.execution.broker.id : 'compute-only';
   return {
-    runId: recovery.runId ?? suppliedWriter?.runId ?? `pinelive-v2:${authority.identity}`,
+    runId: recovery.runId ?? suppliedWriter?.runId ?? `pinelive:${authority.identity}`,
     executionId:
       recovery.executionId ??
       suppliedWriter?.executionId ??
       (config.execution.kind === 'mirrored' ? config.execution.executionId : undefined) ??
-      `pinelive-v2:${config.strategy}:${config.symbol}:${brokerClass}`,
+      `pinelive:${config.strategy}:${config.symbol}:${brokerClass}`,
   };
 }
 
@@ -1120,6 +1446,7 @@ async function finalBrokerState(
   lease: ExecutionLease,
   broker: Broker,
   binding: RunInstrumentBinding,
+  executionSafetyGuard?: ExecutionSafetyGuard,
   signal?: AbortSignal,
 ): Promise<
   | {
@@ -1148,10 +1475,13 @@ async function finalBrokerState(
   }
   try {
     await lease.assertHeld();
+    await executionSafetyGuard?.assertExecutionSafe(signal);
     const position = await broker.getPosition(binding.executionSymbol, signal);
     const account = await broker.getAccount(signal);
     assertFinalPosition(position, binding.executionSymbol);
     assertFinalAccount(account);
+    await executionSafetyGuard?.assertExecutionSafe(signal);
+    await lease.assertHeld();
     return {
       executionSafe: true,
       finalPosition: deepFreeze(structuredClone(position)),
@@ -1182,6 +1512,116 @@ function assertFinalAccount(account: Account): void {
   }
 }
 
+function assertAccountClaimSnapshot(
+  snapshot: ExecutionLeaseSnapshot,
+  executionLeaseOwnerId: string,
+): void {
+  if (
+    !/^sha256-[a-f0-9]{64}$/.test(snapshot.resource) ||
+    !snapshot.leaseId ||
+    !snapshot.ownerId ||
+    snapshot.ownerId !== executionLeaseOwnerId
+  ) {
+    throw new Error(
+      'account/instrument claim returned an invalid or mismatched opaque owner identity',
+    );
+  }
+}
+
+function venueReconciliationResumePosition(recovery: LedgerRecoveryState): number | undefined {
+  const breaker = recovery.breaker.event;
+  if (
+    !breaker ||
+    !recovery.breaker.latched ||
+    !isVenueReconciliableBreaker(breaker.reason) ||
+    recovery.unresolvedIntents.size > 0
+  ) {
+    return undefined;
+  }
+
+  for (let index = recovery.events.length - 1; index >= 0; index--) {
+    const completion = recovery.events[index]!;
+    if (
+      completion.recordType !== 'order.completion' ||
+      completion.sequence <= breaker.sequence ||
+      (completion.outcome !== 'filled' && completion.outcome !== 'rejected') ||
+      completion.actualAfter == null ||
+      !Number.isFinite(completion.actualAfter)
+    ) {
+      continue;
+    }
+    const terminalResolution = recovery.events.some(
+      (event) =>
+        event.recordType === 'order.resolution' &&
+        event.sequence > breaker.sequence &&
+        event.sequence < completion.sequence &&
+        event.logicalOrderId === completion.logicalOrderId &&
+        event.outcome === completion.outcome,
+    );
+    if (terminalResolution) return completion.actualAfter;
+  }
+  return undefined;
+}
+
+function isVenueReconciliableBreaker(reason: BreakerReasonV3 | undefined): boolean {
+  return (
+    reason === 'submission-unknown' ||
+    reason === 'recovery-unresolved' ||
+    reason === 'ledger-failure'
+  );
+}
+
+function createExecutionSafetyGuard(
+  lease: ExecutionLease,
+  accountClaim: ExecutionLease,
+  synchronization: AccountSynchronizationSession,
+): ExecutionSafetyGuard {
+  return {
+    async assertExecutionSafe(signal?: AbortSignal): Promise<void> {
+      if (signal?.aborted) throw new Error('execution safety assertion was aborted');
+      await lease.assertHeld();
+      await accountClaim.assertHeld();
+      await synchronization.assertSynchronized(signal);
+      await synchronization.assertSafeToExecute(signal);
+      if (signal?.aborted) throw new Error('execution safety assertion was aborted');
+    },
+  };
+}
+
+async function releaseRecordedAccountClaim(
+  writer: SequencedLedger | undefined,
+  claim: ExecutionLease,
+  recorded: boolean,
+): Promise<void> {
+  const snapshot = claim.snapshot;
+  if (!snapshot) return;
+  if (recorded && writer) {
+    await writer.append({
+      recordType: 'account-claim',
+      action: 'release-started',
+      resourceDigest: snapshot.resource,
+      claimId: snapshot.leaseId,
+      ownerId: snapshot.ownerId,
+      detail: 'physical account/instrument claim release is starting',
+    });
+    await writer.flush();
+  }
+
+  await claim.release();
+
+  if (recorded && writer) {
+    await writer.append({
+      recordType: 'account-claim',
+      action: 'released',
+      resourceDigest: snapshot.resource,
+      claimId: snapshot.leaseId,
+      ownerId: snapshot.ownerId,
+      detail: 'physical account/instrument claim release completed',
+    });
+    await writer.flush();
+  }
+}
+
 async function releaseRecordedLease(
   writer: SequencedLedger | undefined,
   lease: ExecutionLease,
@@ -1189,28 +1629,17 @@ async function releaseRecordedLease(
 ): Promise<void> {
   const snapshot = lease.snapshot;
   if (!snapshot) return;
-  const errors: unknown[] = [];
   if (recorded && writer) {
-    try {
-      await writer.append({
-        recordType: 'lease',
-        action: 'released',
-        resource: snapshot.resource,
-        leaseId: snapshot.leaseId,
-        ownerId: snapshot.ownerId,
-      });
-      await writer.flush();
-    } catch (error) {
-      errors.push(error);
-    }
+    await writer.append({
+      recordType: 'lease',
+      action: 'released',
+      resource: snapshot.resource,
+      leaseId: snapshot.leaseId,
+      ownerId: snapshot.ownerId,
+    });
+    await writer.flush();
   }
-  try {
-    await lease.release();
-  } catch (error) {
-    errors.push(error);
-  }
-  if (errors.length === 1) throw errors[0];
-  if (errors.length > 1) throw new AggregateError(errors, 'execution lease journal/release failed');
+  await lease.release();
 }
 
 function validateRuntimeOptions(options: IntrabarServerOptions): void {
@@ -1232,8 +1661,8 @@ function validateRuntimeOptions(options: IntrabarServerOptions): void {
   if (!mirrored) {
     for (const key of [
       'brokerFactory',
-      'createBroker',
       'lease',
+      'accountClaimFactory',
       'refreshRecoveryAfterLease',
     ] as const) {
       if (Object.prototype.hasOwnProperty.call(options, key)) {
@@ -1256,8 +1685,8 @@ function validateRuntimeOptions(options: IntrabarServerOptions): void {
     }
   } else {
     const managedOptions = options as MirroredIntrabarServerOptions & ManagedRuntimeOptions;
-    if (typeof managedOptions.createBroker !== 'function')
-      throw new Error('managed mirrored intrabar runtime requires createBroker');
+    if (typeof managedOptions.brokerFactory !== 'function')
+      throw new Error('managed mirrored intrabar runtime requires brokerFactory');
   }
 }
 

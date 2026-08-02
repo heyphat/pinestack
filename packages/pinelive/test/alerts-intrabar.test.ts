@@ -49,7 +49,7 @@ function replayFixture(updates: readonly BarUpdate[]): ReplayProvider {
   const warmup = [bar(0), bar(3_600)];
   const src = new StaticProvider(
     { 'X|1h': [...warmup, bar(7_200, 11)] },
-    { alignment: 'utc-24x7', timeframes: ['1h'], cacheIdentity: 'pinelive-alerts-intrabar-v1' },
+    { alignment: 'utc-24x7', timeframes: ['1h'], cacheIdentity: 'pinelive-alerts-intrabar' },
   ).setInstrument('X', { minQty: 1, mintick: 0.01 });
   return new ReplayProvider(src, {
     cutoverTime: 7_200,
@@ -60,7 +60,7 @@ function replayFixture(updates: readonly BarUpdate[]): ReplayProvider {
 
 function config() {
   return {
-    configVersion: 2,
+    configVersion: 3,
     strategy: 'alerting.pine',
     symbol: 'X',
     timeframe: '1h',
@@ -87,7 +87,7 @@ function alertEvents(events: readonly LedgerEventV3[]) {
   );
 }
 
-test('v2 dispatches only the fresh authoritative final; forming alerts stay provisional', async () => {
+test('dispatches only the fresh authoritative final; forming alerts stay provisional', async () => {
   const prepared = prepareIntrabarRun(config(), source);
   const ledger = new MemoryLedger();
   const { channel, sent } = capture('ops');
@@ -142,7 +142,7 @@ test('v2 dispatches only the fresh authoritative final; forming alerts stay prov
   expect(recovered.lastFinalCursor).toBe(7_200);
 });
 
-test('v2 recovered finals never re-dispatch after a restart', async () => {
+test('recovered finals never re-dispatch after a restart', async () => {
   const prepared = prepareIntrabarRun(config(), source);
   const ledger = new MemoryLedger();
   const first = capture('ops');
@@ -168,7 +168,7 @@ test('v2 recovered finals never re-dispatch after a restart', async () => {
   expect(alertEvents(ledger.events)).toHaveLength(1);
 });
 
-test('v2 refuses a config that declares channels when the runtime received none', async () => {
+test('refuses a config that declares channels when the runtime received none', async () => {
   const prepared = prepareIntrabarRun(config(), source);
   await expect(
     runIntrabarServer({

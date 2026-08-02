@@ -9,6 +9,74 @@ self-contained binaries (see the README). The workspace packages run from
 TypeScript source and version in lockstep with the release tag; publishing the
 libraries to npm remains a possible follow-up.
 
+## [Unreleased]
+
+pinelive only — nothing in `pinerun`, `pinetop`, or `pinery` changes. The
+breaking pinelive changes below make the next release a **minor** bump.
+
+### Added
+
+- **Pinelive armed-Tiger production-safety gates and operations.** The
+  armed-production contract is now explicitly `configVersion: 3` and uses one
+  durable `schemaVersion: 3` event ledger for account claims, execution
+  eligibility, effects, and terminal reconciliation. Cooperative same-host
+  account/exact-instrument exclusion uses boot-bound, non-stealable ownership;
+  ordinary startup never takes over an existing artifact. Broker adapters must
+  provide complete venue bootstrap and snapshot/stream synchronization, with
+  broker-connected monitor/blocked postures and a composite lease/claim/stream
+  interlock rechecked immediately before broker mutation. Possibly sent effects
+  remain durable and are never retransmitted without `definitely-not-sent`
+  proof. Read-only `pinelive status` and explicit `pinelive recover --confirm`
+  commands share an administrative mutex with ordinary startup; recovery uses
+  conservative process-instance proof, refuses unresolved effects, and
+  quarantines stale artifacts for audit. Uncertain stable-storage
+  acknowledgement of lease/account-claim acquisition now retains every physical
+  ownership layer, with exact same-process recovery for an otherwise unrecorded
+  claim. Failed pre-journal validation restores stale administrative evidence
+  through a no-clobber operation, so a concurrent owner is never overwritten.
+  The tracked
+  [production-safety runbook](./docs/pinelive-production-safety.md) documents
+  file layout, incident recovery, crash-resumable terminal reconciliation, and
+  an opt-in credentialed mutation-free ambiguity restart test. Explicit
+  recovery replaces stale enabled eligibility with a blocked transition. The
+  built-in official Tiger transport remains deliberately **blocked** for armed
+  production execution because the SDK cannot prove complete open-order
+  inventory, authoritative exact absence, or snapshot/account-stream gap
+  closure.
+
+### Changed (breaking)
+
+- **`configVersion: 3` is the only accepted pinelive config.** The flat v1
+  config format (top-level `order`, `resolveSecurity`, `securityWarmupBars`,
+  `maxSecurityBars`, `maxSecurityFeeds`, `securityConcurrency`,
+  `securityRequestTimeoutMs`, `maxSecurityStaleRefreshes`, …) is removed, and
+  any other `configVersion` is rejected with an error. The sectioned shape
+  (`live` / `historical` / `security` / `execution` / `alerts`) carries over
+  from `configVersion: 2` unchanged — migrating a v2 file is renumbering the
+  field; migrating a v1 file means adopting the sectioned format.
+- **One durable `schemaVersion: 3` event ledger.** The v1 forward-record
+  ledger and the v2 cycle ledger are gone: `LedgerRecord` is now the v3 event
+  alone, the v1/v2 record types (`ForwardRecord`, `BindingRecord`,
+  `StartupRecord`, `AlertDispatchRecord`, `SecurityFeedHealthRecord`) leave
+  the API, and Pine alerts journal only as v3 `alert` events. A v1/v2 ledger is
+  no longer replayable — close out (flatten and stop) any run still on an old
+  format with the binary that wrote it before upgrading.
+- **The legacy v1 forward runner and server are removed.** `ForwardRunner`,
+  `runForwardServer`, and the standalone `request.security` planning surface
+  (`SecurityFeedManager`, `planSecurityFromStatic`, `planSecurityFromRequests`,
+  `discoverSecurityRequests`, and their option/health types) leave the public
+  API; the intrabar runner/server is the only runtime and hosts the security
+  machinery internally. Surviving names drop their version suffix:
+  `createV2ComputeInstrumentBinding` → `createComputeInstrumentBinding`,
+  `V2ExecutionPolicyBinding` → `ExecutionPolicyBinding`, `recoverLedgerV3` →
+  `recoverLedger`, `assertLedgerEventV3` → `assertLedgerEvent`, and the
+  `Normalized…V2RunConfig` types lose the `V2`.
+- **`createNodeTigerBroker` requires the execution-safety guard by default.**
+  The Node Tiger factory now defaults `requireExecutionSafety: true`: armed
+  mutation is refused until the runtime installs an account-claim and
+  synchronization guard. Opting out takes an explicit
+  `requireExecutionSafety: false`.
+
 ## [0.9.0] - 2026-08-01
 
 ### Added
@@ -516,6 +584,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
+[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/heyphat/pinestack/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/heyphat/pinestack/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/heyphat/pinestack/compare/v0.6.1...v0.7.0

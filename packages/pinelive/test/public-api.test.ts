@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import * as pineliveApi from '@heyphat/pinelive';
 import * as intrabarApi from '@heyphat/pinelive/intrabar';
 import {
   CircuitBreaker,
@@ -36,10 +37,13 @@ import {
   JsonlLedger,
   NodeAccountInstrumentClaim,
   NodeIntrabarPersistence,
+  NodeRunRegistry,
   parseJsonlPrefix,
   readJsonl,
   readJsonlPrefix,
+  readPineliveInstanceStatus,
   readPineliveStatus,
+  readPineliveStatusList,
   recoverStalePineliveClaims,
 } from '@heyphat/pinelive/node';
 
@@ -85,7 +89,13 @@ test('browser-safe and Node entry points expose the production API', () => {
   expect(typeof NodeIntrabarPersistence).toBe('function');
   expect(typeof FileExecutionLease).toBe('function');
   expect(typeof NodeAccountInstrumentClaim).toBe('function');
+  expect(typeof NodeRunRegistry).toBe('function');
+  expect(pineliveApi).not.toHaveProperty('NodeRunRegistry');
+  expect(pineliveApi).not.toHaveProperty('readPineliveStatusList');
+  expect(pineliveApi).not.toHaveProperty('readPineliveInstanceStatus');
   expect(typeof readPineliveStatus).toBe('function');
+  expect(typeof readPineliveStatusList).toBe('function');
+  expect(typeof readPineliveInstanceStatus).toBe('function');
   expect(typeof recoverStalePineliveClaims).toBe('function');
   expect(typeof readJsonl).toBe('function');
   expect(typeof readJsonlPrefix).toBe('function');

@@ -48,24 +48,45 @@ the piner engine. Of particular interest:
   unverified or mismatched binary, is downgraded to skip the checksum, or writes
   outside the running executable's own path is in scope. Both commands share one
   implementation for exactly this reason.
-- **Pinelive execution ownership and recovery** — Tiger account/instrument
-  claims and ledger leases are local cooperative safety boundaries. Paths and
-  ledger events must not reveal clear-text account identities; lock/claim files
-  must remain permission-isolated; ordinary startup must never steal an
-  existing artifact; and broker mutations must remain impossible after lease,
-  claim, or synchronized-stream loss. `pinelive status` must stay read-only.
+- **Pinelive execution ownership, discovery, and recovery** — Tiger
+  account/instrument claims and ledger leases are local cooperative safety
+  boundaries. Paths and ledger events must not reveal clear-text account
+  identities; lock/claim files must remain permission-isolated; ordinary
+  startup must never steal an existing artifact; and broker mutations must
+  remain impossible after lease, claim, or synchronized-stream loss.
+  `pinelive status --ledger`, `--all`, and `--instance` must stay read-only.
+  The private run registry (`~/.pinelive/runs`, overridable with
+  `PINELIVE_RUNS_DIR`) must keep restrictive directory/file modes, bounded
+  records and enumeration, and refuse symlink or non-regular records. Registry
+  and heartbeat data are discovery evidence only: they must never authorize
+  execution, claim takeover, cleanup, or recovery.
+
+  Aggregate status must normalize per-entry failures, reject terminal-control
+  strings at registry/observer boundaries, visibly escape human CLI output,
+  keep secrets and raw account identity out of output, and construct no
+  provider, broker, claim, writer, or recovery object. Retained terminal
+  evidence must use the captured, fully validated ledger prefix rather than a
+  successor's current tail. Pinetop LIVE must invoke only the bounded
+  `pinelive status --all --json` child, cap stdout/stderr and execution time,
+  terminate it on disposal, and expose no launch, stop, arm, recover,
+  acknowledge, claim-release, breaker-reset, cancel, flatten, or other broker
+  control. It must not send operational evidence to the Ask provider or signal
+  a PID read from the registry.
+
   `pinelive recover` must require explicit confirmation, conservative
   boot-bound/dead-process proof, exact durable/physical owner matching, no
-  unresolved broker effects, and audit-preserving quarantine. Failed ownership
+  unresolved broker effects, external serialization of the current stale
+  administrative election, and audit-preserving quarantine. Failed ownership
   durability acknowledgement must retain physical lease/claim evidence rather
   than unlink a possibly recorded owner; an unrecorded claim may be recovered
   only with exact same-owner/PID/boot-identity binding to the durable execution
   lease. Administrative-evidence restoration must never overwrite a concurrent
-  owner. A path that
-  bypasses these checks, weakens ambiguous-send no-retransmit behavior, or
-  enables the official Tiger transport despite incomplete inventory/exact
+  owner. A path that bypasses these checks, weakens ambiguous-send
+  no-retransmit behavior, automates stale recovery from registry age/heartbeat,
+  or enables the official Tiger transport despite incomplete inventory/exact
   lookup/stream guarantees is in scope. See the
   [production-safety runbook](./docs/pinelive-production-safety.md).
+
 - Prototype pollution or arbitrary code execution through the CLI argument or
   job pipeline.
 

@@ -102,6 +102,8 @@ The CLI commands are:
 run --config <path>
 validate --config <path>
 status --ledger <path> [--json] [--recent <n>]
+status --all [--json] [--recent <n>]
+status --instance <instance-id> [--json] [--recent <n>]
 recover --ledger <path> --lease <path> [--account-claim <path>] --confirm [--json]
 parity <live.jsonl> <expected.jsonl>
 upgrade [--check]
@@ -291,16 +293,52 @@ session, or equally privileged local user. Ordinary startup never steals an
 existing lease or claim, regardless of apparent age.
 
 Status is read-only and opens no provider, broker, alert channel, lease, or
-claim:
+claim. The explicit-ledger form remains the durable primitive:
 
 ```bash
 pinelive status --ledger .pinelive/ledger.jsonl --json --recent 20
 ```
 
-Status reports evidence from that explicit ledger; it does not query the venue,
-prove another host inactive, or prove that a clean account has no orders.
-Automation must inspect `executionSafe`, `executionEligibility`, and
-`eligibilityReasons`; a zero process exit code is not execution evidence.
+Pinelive also maintains a private discovery registry at `~/.pinelive/runs`
+(or `PINELIVE_RUNS_DIR`). Active registrations are advisory process and path
+evidence; each advisory registry operation is time-bounded so it cannot hold
+runtime cancellation or ownership cleanup open. Terminal history is published
+with an atomic no-replace operation before the active record is removed. Its
+captured final sequence identifies that run's validated ledger prefix, so later
+rows appended by a restart do not invalidate retained history.
+Registry directories use mode `0700` and records mode `0600` where supported,
+readers refuse symlinks and non-regular files, and each record is bounded to
+64 KiB. Enumeration is capped at 1,000 entries. Terminal history is retained
+best-effort within all three limits: 500 records, 8 MiB, and 30 days. Retention
+never removes a ledger, claim, lease, or recovery quarantine artifact.
+
+Use aggregate or exact-instance discovery with:
+
+```bash
+pinelive status --all
+pinelive status --all --json --recent 20
+pinelive status --instance <instance-id> --json --recent 20
+```
+
+`--ledger`, `--all`, and `--instance` are mutually exclusive. Aggregate status
+isolates malformed registry records or unreadable ledgers as per-entry errors,
+combines active and terminal history, probes process and supplied physical claim
+paths conservatively, and reports conflicts without changing anything. It does
+not construct a provider or broker, acquire/release a claim, prune the registry,
+invoke recovery, or query the venue.
+
+The five-second heartbeat and lifecycle registration are **discovery evidence
+only**. A fresh heartbeat does not prove the trading loop is progressing,
+claims are held, synchronization is current, or execution is safe; a stale
+heartbeat does not prove death. Registry failure emits a normalized warning but
+never grants or revokes execution authority. Durable
+`executionEligibility` remains the execution evidence when available.
+
+Neither explicit nor aggregate status proves another host inactive or proves a
+clean account has no orders. Automation must inspect durable posture,
+eligibility, ownership, breaker, and unresolved-effect evidence rather than a
+process exit code or heartbeat alone. Registry/Pinetop discovery never replaces
+venue synchronization, the V3 ledger, or exact-owner execution/account claims.
 
 Recovery is only for abandoned local ownership artifacts, never broker-effect
 ambiguity. It requires `--confirm`, conservative proof that the exact prior
@@ -479,9 +517,10 @@ claim fill-price parity.
   authority/binding, scheduler/recovery/lease contracts, brokers, units, parity,
   and shared types.
 - `@heyphat/pinelive/node` — durable JSONL prefix/recovery helpers,
-  `FileExecutionLease`, account/instrument claims, read-only status, explicit
-  stale-claim recovery, Node factories, official Tiger SDK adapters, and
-  transport overrides.
+  `FileExecutionLease`, account/instrument claims, private active-run registry
+  and terminal history, aggregate/exact-instance read-only discovery,
+  explicit-ledger status, explicit stale-claim recovery, Node factories,
+  official Tiger SDK adapters, and transport overrides.
 - `@heyphat/pinelive/config` — strict normalization and compiled-source
   validation contracts.
 - `@heyphat/pinelive/intrabar` — focused live configuration, authority, state,

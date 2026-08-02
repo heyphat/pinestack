@@ -79,6 +79,7 @@ OPTIONS
   --limit <n>           Preload --limit
   --input name=value    Preload a fixed input (repeatable)
   --pinerun <path>      The pinerun executable (default: $PINERUN_BIN, else PATH)
+  --pinelive <path>     The pinelive executable for LIVE (default: $PINELIVE_BIN, else PATH)
   --check-flags         Diff pinetop's flag schema against pinerun --help, then exit
   -v, --version         Print the pinetop version, and the pinerun it drives
   -h, --help            This text
@@ -101,6 +102,7 @@ interface ParsedArgs {
   preload: Record<string, string>;
   inputs: Pair[];
   bin?: string;
+  pineliveBin?: string;
   help: boolean;
   version: boolean;
   checkFlags: boolean;
@@ -166,6 +168,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       case '--pinerun':
         out.bin = next();
+        break;
+      case '--pinelive':
+        out.pineliveBin = next();
         break;
       case '--input': {
         const value = next();
@@ -321,29 +326,37 @@ export async function main(argv: readonly string[]): Promise<number> {
   // rather than a puzzle: load an unambiguous script and say what to do next.
   state.status = bootstrap(state) ?? state.status;
 
-  const app = new App({ terminal, state, spawn: { bin } });
+  const app = new App({
+    terminal,
+    state,
+    spawn: { bin },
+    live: args.pineliveBin ? { bin: args.pineliveBin } : undefined,
+  });
 
   const shutdown = (): void => {
-    app.stop();
-    process.exit(0);
+    state.quit = true;
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  app.start();
+  try {
+    app.start();
 
-  // The app is key-driven; hold the process open until `q` sets quit.
-  await new Promise<void>((resolve) => {
-    const tick = setInterval(() => {
-      if (state.quit) {
-        clearInterval(tick);
-        resolve();
-      }
-    }, 80);
-  });
-
-  app.stop();
-  return 0;
+    // The app is key-driven; hold the process open until `q` or a signal requests shutdown.
+    await new Promise<void>((resolve) => {
+      const tick = setInterval(() => {
+        if (state.quit) {
+          clearInterval(tick);
+          resolve();
+        }
+      }, 80);
+    });
+    return 0;
+  } finally {
+    process.off('SIGINT', shutdown);
+    process.off('SIGTERM', shutdown);
+    await app.stop();
+  }
 }
 
 /**

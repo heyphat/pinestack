@@ -23,6 +23,8 @@ export interface PineliveStatusOptions {
   readonly ledgerPath: string;
   readonly recent?: number;
   readonly now?: Date;
+  /** Validate the complete ledger, but fold durable evidence only through this sequence. */
+  readonly throughSequence?: number;
 }
 
 export interface PineliveStatus {
@@ -123,10 +125,35 @@ export async function readPineliveStatus(options: PineliveStatusOptions): Promis
     });
   }
 
-  // An empty ledger has no durable evidence. Every nonempty ledger must be the active schema.
-  const recovery = prefix.records.length > 0 ? recoverLedger(prefix.records) : undefined;
+  // The complete valid prefix is always recovered first. Historical status can then fold a
+  // sequence-exact prefix without allowing later valid rows to invalidate retained evidence.
+  const completeRecovery = prefix.records.length > 0 ? recoverLedger(prefix.records) : undefined;
+  let recovery = completeRecovery;
+  if (options.throughSequence !== undefined) {
+    const throughSequence = options.throughSequence;
+    if (!Number.isSafeInteger(throughSequence) || throughSequence < 0)
+      throw new RangeError('status throughSequence must be a nonnegative safe integer');
+    const currentTail = completeRecovery?.lastSequence ?? 0;
+    if (throughSequence > currentTail)
+      throw new RangeError(
+        `status throughSequence ${throughSequence} exceeds durable ledger tail ${currentTail}`,
+      );
+    if (throughSequence === 0) recovery = undefined;
+    else {
+      const historicalEvents = completeRecovery!.events.slice(0, throughSequence);
+      if (historicalEvents.at(-1)?.sequence !== throughSequence)
+        throw new RangeError('status throughSequence is not a durable sequence boundary');
+      recovery = recoverLedger(historicalEvents);
+    }
+    if (throughSequence < currentTail) {
+      warnings.push({
+        code: 'historical-prefix',
+        message: `status evidence is folded through sequence ${throughSequence}; later valid ledger rows were excluded`,
+      });
+    }
+  }
   const events = recovery?.events ?? [];
-  const lastRecord = prefix.records.at(-1) as Record<string, unknown> | undefined;
+  const lastRecord = events.at(-1);
 
   return {
     statusVersion: 1,
@@ -201,7 +228,7 @@ export async function readPineliveStatus(options: PineliveStatusOptions): Promis
       bytes: prefix.totalBytes,
       validBytes: prefix.validBytes,
       partialTail: prefix.partialFinalLine != null,
-      ...(recovery ? { ledgerSchemaVersion: 3 as const } : {}),
+      ...(completeRecovery ? { ledgerSchemaVersion: 3 as const } : {}),
       ...(recovery && recovery.lastSequence > 0 ? { lastSequence: recovery.lastSequence } : {}),
       ...(typeof lastRecord?.recordedAt === 'string'
         ? { lastRecordAt: lastRecord.recordedAt }

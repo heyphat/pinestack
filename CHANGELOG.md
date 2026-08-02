@@ -9,16 +9,73 @@ self-contained binaries (see the README). The workspace packages run from
 TypeScript source and version in lockstep with the release tag; publishing the
 libraries to npm remains a possible follow-up.
 
-## [Unreleased]
+## [0.10.0] - 2026-08-02
 
-pinelive only — nothing in `pinerun`, `pinetop`, or `pinery` changes here. The
-breaking pinelive changes below make whichever release carries them a **minor**
-bump; they are deliberately not part of 0.9.1. The `pinelive` binary is an
-explicit `PINESTACK_BINS` opt-in and its built-in Tiger transport stays blocked
-for armed production, so the work below is on `main` and in the opt-in binary
-without being announced as a release.
+The Pinelive production-safety changes below are breaking, which is why this is
+a **minor** bump; they are deliberately not part of 0.9.1. The release also adds
+local Pinelive run discovery, aggregate read-only status, and Pinetop's
+read-only ordinal-9 LIVE page. No change to `pinerun` or `pinery` behavior, or
+to any research output contract. The `pinelive` binary remains an explicit
+`PINESTACK_BINS` opt-in and its built-in Tiger transport stays blocked for armed
+production.
 
 ### Added
+
+- **Private Pinelive run registry and aggregate read-only status.** Each runtime
+  now writes a best-effort `starting`/`running`/`stopping` registration under
+  `~/.pinelive/runs` (overridable with `PINELIVE_RUNS_DIR`), updates a
+  non-overlapping five-second advisory heartbeat, and atomically publishes
+  no-replace terminal history before removing the active record. Advisory
+  registry operations are bounded and never gate runtime cancellation or
+  ownership cleanup; each history record captures the completed writer's exact
+  ledger prefix so a later append-only restart cannot invalidate it. Registry directories/files use
+  private `0700`/`0600` modes where supported; readers refuse symlinks and
+  non-regular files; records are bounded to 64 KiB and enumeration to 1,000
+  entries. Active registrations may include private display metadata for the
+  strategy ID, strategy symbol, execution symbol, and timeframe. History is
+  retained best-effort within 500 records, 8 MiB, and 30 days. Registry and
+  heartbeat failures are normalized warnings and never execution authority.
+  - `pinelive status --all [--json] [--recent <n>]` composes active and terminal
+    discovery with existing durable ledger status, isolates corrupt entries,
+    reports conservative process/heartbeat/physical-ownership evidence and
+    execution/account-resource conflicts, and sorts deterministically.
+  - `pinelive status --instance <instance-id> ...` selects one exact active or
+    terminal instance. It is mutually exclusive with `--all` and the existing
+    `--ledger` selector.
+  - Both selectors are read-only: no provider/broker/alert construction, claim
+    acquisition/release, registry pruning, venue query, or recovery. Lifecycle
+    remains separate from durable execution eligibility, and stale heartbeat
+    never proves death or permits takeover. Entry-limit overflow now returns a
+    bounded partial aggregate plus an explicit error instead of suppressing every
+    healthy row; exact-instance lookup fails inconclusively rather than claiming
+    absence when the scan was capped.
+  - `PineliveStatusOptions.throughSequence` validates the complete current ledger
+    while folding one exact historical prefix for terminal history. The public
+    intrabar host options add isolated `onReady`, `onStopping`, and synchronous
+    `onTerminal` lifecycle seams; readiness carries the authoritative resolved
+    execution symbol, and terminal evidence includes a normalized latch hint so
+    history remains conservative if its later ledger reread fails.
+  - Compute-only ledgers now record their `compute-only` /
+    `disabled-by-posture` execution-eligibility row durably instead of leaving
+    posture implicit.
+
+- **Pinetop LIVE on page 9.** The existing page ordinals 1–8 remain unchanged;
+  LIVE polls exactly `pinelive status --all --json` into dedicated, non-persisted
+  state. The poller runs immediately on entering LIVE and every five seconds
+  while that page remains visible, pausing off-page without overlap. It enforces
+  a four-second deadline, 8 MiB stdout and 64 KiB stderr caps, performs
+  bounded TERM→KILL disposal, validates `statusListVersion: 1` locally, isolates
+  malformed nested entries, suppresses stale generations, and preserves the
+  last successful snapshot after failures. Wide terminals render list/detail
+  panes together; narrow terminals provide explicit detail/back navigation;
+  instance-keyed selection survives reorder and retention. App/signal shutdown
+  now awaits one idempotent poller disposal before restoring the terminal.
+  LIVE renders identity, lifecycle/terminal outcome, posture, durable execution
+  eligibility, ownership, ledger watermark, breaker, unresolved effects,
+  observations, warnings, and per-entry errors. It exposes no launch, stop,
+  signal, arm, recover, acknowledge, claim-release, breaker-reset, order, or
+  broker control, does not route evidence through Ask, and never signals a
+  registry PID. Configure its binary with `--pinelive`, `PINELIVE_BIN`, or PATH.
 
 - **Pinelive armed-Tiger production-safety gates and operations.** The
   armed-production contract is now explicitly `configVersion: 3` and uses one
@@ -635,7 +692,7 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
-[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.1...HEAD
+[0.10.0]: https://github.com/heyphat/pinestack/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/heyphat/pinestack/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/heyphat/pinestack/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/heyphat/pinestack/compare/v0.7.0...v0.8.0

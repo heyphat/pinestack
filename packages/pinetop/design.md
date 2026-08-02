@@ -2,7 +2,7 @@
 
 **Name:** `pinetop` — confirmed
 **Author:** Design · **Status:** Built — see §7 and [README](./README.md)
-**Created:** 2026-07-31 · **Last Updated:** 2026-08-01 (v1.5)
+**Created:** 2026-07-31 · **Last Updated:** 2026-08-01 (v1.6)
 **Prototype:** `Tessera Backtester TUI.dc.html` (file name pending rename) (interactive, keyboard-driven)
 **Upstream:** `pinestack/packages/pinerun`, `pinestack/docs/*.md`
 
@@ -15,8 +15,11 @@ resident on screen and makes the command's own flags the thing you edit, so the
 **edit → rerun → reread** loop happens in place instead of through repeated shell
 invocations and scrollback archaeology.
 
-It adds no analytics of its own. Every number it shows comes from `pinerun --json`;
-piner remains the sole authority for fills, timestamps, and metrics.
+It adds no analytics or trading authority of its own. Research numbers come from
+`pinerun --json`; piner remains the sole authority for fills, timestamps, and
+metrics. The read-only LIVE page renders the separate versioned
+`pinelive status --all --json` discovery envelope without deriving execution
+state or exposing process/broker controls.
 
 This document records the design decisions behind the prototype and the constraints an
 implementation must honour. It is written for an engineer or coding agent building the
@@ -67,23 +70,21 @@ makes the loop, and therefore this tool, worth building.
 - **NG2** — ~~Not a broker or live-trading surface. `pinelive` stays a separate program:
   streaming state has no run boundary and no final number, so it does not fit the
   report-page shape this app is built around. No LIVE page, now or later.~~
-  **Revised: a read-only LIVE page is in scope (not yet built); the
-  trading-surface prohibition stands in full.** What changed is not this app's
-  shape but `pinelive`'s: it now writes a durable ledger, and its observability
-  design plans a discoverable runs registry plus a one-shot
-  `pinelive status --json` verb — a finite child returning one JSON payload,
-  which is exactly the report-page shape this app is built around (§2, NG1's
-  spawn-and-render discipline). The LIVE page lands only after that status
-  contract exists; nothing here describes shipped behavior. "Streaming state
-  has no final number" is answered by observing snapshots, not by streaming.
-  What NG2 still rules out stands, and is now stated more precisely: `pinetop`
-  computes no trading state, submits/cancels/flattens nothing, and — in the
-  first LIVE version — takes **no action against a pinelive process at all**:
-  no launch, no stop, no arm, no acknowledge. Signaling a PID read from a
-  registry file is unsafe (PID reuse); control belongs to a later phase with
-  verified process identity, starting with *attached* launches whose child
-  handle `pinetop` itself owns. `pinelive` remains a separate program that this
-  app spawns and reads, exactly as it treats `pinerun`.
+  **Revised and built: page 9 is a read-only LIVE observer; the trading-surface
+  prohibition stands in full.** Pinelive now exposes a finite, versioned
+  `pinelive status --all --json` snapshot over its private discovery registry,
+  terminal history, and durable ledgers. Pinetop polls that one-shot child and
+  renders its evidence. It computes no posture, eligibility, ownership, breaker,
+  effect, or lifecycle state and performs no Pinelive mutation.
+
+  LIVE has no launch, stop/kill, arm/disarm, recover, acknowledge,
+  breaker-reset, claim-release, submit/cancel/flatten, or broker action. It does
+  not signal PIDs from registry records, because PID-only control is unsafe
+  under reuse and unverified identity. Registry records and heartbeats remain
+  discovery evidence only, never execution authority. Attached lifecycle would
+  require retaining a child handle Pinetop owns; detached lifecycle would
+  require a separately designed supervisor. `pinelive` remains a separate
+  program, just as `pinerun` does.
 - **NG3** — Not a web app. No browser, no server, no remote state.
 - **NG4** — ~~Not a Pine editor. Scripts are edited in the user's editor; `pinetop` reloads
   them.~~ **Revised (as built): page 1 is a vim-modal editor for the `.pine`.** The
@@ -107,20 +108,19 @@ makes the loop, and therefore this tool, worth building.
 ┌──────────────────────────────────────────────────────────┐
 │ pinetop (TUI process)                                    │
 │                                                          │
-│  Router ── one page per pinerun command                  │
+│  Router ── research pages + read-only LIVE               │
 │    │                                                     │
-│    ├─ FlagModel      the command's flags as typed state  │
-│    ├─ ViewModel      report JSON → renderable rows       │
+│    ├─ FlagModel      research flags as typed state       │
+│    ├─ ViewModel      bounded JSON → renderable rows      │
 │    ├─ Renderer       panes, tables, braille plots        │
-│    └─ AskLayer       question → answer + proposal        │
+│    ├─ LivePoller     bounded aggregate status child      │
+│    └─ AskLayer       research question → proposal        │
 │                                                          │
-└───────────────┬──────────────────────────────────────────┘
-                │ spawn, argv from FlagModel
-                ▼
-        pinerun <command> … --json
-                │ structured report on stdout
-                ▼
-        piner (engine, authoritative)
+└───────────────┬───────────────────────┬──────────────────┘
+                │                       │
+                │ pinerun … --json      │ pinelive status --all --json
+                ▼                       ▼
+        piner (authoritative)    Pinelive read-only discovery
 ```
 
 **Decision 4.1.a — Shell out to `pinerun`, do not link the engine.**
@@ -132,15 +132,27 @@ premise the whole UI rests on. Cost is process spawn latency, which is immateria
 run time.
 
 **Decision 4.1.b — The composed argv is the source of truth for the UI.**
-Every page renders its flags from one FlagModel and composes the displayed `$ pinerun …`
-line from that same model. There is no second copy of the invocation. If the line on
-screen would not run, that is a bug.
+Every research page renders its flags from one FlagModel and composes the
+displayed `$ pinerun …` line from that same model. There is no second copy of
+the invocation. If the line on screen would not run, that is a bug.
+
+**Decision 4.1.c — LIVE shells out to one bounded read-only aggregate command.**
+It invokes exactly `pinelive status --all --json`, validates
+`statusListVersion: 1` locally without linking Pinelive runtime code, and renders
+only the normalized response. Default cadence is 5 s, child deadline 4 s,
+stdout cap 8 MiB, stderr cap 64 KiB, and TERM-to-KILL grace 250 ms. Polls never
+overlap; generation tokens suppress stale results; failures preserve and age the
+last successful snapshot. App shutdown awaits bounded child disposal before
+restoring the terminal. This service never constructs a provider/broker, writes
+a ledger/registry, acquires/releases a claim, invokes recovery, or derives
+execution state.
 
 ### 4.2 Navigation model
 
-One tab per command, numbered, in workflow order:
+One workflow page per surface, numbered without changing the existing research
+ordinals:
 
-| # | Page | Command | Purpose (docs' own verb) |
+| # | Page | Command | Purpose |
 |---|---|---|---|
 | 1 | EDITOR | (the `.pine` source) | Write — the script itself, vim keys |
 | 2 | BACKTEST | `pinerun backtest` | Analyze — one strategy, one symbol, full tearsheet |
@@ -149,32 +161,43 @@ One tab per command, numbered, in workflow order:
 | 5 | SCAN | `pinerun scan` | Screen — one script across N symbols |
 | 6 | PORTFOLIO | `pinerun portfolio` | Combine — N symbols, one pot |
 | 7 | COMPARE | `pinerun compare` | Compare — two strategies, same bars |
-| 8 | LOGS | (ledger + engine log of the current run) | The engine log and the fills |
+| 8 | LOGS | (ledger + engine log of the current research run) | Research engine log and fills |
+| 9 | LIVE | `pinelive status --all --json` | Observe registered Pinelive evidence, read-only |
 
 **Decision 4.2.a — Tabs are commands, not topics.** An earlier prototype had topical tabs
 (BACKTEST / TRADES / OPTIMIZE / LOGS). It broke down as soon as more commands arrived:
-users think in commands because that is what they type. Number keys `1`–`8` map to the
+users think in commands because that is what they type. Number keys `1`–`9` map to the
 same ordinal the tab shows.
 
 **Decision 4.2.b — LOGS (né TRADES, renamed v1.5) is the exception and is justified.** It is
-not a command; it is the engine log plus fill ledger for whichever run is loaded. It exists because `--trades`
-output is consumed differently from a tearsheet — you scan rows, then interrogate one.
+not a command; it is the engine log plus fill ledger for whichever research run
+is loaded. It exists because `--trades` output is consumed differently from a
+tearsheet — you scan rows, then interrogate one.
 
-**Decision 4.2.d — EDITOR is the other exception, and it goes first.** It is not a command
-either; it is the input to all of them. It is page 1 rather than appended at page 9 because
-the tabs are in workflow order and the source is where the workflow starts — every other
-page is downstream of the file this one edits. The ordinals of the six command pages
-therefore shift by one, which is a real cost paid once (§4.2's "the seven ordinals are
-final" no longer holds; eight are).
+**Decision 4.2.g — LIVE is appended at ordinal 9 and owns separate state.** It
+is not a `pinerun` command and never enters `COMMANDS`, the research flag schema,
+run history, LOGS state, or the Ask grounding path. Appending preserves pages
+1–8 exactly. Selection is keyed by opaque Pinelive `instanceId`, survives
+reordering, and moves to the nearest surviving row after history retention.
+Wide terminals show list/detail together; narrow terminals show one at a time,
+with `enter` opening detail and `escape` returning to the list. Per-entry errors
+remain selectable instead of disappearing behind an aggregate failure.
 
-**Decision 4.2.f — `space` is a global page prefix, alongside `1`–`8`.** A second way to
+**Decision 4.2.d — EDITOR is the other research exception, and it goes first.** It is not a
+command either; it is the input to all research commands. It is page 1 rather
+than appended because the research tabs are in workflow order and the source is
+where that workflow starts. The ordinals of the six command pages shifted once
+when EDITOR landed; LIVE later appended at page 9 specifically to preserve pages
+1–8.
+
+**Decision 4.2.f — `space` is a global page prefix, alongside `1`–`9`.** A second way to
 say the same thing needs justifying, and this is the justification: EDITOR's buffer cannot
 give the digits away, because there a digit is a vim count. Rather than let that page define
 its own page-switch key — a local dialect for a global verb — the *app* gained a prefix that
-works identically on all eight pages. `1`–`8` remain the one-keystroke form everywhere the
+works identically on all nine pages. `1`–`9` remain the one-keystroke form everywhere the
 digits are free. See §4.8.i.
 
-**Decision 4.2.e — Below ~105 columns the tab bar names only the active page.** Eight titles
+**Decision 4.2.e — Below ~105 columns the tab bar names only the active page.** Nine titles
 plus the run status and the grid size no longer fit an 80-column terminal, and a tab bar
 overprinted by the grid size is worse than a compact one. The active page keeps its title
 immediately to the right of its own ordinal, so which tab it belongs to is unambiguous; the
@@ -235,8 +258,8 @@ keypress spells out what it does.
 
 | Key | Action |
 |---|---|
-| `1`–`8` | Switch page |
-| `space` `1`–`8` | Switch page; the only form that works inside the EDITOR buffer (§4.2.f) |
+| `1`–`9` | Switch page |
+| `space` `1`–`9` | Switch page; the only form that works inside the EDITOR buffer (§4.2.f) |
 | `tab` / `shift-tab` | Next / previous pane in the focus ring |
 | the key on a pane's border | Focus that pane directly; derived per page, `esc` abandons a half-typed one (§4.2.h) |
 | `j` / `k`, `↓` / `↑` | Move selection |
@@ -396,19 +419,25 @@ every display string (`max hold`, `36 h`), and the display string never reaches 
 
 ```
 AppState
-├─ page: 1..7
-├─ focus: pane id within page
-├─ flags:     { [command]: FlagModel }        // per-command, persisted per project
-├─ overrides: { [scriptId]: { [inputTitle]: {from, to} } }   // AI/user edits, not yet run
-├─ run:       { id, status: idle|running|failed, progress, report }
+├─ page: PageId (EDITOR … LIVE)
+├─ panes: focus/cursor state per page
+├─ flags:     { [command]: FlagModel }        // research only, persisted per project
+├─ overrides: { [scriptId]: { [inputTitle]: {from, to} } }
+├─ run:       { id, status, progress, report } // research child only
+├─ live:      { snapshot?, selectedInstanceId?, selectedItemKey?,
+│              lastSuccessAt?, inFlightGeneration?, error? }
 └─ ask:       { transcript[], pending: Proposal|null }
 ```
 
 - **Overrides are keyed by script**, so switching strategies does not leak edits between them.
-- **`run.report` is the parsed `--json` payload.** View models derive from it; nothing else
-  is a source of numbers.
-- Config edits do not auto-run. Running is always explicit (`r` / `↵` in the dialog),
-  because a sweep can cost minutes and a keystroke should not spend them.
+- **`run.report` is the parsed `pinerun --json` payload.** Research view models derive from it.
+- **`live.snapshot` is a separate normalized `statusListVersion: 1` payload.**
+  It is not persisted and never mutates research run/LOGS state. Readable rows
+  select by `instanceId`; error-only rows use a bounded evidence key.
+- Config edits do not auto-run. Running a research command is always explicit
+  (`r` / `↵` in the dialog), because a sweep can cost minutes and a keystroke
+  should not spend them. The only automatic child is the bounded read-only LIVE
+  status poll.
 
 ### 4.7 Visual language
 
@@ -504,7 +533,7 @@ ways to switch page depending on where the cursor was. A local dialect for a glo
 worse than an awkward binding.
 
 So `space` became a **global** page prefix (§4.2.f): `space 3` is page 3 on every page,
-buffer or not, and `1`–`8` keep working directly everywhere outside the buffer. The buffer
+buffer or not, and `1`–`9` keep working directly everywhere outside the buffer. The buffer
 then passes `space` through rather than binding anything, which is the rule this decision
 really states: **a page that claims the keyboard may hand keys back, but may not define
 replacements for the app's own verbs.** `tab` and `ctrl-p` pass through on the same grounds.
@@ -569,10 +598,14 @@ redundant: the buffer for edits worth keeping the report on screen for, `e` for 
 | **P5 — Ask** | Prompt drawer, grounding payload, proposal protocol, apply/reject/revert | No path exists that mutates config without a keypress |
 | **P6 — Persistence** | Per-project flag state, run history, `walkforward` hand-off from a swept winner | Reopening resumes the last session's flags |
 | **P7 — Editor** | Page 1: vim buffer (motions, operators, counts, visual, ex commands), Pine highlighting, FILES + INPUTS sidebar, and `e` to hand off to the real `$EDITOR` | The buffer owns the keyboard but never traps it; only `:w` writes; the frame is always restored after a hand-off |
+| **P8 — LIVE** | Page 9, dedicated LIVE state, dependency-light aggregate validation, bounded Pinelive child poller, stable list/detail selection, terminal-history/error rendering | Pages 1–8 remain unchanged; no overlap or stale replacement; disposal is awaited; no Pinelive control or Ask path exists |
 
-**Status: P0–P7 are built** (`packages/pinetop/`), verified against real `pinerun`
-runs for all six commands. Three things the build added that this plan did not
-anticipate, each because the alternative was a screen that lied:
+**Status: P0–P8 are built** (`packages/pinetop/`), with the six research
+commands verified against real `pinerun` runs and LIVE verified against injected
+`statusListVersion: 1` aggregate snapshots and bounded child-process behavior.
+Four things the build added that the original P0–P7 plan did not anticipate,
+each because the alternative was a screen that lied or a process boundary that
+could leak:
 
 - **`.` reveals the advanced flags, and a flag another flag makes mandatory
   reveals itself.** `--provider` was visible while `--data-dir` — which
@@ -585,11 +618,25 @@ anticipate, each because the alternative was a screen that lied:
   sparkline.** The `--json` payload strips each window's `RunResult` for size, so
   there is no curve on the wire; the bar answers the same question from a field
   that is actually present.
+- **LIVE owns a bounded child lifecycle rather than importing Pinelive.** A
+  direct runtime import would couple the observer to broker-capable code and a
+  fire-and-forget disposal could leave a status child behind when the terminal
+  exits. The implemented poller validates a dependency-light envelope, and
+  `App.stop()` awaits one idempotent bounded disposal before closing.
 
 ---
 
 ## 8. Observability & Monitoring
 
+- While page 9 is visible, LIVE polls `pinelive status --all --json` immediately
+  and every five seconds through a non-overlapping, deadline- and output-bounded
+  child. Leaving LIVE pauses the cadence; returning triggers a fresh poll. It
+  preserves the last successful snapshot and age on failure, isolates malformed
+  entries, suppresses stale generations, and awaits TERM→KILL disposal on
+  shutdown.
+- LIVE renders Pinelive's registered and durable evidence without deriving a
+  green/red execution verdict. Lifecycle and durable eligibility remain visibly
+  separate; uncertainty and per-entry errors remain explicit.
 - Mirror `pinerun`'s own engine log in the LOGS page: resolve, fetch/cache, warmup,
   fills, artifact writes, with levels (`INFO` / `WARN` / `ERR`).
 - **A non-zero exit gets a drawer of its own**, not a line in the status strip. As built,
@@ -622,9 +669,19 @@ anticipate, each because the alternative was a screen that lied:
 - **Credentials never enter the UI.** Provider keys stay in environment variables /
   the existing credential path; they are never displayed, never persisted by `pinetop`,
   and must be redacted from the echoed command line and the session log.
-- **The AI layer is opt-in and sends derived metrics only** — never OHLCV bars, never
-  script source, never credentials. The payload is the report summary plus the flags.
-  If the model runs remotely, this must be stated in the UI before first use.
+- **The AI layer is opt-in and sends derived research metrics only** — never
+  OHLCV bars, script source, credentials, or LIVE operational evidence. The
+  payload is the research report summary plus flags. If the model runs remotely,
+  this must be stated in the UI before first use.
+- **LIVE is an observer, not a control plane.** It exposes no launch, signal,
+  stop, arm, recovery, claim, breaker, ambiguity, order, or broker operation and
+  never signals a registry PID. Heartbeats and registry rows are rendered only
+  as discovery evidence.
+- **The Pinelive child boundary is bounded and normalized.** Pinetop caps time,
+  stdout, stderr, item counts, nested fields, and retained state; rejects an
+  unsupported envelope; converts malformed nested entries to per-entry errors;
+  and excludes raw account identity, credentials, profile contents, environment
+  values, URLs/headers, SDK objects, and alert bodies.
 - **`--csv` / `--plot` write to user-specified paths.** Show the resolved absolute path
   before writing; never write outside the given directory.
 
@@ -697,11 +754,11 @@ anticipate, each because the alternative was a screen that lied:
 | **Impact** | New binary in the pinestack family; no change to `pinerun` or piner | Additive |
 | **Hard Constraints** | Uniform font stream (U+2800 blanks, overlay markers, measured cell width); pane titles never clipped; stroked charts scaled to min–max | Each was a real defect in the prototype |
 | **AI Contract** | `{answer, proposal?: {effect, note, edits[]}, action?}`; `edits[].input` is a Pine `input()` title, `to` is a bare value | Never applied without a keypress |
-| **Estimated Effort** | 8 phases, P0–P7 | P1 is the vertical slice that proves the architecture |
-| **Status** | Built — P0–P7 in `packages/pinetop/` | Not yet a release artifact; built from a checkout |
+| **Estimated Effort** | 9 phases, P0–P8 | P1 proved the research architecture; P8 adds a separate observer boundary |
+| **Status** | Built — P0–P8 in `packages/pinetop/` | LIVE is read-only and backed by aggregate Pinelive status |
 | **Owner (DRI)** | [TODO] | Single accountable person, not a team |
-| **Open Questions** | 2 of 4 remain (§10.3 run-history depth, §10.4 `--watch`) | Flag-schema drift is now caught by `--check-flags` rather than prevented |
-| **Change Log** | v1 — initial capture of prototype decisions · v1.1 — name, no-LIVE and session premise confirmed · v1.2 — built; §10.1 and §10.2 resolved as built · v1.3 — NG4 revised: EDITOR is page 1 (§4.8), the eight ordinals replace seven · v1.4 — NG2 revised: read-only LIVE page in scope (observation only — no launch/stop/arm; `pinelive status --json` is the report-page-shaped contract); trading-surface prohibition unchanged · v1.5 — page 8 renamed TRADES → LOGS (the tab shows the engine log plus the fill ledger; the old name read as a trading surface, which NG2 forbids); `--page trades` remains an alias | 2026-08-01 |
+| **Open Questions** | 2 of 4 remain (§10.3 COMPARE run pairing, §10.4 `--watch`) | Flag-schema drift is caught by `--check-flags`; history depth is bounded |
+| **Change Log** | v1 — initial capture · v1.1 — name/no-LIVE/session premise · v1.2 — initial build · v1.3 — EDITOR page 1/eight ordinals · v1.4 — read-only LIVE planned · v1.5 — page 8 TRADES → LOGS · v1.6 — ordinal-9 LIVE built with bounded aggregate polling, dedicated state, no controls, and awaited disposal | 2026-08-01 |
 
 ---
 
@@ -709,7 +766,8 @@ anticipate, each because the alternative was a screen that lied:
 
 - `[TODO]` Name a DRI (single accountable owner) and a target date for §12.
 
-Resolved 2026-07-31: name is `pinetop`; no LIVE page (§3 NG2); the §2 iterative-session
-premise is confirmed. §10.1 and §10.2 are resolved as built; §10.3 and §10.4 remain open.
-The tab ordinals are **eight**, not the seven this document previously called final: NG4 is
-revised and EDITOR is page 1 (§4.2.d, §4.8).
+Resolved 2026-07-31: name is `pinetop`; the §2 iterative-session premise is
+confirmed. §10.1 and §10.2 are resolved as built; §10.3's bounded history is
+built while COMPARE run pairing remains open, and §10.4 remains open. The tab
+ordinals are now **nine**: EDITOR is page 1 and read-only LIVE is appended as
+page 9 so pages 1–8 remain stable.

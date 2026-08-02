@@ -98,7 +98,7 @@ describe('P0 — the shell', () => {
     expect(makeApp(state).render(100, 30)).toHaveLength(30);
   });
 
-  test('the tab bar numbers the eight pages in workflow order', () => {
+  test('the tab bar numbers the nine pages in workflow order', () => {
     const text = screenText(makeApp(state));
     expect(text).toContain('1 EDITOR');
     expect(text).toContain('2 BACKTEST');
@@ -108,9 +108,10 @@ describe('P0 — the shell', () => {
     expect(text).toContain('6 PORTFOLIO');
     expect(text).toContain('7 COMPARE');
     expect(text).toContain('8 LOGS');
+    expect(text).toContain('9 LIVE');
   });
 
-  test('a terminal too narrow for eight titles names only the page you are on', () => {
+  test('a terminal too narrow for nine titles names only the page you are on', () => {
     state.page = 'scan';
     const text = screenText(makeApp(state, 80, 24), 80, 24);
     const tabs = text.split('\n')[0]!;
@@ -120,7 +121,7 @@ describe('P0 — the shell', () => {
     expect(tabs).toContain('80×24');
   });
 
-  test('1–8 switch pages', () => {
+  test('1–9 switch pages', () => {
     const app = makeApp(state);
     const expected: PageId[] = [...PAGES];
     for (let i = 0; i < expected.length; i++) {
@@ -1165,13 +1166,15 @@ describe('the STRATEGIES pane, on every command page', () => {
     expect(list.length).toBeGreaterThan(2);
   });
 
-  test('every command page draws it, and TRADES — which has no command — does not', () => {
+  test('every command page draws it, and the three views do not', () => {
     for (const command of COMMANDS) {
       state.page = command;
       expect(screenText(makeApp(state)), command).toContain('STRATEGIES');
     }
-    state.page = 'logs';
-    expect(screenText(makeApp(state))).not.toContain('STRATEGIES');
+    for (const page of ['logs', 'editor', 'live'] as const) {
+      state.page = page;
+      expect(screenText(makeApp(state)), page).not.toContain('STRATEGIES');
+    }
   });
 
   test('it is first in the focus ring, and each page opens on it', () => {
@@ -1535,13 +1538,13 @@ describe('run history, per page', () => {
     state.flags.backtest.scripts = ['examples/rsi.pine'];
   });
 
-  test('every command page has the pane; the two view pages do not', () => {
+  test('every command page has the pane; the three view pages do not', () => {
     state.history = [run('backtest', 'BTCUSDT')];
     for (const command of COMMANDS) {
       state.page = command;
       expect(screenText(makeApp(state)), command).toContain('HISTORY');
     }
-    for (const page of ['logs', 'editor'] as const) {
+    for (const page of ['logs', 'editor', 'live'] as const) {
       state.page = page;
       expect(screenText(makeApp(state)), page).not.toContain('HISTORY');
     }

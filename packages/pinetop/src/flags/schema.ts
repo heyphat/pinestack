@@ -247,9 +247,9 @@ const RANKING: FlagSpec[] = [
 const CHART: FlagSpec[] = [{ name: 'no-chart', kind: 'bool', group: 'display' }];
 
 /**
- * The eight pages, in workflow order (§4.2). EDITOR and LOGS are views, not
- * commands: the loop starts at the source and ends at the fills and the log,
- * and neither end spawns anything.
+ * The nine pages, in workflow order (§4.2). EDITOR, LOGS, and LIVE are views,
+ * not commands. LIVE is appended so ordinals 1–8 remain stable and it never
+ * enters a `pinerun` command schema.
  */
 export const PAGES = [
   'editor',
@@ -260,15 +260,16 @@ export const PAGES = [
   'portfolio',
   'compare',
   'logs',
+  'live',
 ] as const;
 
 export type PageId = (typeof PAGES)[number];
 /** The pages that are not a `pinerun` command. */
-export type ViewId = 'editor' | 'logs';
+export type ViewId = 'editor' | 'logs' | 'live';
 /** The six pages that spawn something. */
 export type CommandId = Exclude<PageId, ViewId>;
 
-const VIEWS: readonly string[] = ['editor', 'logs'];
+const VIEWS: readonly PageId[] = ['editor', 'logs', 'live'];
 
 export const COMMANDS: readonly CommandId[] = PAGES.filter(
   (p): p is CommandId => !VIEWS.includes(p),
@@ -297,6 +298,7 @@ export const PAGE_TITLES: Record<PageId, string> = {
   portfolio: 'PORTFOLIO',
   compare: 'COMPARE',
   logs: 'LOGS',
+  live: 'LIVE',
 };
 
 /** The docs' own verb for each page (§4.2). */
@@ -309,6 +311,7 @@ export const PAGE_PURPOSE: Record<PageId, string> = {
   portfolio: 'combine — N symbols, one pot',
   compare: 'compare — two strategies, same bars',
   logs: 'the engine log and the fills for the loaded run',
+  live: 'observe — read-only Pinelive lifecycle and durable execution evidence',
 };
 
 export interface CommandSchema {

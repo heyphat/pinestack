@@ -372,3 +372,54 @@ test('status rejects schema 1 and 2, reads schema 3, and reports an empty ledger
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('status validates the full ledger while folding an exact historical prefix', async () => {
+  const dir = await temporaryDirectory();
+  try {
+    const { readPineliveStatus } = await import('../src/node.js');
+    const path = join(dir, 'historical-prefix.jsonl');
+    const acquired = {
+      schemaVersion: 3,
+      sequence: 1,
+      recordType: 'lease',
+      runId: 'shared-run',
+      executionId: 'shared-execution',
+      action: 'acquired',
+      resource: 'ledger',
+      leaseId: 'lease',
+      ownerId: 'owner',
+      recordedAt: new Date(0).toISOString(),
+    } as const;
+    const released = {
+      ...acquired,
+      sequence: 2,
+      action: 'released',
+      recordedAt: new Date(1).toISOString(),
+    } as const;
+    await writeFile(path, `${JSON.stringify(acquired)}\n${JSON.stringify(released)}\n`, 'utf8');
+
+    const current = await readPineliveStatus({ ledgerPath: path });
+    expect(current.ledger.lastSequence).toBe(2);
+    expect(current.ownership.durableLedgerLease.availability).toBe('not-recorded');
+
+    const historical = await readPineliveStatus({ ledgerPath: path, throughSequence: 1 });
+    expect(historical.ledger).toMatchObject({
+      ledgerSchemaVersion: 3,
+      lastSequence: 1,
+      bytes: current.ledger.bytes,
+      validBytes: current.ledger.validBytes,
+    });
+    expect(historical.ownership.durableLedgerLease).toMatchObject({
+      availability: 'known',
+      value: { leaseId: 'lease' },
+    });
+    expect(historical.warnings).toContainEqual(
+      expect.objectContaining({ code: 'historical-prefix' }),
+    );
+    await expect(readPineliveStatus({ ledgerPath: path, throughSequence: 3 })).rejects.toThrow(
+      'exceeds durable ledger tail 2',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -53,12 +53,19 @@ import { portfolioPage } from './pages/portfolio.js';
 import { refreshScripts } from './scripts.js';
 import { scanPage } from './pages/scan.js';
 import { selectedCombo, sweepPage } from './pages/sweep.js';
+import { livePage, reconcileLiveSelection, selectLiveCursor } from './pages/live.js';
 import { logsPage } from './pages/logs.js';
 import { walkforwardPage } from './pages/walkforward.js';
 import { saveFlags } from './persist.js';
 import { Screen } from './render/screen.js';
 import { appendSession } from './run/session-log.js';
 import { runPinerun, type SpawnOptions } from './run/spawn.js';
+import {
+  LiveStatusPoller,
+  type LiveStatusPollEvent,
+  type LiveStatusPollerLike,
+  type LiveStatusPollerOptions,
+} from './run/live-status.js';
 import type { AppState, EditState, RunState } from './state.js';
 import { applyProposal, nextRunId, overridesFor, revertOverrides } from './state.js';
 import { groundReport, parseAskResponse, type AskProvider } from './ask/protocol.js';
@@ -76,6 +83,7 @@ export const PAGE_MAP: Record<PageId, Page> = {
   portfolio: portfolioPage,
   compare: comparePage,
   logs: logsPage,
+  live: livePage,
 };
 
 /**
@@ -111,7 +119,7 @@ export function bootstrap(state: AppState, cwd = process.cwd()): string | undefi
     loaded = only.label;
   }
 
-  if (!anythingConfigured) {
+  if (!anythingConfigured && state.page !== 'live') {
     state.overlay = { kind: 'welcome', buffer: '', cursor: 0 };
   }
 
@@ -126,6 +134,10 @@ export interface AppOptions {
   cwd?: string;
   spawn?: SpawnOptions;
   ask?: AskProvider;
+  /** Options for the read-only Pinelive child poller; no process starts before `start()`. */
+  live?: LiveStatusPollerOptions;
+  /** Deterministic lifecycle/test seam for the LIVE status source. */
+  livePoller?: LiveStatusPollerLike;
   /** Test seam: render once and return instead of listening for keys. */
   headless?: boolean;
 }
@@ -136,7 +148,11 @@ export class App {
   private readonly cwd: string;
   private readonly spawnOptions: SpawnOptions;
   private readonly provider?: AskProvider;
+  private readonly livePoller: LiveStatusPollerLike;
+  private liveUnsubscribe?: () => void;
+  private liveGeneration = 0;
   private abort?: AbortController;
+  private stopPromise?: Promise<void>;
   private disposers: (() => void)[] = [];
   /** `space` was pressed and the next digit picks a page (§4.2.f). */
   private pagePrefix = false;
@@ -149,6 +165,8 @@ export class App {
     this.cwd = opts.cwd ?? process.cwd();
     this.spawnOptions = opts.spawn ?? {};
     this.provider = opts.ask;
+    this.livePoller =
+      opts.livePoller ?? new LiveStatusPoller({ cwd: this.cwd, ...(opts.live ?? {}) });
   }
 
   get page(): Page {
@@ -226,6 +244,8 @@ export class App {
   }
 
   paint(): void {
+    if (this.state.page === 'live') this.livePoller.start();
+    else this.livePoller.pause?.();
     this.terminal.paint(this.render());
   }
 
@@ -235,15 +255,44 @@ export class App {
     process.stdout.write(`\x1b]2;${windowTitle(this.state)}\x07`);
     this.disposers.push(this.terminal.onKey((key) => this.onKey(key)));
     this.disposers.push(this.terminal.onResizeEvent(() => this.paint()));
+    this.liveUnsubscribe = this.livePoller.subscribe((event) => this.onLiveStatus(event));
     this.paint();
   }
 
-  stop(): void {
+  /** Stop input and work immediately, then await bounded LIVE child disposal before teardown. */
+  stop(): Promise<void> {
+    this.stopPromise ??= this.performStop();
+    return this.stopPromise;
+  }
+
+  private async performStop(): Promise<void> {
     for (const dispose of this.disposers) dispose();
     this.disposers = [];
+    this.liveUnsubscribe?.();
+    this.liveUnsubscribe = undefined;
     this.abort?.abort();
+    await this.livePoller.dispose();
     saveFlags(this.state.flags, this.cwd);
     this.terminal.close();
+  }
+
+  private onLiveStatus(event: LiveStatusPollEvent): void {
+    if (event.generation < this.liveGeneration) return;
+    this.liveGeneration = event.generation;
+    if (event.type === 'started') {
+      this.state.live.inFlightGeneration = event.generation;
+    } else if (event.type === 'snapshot') {
+      const previous = this.state.live.snapshot;
+      this.state.live.snapshot = event.snapshot;
+      this.state.live.lastSuccessAt = event.receivedAt;
+      this.state.live.inFlightGeneration = undefined;
+      this.state.live.error = undefined;
+      reconcileLiveSelection(this.state, previous);
+    } else {
+      this.state.live.inFlightGeneration = undefined;
+      this.state.live.error = event.error;
+    }
+    if (this.state.page === 'live') this.paint();
   }
 
   private focusId(): string {
@@ -277,6 +326,8 @@ export class App {
     const panes = this.state.panes[this.state.page];
     const current = panes.cursor[paneId] ?? 0;
     panes.cursor[paneId] = clampCursor(current + delta, count);
+    if (this.state.page === 'live' && paneId === 'runs')
+      selectLiveCursor(this.state, panes.cursor[paneId]);
   }
 
   // ————————————————————————————————————————————————————————— key handling
@@ -448,12 +499,17 @@ export class App {
       case 'move':
         this.moveCursor(action.delta);
         break;
-      case 'first':
-        state.panes[state.page].cursor[this.focusId()] = 0;
+      case 'first': {
+        const paneId = this.focusId();
+        state.panes[state.page].cursor[paneId] = 0;
+        if (state.page === 'live' && paneId === 'runs') selectLiveCursor(state, 0);
         break;
+      }
       case 'last': {
         const paneId = this.focusId();
-        state.panes[state.page].cursor[paneId] = Math.max(0, this.page.rowCount(state, paneId) - 1);
+        const cursor = Math.max(0, this.page.rowCount(state, paneId) - 1);
+        state.panes[state.page].cursor[paneId] = cursor;
+        if (state.page === 'live' && paneId === 'runs') selectLiveCursor(state, cursor);
         break;
       }
       case 'confirm': {
@@ -476,7 +532,10 @@ export class App {
       }
       case 'run-dialog': {
         if (this.page.command == null) {
-          state.status = 'LOGS has no command — it shows the loaded run';
+          state.status =
+            state.page === 'live'
+              ? 'LIVE is read-only — it cannot launch or control Pinelive'
+              : 'LOGS has no command — it shows the loaded research run';
           break;
         }
         this.openRunDialog(this.page.command);
@@ -486,12 +545,21 @@ export class App {
         this.handoffToWalkforward();
         break;
       case 'edit-external':
+        if (state.page === 'live') {
+          state.status = 'LIVE is read-only — no research script is attached to this view';
+          break;
+        }
         // The frame is torn down and rebuilt inside `handOff`, so the title bar
         // has to be reclaimed: the editor will have set its own (§4.8.g).
         state.status = handOff(state, this.terminal, this.cwd);
         process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
         break;
       case 'filter':
+        if (state.page !== 'logs') {
+          state.status =
+            state.page === 'live' ? 'LIVE has no mutable filter' : 'fill filtering is on LOGS';
+          break;
+        }
         state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };
         break;
       case 'toggle-advanced':
@@ -501,6 +569,10 @@ export class App {
           : 'advanced flags hidden';
         break;
       case 'ask':
+        if (state.page === 'live') {
+          state.status = 'LIVE is read-only — Ask does not receive Pinelive operational evidence';
+          break;
+        }
         state.ask.open = true;
         state.ask.error = undefined;
         break;
@@ -532,7 +604,6 @@ export class App {
           break;
         }
         state.quit = true;
-        this.stop();
         break;
       }
     }
@@ -569,6 +640,11 @@ export class App {
     }
     if (state.ask.open) {
       state.ask.open = false;
+      return;
+    }
+    if (state.page === 'live' && state.panes.live.focus === 'detail') {
+      state.panes.live.focus = 'runs';
+      state.status = 'LIVE run list';
       return;
     }
     // The failure drawer outranks the filter and the log scope: it is the newest
@@ -1009,6 +1085,13 @@ export class App {
 
   async ask(question: string): Promise<void> {
     const state = this.state;
+    if (state.page === 'live') {
+      state.ask.error = 'LIVE is read-only — operational evidence is not sent to Ask providers';
+      state.ask.open = false;
+      state.status = state.ask.error;
+      this.paint();
+      return;
+    }
     if (this.provider == null) {
       state.ask.error = 'no ask provider configured — pass one to the App (§9: opt-in)';
       this.paint();
@@ -1029,7 +1112,7 @@ export class App {
 
     try {
       const raw = await this.provider.ask(question, {
-        command: command ?? 'logs',
+        command: command ?? state.page,
         invocation: model == null ? '' : composeArgv(model).join(' '),
         report: groundReport(state.run?.report),
         inputTitles: titles,

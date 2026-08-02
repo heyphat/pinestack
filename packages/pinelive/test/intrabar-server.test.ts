@@ -38,6 +38,7 @@ import {
   prepareIntrabarRun,
   runIntrabarServer,
   type IntrabarBrokerFactory,
+  type IntrabarServerReadiness,
 } from '../src/core/intrabar-server.js';
 import type { Account, Fill, Instrument, OrderRequest, Position } from '../src/core/types.js';
 
@@ -1296,4 +1297,112 @@ test('post-bootstrap unsafe account state latches before another Tiger mutation'
   expect(result.unsafeReason).toContain('execution breaker is latched');
   expect(transport.safetyAssertions).toBeGreaterThan(1);
   expect(transport.submits).toBe(0);
+});
+
+test('advisory lifecycle callbacks observe durable readiness before subscription and stopping before cleanup', async () => {
+  const trace: string[] = [];
+  const ledger = new TrackingLedger(trace);
+  let readiness: IntrabarServerReadiness | undefined;
+  let stoppingCalls = 0;
+
+  await runIntrabarServer({
+    prepared: prepareIntrabarRun(computeConfig(), strategy),
+    dataFactory: () => provider([], { trace }),
+    ledger,
+    onReady: (value) => {
+      readiness = value;
+      trace.push('lifecycle:ready');
+    },
+    onStopping: () => {
+      stoppingCalls++;
+      trace.push('lifecycle:stopping');
+    },
+  });
+
+  expect(readiness).toMatchObject({
+    runId: expect.any(String),
+    executionId: expect.any(String),
+    posture: 'compute-only',
+    executionEligibility: 'disabled-by-posture',
+  });
+  expect(readiness!.ledgerSequence).toBeGreaterThan(0);
+  expect(trace.indexOf('ledger:execution-eligibility')).toBeLessThan(
+    trace.indexOf('lifecycle:ready'),
+  );
+  expect(trace.indexOf('lifecycle:ready')).toBeLessThan(trace.indexOf('provider:subscribe'));
+  expect(trace.indexOf('lifecycle:stopping')).toBeLessThan(trace.indexOf('provider:disconnect'));
+  expect(stoppingCalls).toBe(1);
+});
+
+test('advisory lifecycle callback failures are logged and isolated from runtime cleanup', async () => {
+  const trace: string[] = [];
+  const logs: string[] = [];
+  const result = await runIntrabarServer({
+    prepared: prepareIntrabarRun(computeConfig(), strategy),
+    dataFactory: () => provider([], { trace }),
+    ledger: new TrackingLedger(trace),
+    onReady: () => {
+      throw new Error('ready observer failed');
+    },
+    onStopping: () => {
+      throw new Error('stopping observer failed');
+    },
+    onLog: (message) => logs.push(message),
+  });
+
+  expect(result.mode).toBe('compute-only');
+  expect(logs).toContain('lifecycle readiness callback failed: ready observer failed');
+  expect(logs).toContain('lifecycle stopping callback failed: stopping observer failed');
+  expect(trace).toContain('provider:disconnect');
+  expect(trace).toContain('ledger:close');
+});
+
+test('nonsettling advisory lifecycle callbacks never gate runtime completion or cleanup', async () => {
+  const trace: string[] = [];
+  const never = new Promise<void>(() => undefined);
+  let readinessCalls = 0;
+  let stoppingCalls = 0;
+  let terminalCalls = 0;
+  const run = runIntrabarServer({
+    prepared: prepareIntrabarRun(mirroredConfig(), strategy),
+    dataFactory: () => provider([], { trace }),
+    ledger: new TrackingLedger(trace),
+    lease: new TrackingLease('nonsettling-lifecycle', trace),
+    brokerFactory: paperFactory(trace),
+    onReady: () => {
+      readinessCalls++;
+      return never;
+    },
+    onStopping: () => {
+      stoppingCalls++;
+      return never;
+    },
+    onTerminal: () => {
+      terminalCalls++;
+      trace.push('lifecycle:terminal');
+    },
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      run,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('nonsettling lifecycle callback gated runtime cleanup')),
+          250,
+        );
+      }),
+    ]);
+    expect(result.mode).toBe('mirrored');
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  expect(readinessCalls).toBe(1);
+  expect(stoppingCalls).toBe(1);
+  expect(terminalCalls).toBe(1);
+  expect(trace).toContain('lease:release');
+  expect(trace).toContain('provider:disconnect');
+  expect(trace).toContain('ledger:close');
+  expect(trace.indexOf('lifecycle:terminal')).toBeLessThan(trace.indexOf('provider:disconnect'));
 });

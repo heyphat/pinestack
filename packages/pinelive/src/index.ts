@@ -283,6 +283,8 @@ export type {
   ComputeOnlyIntrabarServerOptions,
   MirroredIntrabarServerOptions,
   IntrabarServerOptions,
+  IntrabarServerReadiness,
+  IntrabarServerTerminal,
   IntrabarRunDecisionSummary,
   ComputeOnlyIntrabarServerResult,
   MirroredIntrabarServerResult,

@@ -197,11 +197,45 @@ export type AccountInstrumentClaimFactory = (
   context: AccountInstrumentClaimFactoryContext,
 ) => ExecutionLease | Promise<ExecutionLease>;
 
+export interface IntrabarServerReadiness {
+  readonly runId: string;
+  readonly executionId: string;
+  /** Authoritative venue symbol from the validated runtime binding. */
+  readonly executionSymbol: string;
+  readonly ledgerSequence: number;
+  readonly posture: EffectiveRunPosture;
+  readonly executionEligibility: ExecutionEligibilityState;
+}
+
+/** Final durable watermark sampled from this writer after its last acknowledged lifecycle row. */
+export interface IntrabarServerTerminal {
+  readonly runId: string;
+  readonly executionId: string;
+  readonly ledgerSequence: number;
+  /** Normalized safety evidence retained even if the host's later ledger reread fails. */
+  readonly executionLatchReason?: 'unresolved-effects' | 'breaker-latched';
+}
+
 interface IntrabarServerCallbacks {
   readonly signal?: AbortSignal;
   readonly teardownTimeoutMs?: number;
   /** Invoked only after this evaluation has a durable schema-v3 row. */
   readonly onEvaluation?: (evaluation: IntrabarEvaluation) => void | Promise<void>;
+  /**
+   * Advisory host lifecycle seam. Invoked after posture/eligibility is durably flushed and before
+   * live subscription. Failures are logged and isolated from runtime safety and admission.
+   */
+  readonly onReady?: (readiness: IntrabarServerReadiness) => void | Promise<void>;
+  /**
+   * Advisory host lifecycle seam. Invoked after cancellation has been requested. Its promise is
+   * observed for logging only and never gates runtime safety or cleanup.
+   */
+  readonly onStopping?: () => void | Promise<void>;
+  /**
+   * Synchronous advisory handoff of this writer's final acknowledged sequence. It must not perform
+   * I/O; hosts use it to bind later best-effort terminal history to the owned ledger prefix.
+   */
+  readonly onTerminal?: (terminal: IntrabarServerTerminal) => void;
   readonly onLog?: (message: string) => void;
   /**
    * Constructed notification channels for `config.alerts`. The config carries
@@ -400,7 +434,9 @@ export async function runIntrabarServer(
     mirrored && config.execution.broker.id === 'tiger' && !config.execution.armed
       ? 'monitor'
       : 'live';
-  let executionEligibility: ExecutionEligibilityState = mirrored ? 'blocked' : 'enabled';
+  let executionEligibility: ExecutionEligibilityState = mirrored
+    ? 'blocked'
+    : 'disabled-by-posture';
   let eligibilityReasons: string[] = [];
   let eligibilityRecorded = false;
   let binding: RunInstrumentBinding | undefined;
@@ -412,8 +448,21 @@ export async function runIntrabarServer(
   let primaryError: unknown;
   let result: IntrabarServerResult | undefined;
   let ownedRead: IntrabarPersistenceRead | undefined;
+  let stoppingNotification: Promise<void> | undefined;
 
-  const abortRunner = (): void => runner?.cancel();
+  const notifyStopping = (): Promise<void> => {
+    if (stoppingNotification) return stoppingNotification;
+    stoppingNotification = Promise.resolve()
+      .then(() => options.onStopping?.())
+      .catch((error) => {
+        options.onLog?.(`lifecycle stopping callback failed: ${errorMessage(error)}`);
+      });
+    return stoppingNotification;
+  };
+  const abortRunner = (): void => {
+    runner?.cancel();
+    void notifyStopping();
+  };
   options.signal?.addEventListener('abort', abortRunner, { once: true });
   try {
     const dataFactory = managed ? options.createData : options.dataFactory;
@@ -663,6 +712,16 @@ export async function runIntrabarServer(
         strategyId: config.strategy,
       });
       await computeJournal.initialize();
+      if (!recovery.executionEligibility) {
+        await writer.append({
+          recordType: 'execution-eligibility',
+          posture: 'compute-only',
+          state: 'disabled-by-posture',
+          reasons: ['compute-only posture does not permit broker execution'],
+          accountClaim: 'not-applicable',
+          synchronization: 'not-applicable',
+        });
+      }
     } else {
       if (!lease || !lease.snapshot || !leaseRecorded)
         throw new Error('mirrored broker construction requires a durable acquired lease');
@@ -922,6 +981,20 @@ export async function runIntrabarServer(
     options.onLog?.(
       `prepared authority=${historicalBinding.authority.identity} binding=${binding.id}`,
     );
+    await writer.flush();
+    const readiness: IntrabarServerReadiness = {
+      runId: writer.runId,
+      executionId: writer.executionId,
+      executionSymbol: binding.executionSymbol,
+      ledgerSequence: writer.nextSequence - 1,
+      posture: mirrored ? posture : 'compute-only',
+      executionEligibility,
+    };
+    void Promise.resolve()
+      .then(() => options.onReady?.(readiness))
+      .catch((error) => {
+        options.onLog?.(`lifecycle readiness callback failed: ${errorMessage(error)}`);
+      });
     assertNotAborted(options.signal, 'before live subscription');
     await runner.start();
     await writer.flush();
@@ -973,6 +1046,7 @@ export async function runIntrabarServer(
   }
 
   runner?.cancel();
+  void notifyStopping();
   const cleanupErrors: unknown[] = [];
   const cleanup = async (operation: () => void | Promise<void>): Promise<void> => {
     try {
@@ -1039,6 +1113,32 @@ export async function runIntrabarServer(
   } else if (!accountClaimStillHeld && !leaseAcquisitionRecordUncertain && lease?.snapshot) {
     await cleanup(() => releaseRecordedLease(writer, lease!, leaseRecorded));
     leaseRecorded = false;
+  }
+
+  if (writer) {
+    const terminalState = scheduler?.state;
+    const unresolvedEffects = terminalState
+      ? terminalState.unresolvedLogicalOrderIds.length
+      : (recovery?.unresolvedIntents.size ?? 0);
+    const breakerLatched = terminalState
+      ? terminalState.breaker.latched
+      : (recovery?.breaker.latched ?? false);
+    const executionLatchReason =
+      unresolvedEffects > 0
+        ? ('unresolved-effects' as const)
+        : breakerLatched
+          ? ('breaker-latched' as const)
+          : undefined;
+    try {
+      options.onTerminal?.({
+        runId: writer.runId,
+        executionId: writer.executionId,
+        ledgerSequence: writer.nextSequence - 1,
+        ...(executionLatchReason ? { executionLatchReason } : {}),
+      });
+    } catch (error) {
+      options.onLog?.(`lifecycle terminal callback failed: ${errorMessage(error)}`);
+    }
   }
 
   if (broker?.disconnect) {

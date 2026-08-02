@@ -7,7 +7,9 @@ import {
   prepareIntrabarRun,
   runIntrabarServer,
   type AccountInstrumentClaimFactoryContext,
+  type IntrabarServerReadiness,
   type IntrabarServerResult,
+  type IntrabarServerTerminal,
   type PreparedComputeOnlyIntrabarRun,
   type PreparedMirroredIntrabarRun,
 } from './core/intrabar-server.js';
@@ -23,21 +25,33 @@ import { normalizeAlerts, type NormalizedAlertsConfig } from './core/config.js';
 import {
   FileExecutionLease,
   JsonlLedger,
+  NodeRunRegistry,
   createNodeAccountInstrumentClaim,
+  createRunInstanceId,
   createNodeTigerBroker,
+  readBootBoundProcessIdentity,
+  readPineliveInstanceStatus,
   readPineliveStatus,
+  readPineliveStatusList,
   recoverStalePineliveClaims,
+  resolveRunRegistrationPath,
   readConfig,
   readJsonl,
   readJsonlPrefix,
+  type ActiveRunRegistrationV1,
+  type DiscoveredRunStatusV1,
   type JsonlLedgerOptions,
   type JsonlPrefix,
   type NodeExclusiveFileLeaseOptions,
+  type PineliveStatusListV1,
   type ReadJsonlOptions,
+  type RunHistoryOutcome,
+  type RunHistoryRecordV1,
   type TigerTradingCredentials,
 } from './node.js';
 import { compareLedgerParity } from './parity.js';
-import type { LedgerRecord, LedgerSink } from './core/ledger.js';
+import type { EffectiveRunPosture, LedgerRecord, LedgerSink } from './core/ledger.js';
+import { recoverLedger, type LedgerRecoveryState } from './core/recovery.js';
 import type { ExpectedPositionRecord } from './parity.js';
 
 // Injected by scripts/build-bin.ts (`bun build --define`) so the compiled binary
@@ -84,6 +98,31 @@ export interface CliRuntimeStorage {
   readonly fileLease: ExecutionLease;
 }
 
+export interface CliHeartbeatService {
+  start(): void;
+  stop(): Promise<void>;
+}
+
+export interface CliRunRegistry {
+  writeActive(record: ActiveRunRegistrationV1): Promise<void>;
+  updateActive(
+    instanceId: string,
+    update: (
+      current: ActiveRunRegistrationV1,
+    ) => ActiveRunRegistrationV1 | Promise<ActiveRunRegistrationV1>,
+  ): Promise<ActiveRunRegistrationV1>;
+  createHeartbeatService(
+    instanceId: string,
+    options?: {
+      readonly onWarning?: (warning: {
+        readonly code: 'heartbeat-write-failed';
+        readonly failureCount: number;
+      }) => void;
+    },
+  ): CliHeartbeatService;
+  completeRun(record: RunHistoryRecordV1): Promise<{ readonly activeRemoved: boolean }>;
+}
+
 export interface CliDependencies {
   readonly readConfig: typeof readConfig;
   readonly readSource: (path: string) => Promise<string>;
@@ -106,6 +145,17 @@ export interface CliDependencies {
     options?: ReadJsonlOptions | boolean,
   ) => Promise<JsonlPrefix<T>>;
   readonly readPineliveStatus: typeof readPineliveStatus;
+  readonly readPineliveStatusList: typeof readPineliveStatusList;
+  readonly readPineliveInstanceStatus: typeof readPineliveInstanceStatus;
+  readonly createRunRegistry: () => CliRunRegistry;
+  readonly createRunInstanceId: typeof createRunInstanceId;
+  readonly readBootBoundProcessIdentity: typeof readBootBoundProcessIdentity;
+  readonly resolveRunRegistrationPath: typeof resolveRunRegistrationPath;
+  /** Upper bound for each advisory registry or terminal-status operation. */
+  readonly registryOperationTimeoutMs: number;
+  readonly now: () => Date;
+  readonly pid: number;
+  readonly cwd: () => string;
   readonly recoverStalePineliveClaims: typeof recoverStalePineliveClaims;
   readonly readTigerDataCredentials: () => Readonly<TigerTradingCredentials>;
   readonly readTigerTradingCredentials: () => Readonly<TigerTradingCredentials>;
@@ -164,6 +214,16 @@ const defaultCliDependencies: CliDependencies = {
   readJsonl,
   readJsonlPrefix,
   readPineliveStatus,
+  readPineliveStatusList,
+  readPineliveInstanceStatus,
+  createRunRegistry: () => new NodeRunRegistry(),
+  createRunInstanceId,
+  readBootBoundProcessIdentity,
+  resolveRunRegistrationPath,
+  registryOperationTimeoutMs: 1_000,
+  now: () => new Date(),
+  pid: process.pid,
+  cwd: () => process.cwd(),
   recoverStalePineliveClaims,
   readTigerDataCredentials: tigerDataCredentialsFromEnvironment,
   readTigerTradingCredentials: tigerTradingCredentialsFromEnvironment,
@@ -200,6 +260,74 @@ function buildAlertChannels(
   );
 }
 
+function printStatusList(status: PineliveStatusListV1, log: (message: string) => void): void {
+  log(
+    escapeTerminalText(
+      `statusListVersion=${status.statusListVersion} generatedAt=${status.generatedAt} items=${status.items.length}`,
+    ),
+  );
+  for (const item of status.items) {
+    if (item.ok) log(formatDiscoveredStatus(item.value));
+    else
+      log(
+        escapeTerminalText(
+          `error instance=${item.instanceIdHint ?? 'unknown'} code=${item.error.code}` +
+            `${item.path ? ` path=${item.path}` : ''} message=${item.error.message}`,
+        ),
+      );
+  }
+}
+
+function formatDiscoveredStatus(status: DiscoveredRunStatusV1): string {
+  const identity = status.kind === 'active' ? status.registration : status.history;
+  const identifiers =
+    `instance=${status.instanceId}` +
+    `${identity.runId ? ` run=${identity.runId}` : ''}` +
+    `${identity.executionId ? ` execution=${identity.executionId}` : ''}`;
+  if (status.kind === 'terminal') {
+    const durable = status.durable;
+    const ledger =
+      durable.availability === 'known'
+        ? ` ledger=${durable.value.ledger.path} sequence=${durable.value.ledger.lastSequence ?? 0}`
+        : ` durable=${durable.availability} reason=${durable.reason}`;
+    return escapeTerminalText(
+      `${identifiers} kind=terminal outcome=${status.history.outcome} endedAt=${status.history.endedAt}${ledger}${formatWarnings(status.warnings)}`,
+    );
+  }
+  const posture =
+    status.durable.posture.availability === 'known'
+      ? status.durable.posture.value
+      : status.durable.posture.availability;
+  const eligibility =
+    status.durable.executionEligibility.availability === 'known'
+      ? status.durable.executionEligibility.value.state
+      : status.durable.executionEligibility.availability;
+  const reasons = status.lifecycle.reasons.length
+    ? ` reasons=${status.lifecycle.reasons.join('|')}`
+    : '';
+  return escapeTerminalText(
+    `${identifiers} kind=active lifecycle=${status.lifecycle.state} posture=${posture}` +
+      ` eligibility=${eligibility} heartbeatAgeMs=${status.lifecycle.heartbeatAgeMs}` +
+      ` ledger=${status.durable.ledger.path} sequence=${status.durable.ledger.lastSequence ?? 0}` +
+      reasons +
+      formatWarnings(status.warnings),
+  );
+}
+
+function formatWarnings(warnings: readonly { readonly code: string }[]): string {
+  return warnings.length ? ` warnings=${warnings.map((warning) => warning.code).join('|')}` : '';
+}
+
+const TERMINAL_CONTROL = /[\u0000-\u001f\u007f-\u009f]/gu;
+
+/** Human output must never emit raw terminal controls even if an injected reader is unsafe. */
+function escapeTerminalText(value: string): string {
+  return value.replace(
+    TERMINAL_CONTROL,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
 export async function main(
   argv = process.argv.slice(2),
   overrides: Partial<CliDependencies> = {},
@@ -210,6 +338,8 @@ export async function main(
     dependencies.log('pinelive run --config <pinelive.json>');
     dependencies.log('pinelive validate --config <pinelive.json>');
     dependencies.log('pinelive status --ledger <path> [--json] [--recent <n>]');
+    dependencies.log('pinelive status --all [--json] [--recent <n>]');
+    dependencies.log('pinelive status --instance <instance-id> [--json] [--recent <n>]');
     dependencies.log(
       'pinelive recover --ledger <path> --lease <path> [--account-claim <path>] --confirm',
     );
@@ -239,20 +369,42 @@ export async function main(
   }
   if (command === 'status') {
     const args = parseArgs(rest);
-    assertCommandArgs(args, 'status', ['ledger', 'recent'], ['json']);
+    assertCommandArgs(args, 'status', ['ledger', 'recent', 'instance'], ['json', 'all']);
     const ledgerPath = args.values.get('ledger');
-    if (!ledgerPath) throw new Error('status requires --ledger <path>');
+    const instanceId = args.values.get('instance');
+    const all = args.flags.has('all');
+    const selectors = Number(ledgerPath != null) + Number(instanceId != null) + Number(all);
+    if (selectors !== 1)
+      throw new Error('status requires exactly one of --ledger <path>, --all, or --instance <id>');
     const recentValue = args.values.get('recent');
     const recent = recentValue == null ? undefined : Number(recentValue);
-    const status = await dependencies.readPineliveStatus({
-      ledgerPath,
+    if (ledgerPath) {
+      const status = await dependencies.readPineliveStatus({
+        ledgerPath,
+        ...(recent == null ? {} : { recent }),
+      });
+      if (args.flags.has('json')) dependencies.log(JSON.stringify(status));
+      else
+        dependencies.log(
+          escapeTerminalText(
+            `ledger=${status.ledger.path} schema=${status.ledger.ledgerSchemaVersion ?? 'none'} sequence=${status.ledger.lastSequence ?? 0} partialTail=${status.ledger.partialTail}`,
+          ),
+        );
+      return;
+    }
+    if (all) {
+      const status = await dependencies.readPineliveStatusList({
+        ...(recent == null ? {} : { recent }),
+      });
+      if (args.flags.has('json')) dependencies.log(JSON.stringify(status));
+      else printStatusList(status, dependencies.log);
+      return;
+    }
+    const status = await dependencies.readPineliveInstanceStatus(instanceId!, {
       ...(recent == null ? {} : { recent }),
     });
     if (args.flags.has('json')) dependencies.log(JSON.stringify(status));
-    else
-      dependencies.log(
-        `ledger=${status.ledger.path} schema=${status.ledger.ledgerSchemaVersion ?? 'none'} sequence=${status.ledger.lastSequence ?? 0} partialTail=${status.ledger.partialTail}`,
-      );
+    else dependencies.log(formatDiscoveredStatus(status));
     return;
   }
   if (command === 'recover') {
@@ -312,7 +464,7 @@ export async function main(
   if (!configPath)
     throw new Error('run requires --config <path>; direct --data CSV mode moved to pinery config');
   const rawConfig = await dependencies.readConfig(configPath);
-  await runConfig(rawConfig, dependencies);
+  await runConfig(rawConfig, configPath, dependencies);
 }
 
 async function validateConfig(
@@ -334,8 +486,303 @@ async function validateConfig(
   };
 }
 
+interface CliRunRegistrationSession {
+  readonly registry: CliRunRegistry;
+  readonly instanceId: string;
+  readonly cwd: string;
+  active: ActiveRunRegistrationV1;
+  heartbeat?: CliHeartbeatService;
+  readiness?: IntrabarServerReadiness;
+  terminal?: IntrabarServerTerminal;
+  ownedLedgerSequence?: number;
+  accountClaimPath?: string;
+}
+
+async function boundedAdvisoryOperation<T>(
+  dependencies: CliDependencies,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const timeoutMs = dependencies.registryOperationTimeoutMs;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
+    throw new RangeError('registryOperationTimeoutMs must be a positive safe integer');
+  const task = Promise.resolve().then(operation);
+  void task.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`advisory operation exceeded ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([task, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function beginRunRegistration(
+  config: NormalizedRunConfig,
+  configPath: string,
+  dependencies: CliDependencies,
+): Promise<CliRunRegistrationSession | undefined> {
+  try {
+    const registry = dependencies.createRunRegistry();
+    const instanceId = dependencies.createRunInstanceId();
+    const cwd = dependencies.cwd();
+    const at = dependencies.now().toISOString();
+    const runtimePaths = runtimeStatePaths(config);
+    let processIdentity;
+    try {
+      processIdentity = await dependencies.readBootBoundProcessIdentity(dependencies.pid);
+    } catch {
+      dependencies.log('pinelive registry warning: process-identity-unavailable');
+    }
+    const brokerId =
+      config.execution.kind === 'compute-only' ? 'compute-only' : config.execution.broker.id;
+    const posture: EffectiveRunPosture =
+      config.execution.kind === 'compute-only'
+        ? 'compute-only'
+        : config.execution.broker.id === 'tiger' && !config.execution.armed
+          ? 'monitor'
+          : 'live';
+    const active: ActiveRunRegistrationV1 = {
+      registrationVersion: 1,
+      instanceId,
+      pid: dependencies.pid,
+      ...(processIdentity ? { processIdentity } : {}),
+      lifecycle: 'starting',
+      startedAt: at,
+      heartbeatAt: at,
+      updatedAt: at,
+      configVersion: 3,
+      ...(config.execution.kind === 'mirrored' && config.execution.executionId
+        ? { executionId: config.execution.executionId }
+        : {}),
+      brokerId,
+      posture,
+      paths: {
+        ledger: dependencies.resolveRunRegistrationPath(runtimePaths.ledgerPath, cwd),
+        executionLease: dependencies.resolveRunRegistrationPath(runtimePaths.leasePath, cwd),
+        config: dependencies.resolveRunRegistrationPath(configPath, cwd),
+      },
+      display: {
+        strategyId: config.strategy,
+        strategySymbol: config.symbol,
+        timeframe: config.timeframe,
+      },
+    };
+    await boundedAdvisoryOperation(dependencies, () => registry.writeActive(active));
+    const session: CliRunRegistrationSession = { registry, instanceId, cwd, active };
+    try {
+      session.heartbeat = registry.createHeartbeatService(instanceId, {
+        onWarning: ({ failureCount }) =>
+          dependencies.log(
+            `pinelive registry warning: heartbeat-write-failed count=${failureCount}`,
+          ),
+      });
+      session.heartbeat.start();
+    } catch {
+      dependencies.log('pinelive registry warning: heartbeat-start-failed');
+    }
+    return session;
+  } catch {
+    dependencies.log('pinelive registry warning: initial-registration-failed');
+    return undefined;
+  }
+}
+
+async function updateRunRegistration(
+  session: CliRunRegistrationSession,
+  dependencies: CliDependencies,
+  label: string,
+  update: (current: ActiveRunRegistrationV1, updatedAt: string) => ActiveRunRegistrationV1,
+): Promise<void> {
+  try {
+    const active = await boundedAdvisoryOperation(dependencies, () =>
+      session.registry.updateActive(session.instanceId, (current) => {
+        const updatedAt = monotonicRegistrationTime(current, dependencies.now());
+        return update(current, updatedAt);
+      }),
+    );
+    session.active = active;
+  } catch {
+    dependencies.log(`pinelive registry warning: ${label}-update-failed`);
+  }
+}
+
+async function markRunRegistrationReady(
+  session: CliRunRegistrationSession,
+  readiness: IntrabarServerReadiness,
+  dependencies: CliDependencies,
+): Promise<void> {
+  session.readiness = readiness;
+  await updateRunRegistration(session, dependencies, 'running', (current, updatedAt) => ({
+    ...current,
+    lifecycle: 'running',
+    runId: readiness.runId,
+    executionId: readiness.executionId,
+    posture: readiness.posture,
+    updatedAt,
+    display: {
+      ...current.display,
+      executionSymbol: readiness.executionSymbol,
+    },
+    paths: {
+      ...current.paths,
+      ...(session.accountClaimPath ? { accountClaim: session.accountClaimPath } : {}),
+    },
+  }));
+}
+
+async function markRunRegistrationStopping(
+  session: CliRunRegistrationSession,
+  dependencies: CliDependencies,
+): Promise<void> {
+  if (session.active.lifecycle === 'stopping') return;
+  await updateRunRegistration(session, dependencies, 'stopping', (current, updatedAt) => ({
+    ...current,
+    lifecycle: 'stopping',
+    updatedAt,
+  }));
+}
+
+async function completeRunRegistration(
+  session: CliRunRegistrationSession | undefined,
+  storage: CliRuntimeStorage | undefined,
+  result: IntrabarServerResult | undefined,
+  primaryError: unknown,
+  dependencies: CliDependencies,
+): Promise<void> {
+  if (!session) return;
+  await markRunRegistrationStopping(session, dependencies);
+  try {
+    if (session.heartbeat)
+      await boundedAdvisoryOperation(dependencies, () => session.heartbeat!.stop());
+  } catch {
+    dependencies.log('pinelive registry warning: heartbeat-stop-failed');
+  }
+
+  const finalLedgerSequence = session.terminal?.ledgerSequence ?? session.ownedLedgerSequence;
+  let recovery: LedgerRecoveryState | undefined;
+  if (storage && finalLedgerSequence !== undefined) {
+    try {
+      const prefix = await boundedAdvisoryOperation(dependencies, () =>
+        readCrashSafePrefix(storage.ledgerPath, dependencies),
+      );
+      const completeRecovery =
+        prefix.records.length > 0 ? recoverLedger(prefix.records) : recoverLedger([]);
+      if (finalLedgerSequence > completeRecovery.lastSequence)
+        throw new RangeError('captured terminal sequence exceeds the durable ledger tail');
+      const terminalEvents = completeRecovery.events.slice(0, finalLedgerSequence);
+      if (finalLedgerSequence > 0 && terminalEvents.at(-1)?.sequence !== finalLedgerSequence)
+        throw new RangeError('captured terminal sequence is not a durable boundary');
+      recovery = recoverLedger(terminalEvents);
+    } catch {
+      dependencies.log('pinelive registry warning: terminal-ledger-read-failed');
+    }
+  }
+
+  const runId = session.terminal?.runId ?? recovery?.runId ?? session.readiness?.runId;
+  const executionId =
+    session.terminal?.executionId ?? recovery?.executionId ?? session.readiness?.executionId;
+  if (
+    (runId !== undefined && runId !== session.active.runId) ||
+    (executionId !== undefined && executionId !== session.active.executionId)
+  ) {
+    await updateRunRegistration(
+      session,
+      dependencies,
+      'terminal-identity',
+      (current, updatedAt) => ({
+        ...current,
+        ...(runId ? { runId } : {}),
+        ...(executionId ? { executionId } : {}),
+        updatedAt,
+      }),
+    );
+  }
+
+  const outcome = terminalRunOutcome(
+    primaryError,
+    result,
+    recovery,
+    session.readiness != null,
+    session.terminal?.executionLatchReason,
+  );
+  const finalReasonCode = terminalRunReasonCode(
+    outcome,
+    recovery,
+    session.terminal?.executionLatchReason,
+  );
+  const history: RunHistoryRecordV1 = {
+    historyVersion: 1,
+    instanceId: session.instanceId,
+    ...(runId ? { runId } : {}),
+    ...(executionId ? { executionId } : {}),
+    startedAt: session.active.startedAt,
+    endedAt: monotonicRegistrationTime(session.active, dependencies.now()),
+    outcome,
+    ...(storage ? { finalLedgerPath: session.active.paths.ledger } : {}),
+    ...(storage && finalLedgerSequence !== undefined ? { finalLedgerSequence } : {}),
+    ...(finalReasonCode ? { finalReasonCode } : {}),
+    configVersion: 3,
+    brokerId: session.active.brokerId,
+    posture: session.active.posture,
+  };
+  try {
+    await boundedAdvisoryOperation(dependencies, () => session.registry.completeRun(history));
+  } catch {
+    dependencies.log('pinelive registry warning: terminal-history-write-failed');
+  }
+}
+
+function terminalRunOutcome(
+  primaryError: unknown,
+  result: IntrabarServerResult | undefined,
+  recovery: LedgerRecoveryState | undefined,
+  becameReady: boolean,
+  terminalLatchReason?: IntrabarServerTerminal['executionLatchReason'],
+): RunHistoryOutcome {
+  if (primaryError !== undefined || !result)
+    return becameReady ? 'failed-runtime' : 'failed-startup';
+  if (
+    terminalLatchReason !== undefined ||
+    recovery?.breaker.latched ||
+    (recovery?.unresolvedIntents.size ?? 0) > 0
+  )
+    return 'execution-latched';
+  return 'stopped';
+}
+
+function terminalRunReasonCode(
+  outcome: RunHistoryOutcome,
+  recovery: LedgerRecoveryState | undefined,
+  terminalLatchReason?: IntrabarServerTerminal['executionLatchReason'],
+): string | undefined {
+  if (outcome === 'failed-startup') return 'startup-failed';
+  if (outcome === 'failed-runtime') return 'runtime-failed';
+  if (outcome !== 'execution-latched') return undefined;
+  if (terminalLatchReason) return terminalLatchReason;
+  if ((recovery?.unresolvedIntents.size ?? 0) > 0) return 'unresolved-effects';
+  return 'breaker-latched';
+}
+
+function monotonicRegistrationTime(current: ActiveRunRegistrationV1, now: Date): string {
+  const timestamp = Math.max(
+    Date.parse(current.startedAt),
+    Date.parse(current.heartbeatAt),
+    Date.parse(current.updatedAt),
+    now.getTime(),
+  );
+  if (!Number.isFinite(timestamp)) throw new RangeError('run registration clock is invalid');
+  return new Date(timestamp).toISOString();
+}
+
 async function runConfig(
   rawConfig: Readonly<Record<string, unknown>>,
+  configPath: string,
   dependencies: CliDependencies,
 ): Promise<void> {
   const source = await dependencies.readSource(strategyPath(rawConfig));
@@ -343,6 +790,7 @@ async function runConfig(
   // exists before this pure source/config gate completes.
   const prepared = dependencies.prepareIntrabarRun(rawConfig, source);
   const normalized = prepared.config;
+  const registration = await beginRunRegistration(normalized, configPath, dependencies);
 
   const dataFactory = (): MarketDataProvider =>
     normalized.data.provider === 'tiger'
@@ -355,21 +803,31 @@ async function runConfig(
   const stop = (): void => controller.abort();
   dependencies.addSignalHandler('SIGINT', stop);
   dependencies.addSignalHandler('SIGTERM', stop);
+  let storage: CliRuntimeStorage | undefined;
+  let result: IntrabarServerResult | undefined;
+  let primaryError: unknown;
   try {
-    const storage = await openRuntimeStorage(normalized, dependencies);
-    const result = await runWithStorage(
+    storage = await openRuntimeStorage(normalized, dependencies);
+    result = await runWithStorage(
       prepared,
       normalized,
       dataFactory,
       storage,
       controller.signal,
       dependencies,
+      registration,
     );
-    printResult(result, storage.ledgerPath, dependencies.log);
+  } catch (error) {
+    primaryError = error;
   } finally {
     dependencies.removeSignalHandler('SIGINT', stop);
     dependencies.removeSignalHandler('SIGTERM', stop);
+    await completeRunRegistration(registration, storage, result, primaryError, dependencies);
   }
+
+  if (primaryError !== undefined) throw primaryError;
+  if (!result || !storage) throw new Error('pinelive runtime stopped without a result');
+  printResult(result, storage.ledgerPath, dependencies.log);
 }
 
 async function runWithStorage(
@@ -379,6 +837,7 @@ async function runWithStorage(
   storage: CliRuntimeStorage,
   signal: AbortSignal,
   dependencies: CliDependencies,
+  registration?: CliRunRegistrationSession,
 ): Promise<IntrabarServerResult> {
   const ledger = new CliOwnedLedger(storage.ledger);
   const fileLease = new CliOwnedExecutionLease(storage.fileLease);
@@ -387,6 +846,24 @@ async function runWithStorage(
   let mirroredRuntimeOwnsLease = false;
   let result: IntrabarServerResult | undefined;
   let primaryError: unknown;
+  if (registration) {
+    try {
+      registration.ownedLedgerSequence = recoverLedger(storage.recoveredEvents).lastSequence;
+    } catch {
+      // The runtime remains authoritative for ledger validation and its normal cleanup path.
+    }
+  }
+  const lifecycleCallbacks = registration
+    ? {
+        onReady: (readiness: IntrabarServerReadiness) =>
+          markRunRegistrationReady(registration, readiness, dependencies),
+        onStopping: () => markRunRegistrationStopping(registration, dependencies),
+        onTerminal: (terminal: IntrabarServerTerminal) => {
+          registration.terminal = terminal;
+          registration.ownedLedgerSequence = terminal.ledgerSequence;
+        },
+      }
+    : {};
 
   try {
     if (normalized.execution.kind === 'compute-only') {
@@ -397,6 +874,7 @@ async function runWithStorage(
         recoveredEvents: storage.recoveredEvents,
         alertChannels: buildAlertChannels(normalized.alerts, dependencies),
         signal,
+        ...lifecycleCallbacks,
         onLog: dependencies.log,
       });
     } else {
@@ -421,17 +899,25 @@ async function runWithStorage(
         releaseAdministrativeLeaseAfterOwnershipRecorded: () => administrativeLease.release(),
         lease,
         signal,
+        ...lifecycleCallbacks,
         onLog: dependencies.log,
         ...(execution.broker.id === 'tiger'
           ? {
-              accountClaimFactory: (context: AccountInstrumentClaimFactoryContext) =>
-                dependencies.createAccountInstrumentClaim(
+              accountClaimFactory: (context: AccountInstrumentClaimFactoryContext) => {
+                const claim = dependencies.createAccountInstrumentClaim(
                   {
                     identity: context.identity,
                     executionSymbol: context.executionSymbol,
                   },
                   { ownerId: context.ownerId },
-                ),
+                );
+                if (registration)
+                  registration.accountClaimPath = dependencies.resolveRunRegistrationPath(
+                    claim.path,
+                    registration.cwd,
+                  );
+                return claim;
+              },
             }
           : {}),
         brokerFactory: ({ resolved, authority }) => {
@@ -506,13 +992,7 @@ async function openRuntimeStorage(
   config: NormalizedRunConfig,
   dependencies: CliDependencies,
 ): Promise<CliRuntimeStorage> {
-  const paths =
-    config.execution.kind === 'mirrored'
-      ? {
-          ledgerPath: config.execution.ledger.path,
-          leasePath: config.execution.lease.path,
-        }
-      : defaultComputeStatePaths(config);
+  const paths = runtimeStatePaths(config);
   const runtimeOwnerId = `pinelive-runtime:${globalThis.crypto.randomUUID()}`;
   const administrativeLease = dependencies.createFileExecutionLease(
     `${paths.leasePath}.admin.lock`,
@@ -720,6 +1200,18 @@ function strategyPath(config: Readonly<Record<string, unknown>>): string {
     throw new Error('config.strategy must be a non-empty string');
   }
   return config.strategy;
+}
+
+function runtimeStatePaths(config: NormalizedRunConfig): {
+  ledgerPath: string;
+  leasePath: string;
+} {
+  return config.execution.kind === 'mirrored'
+    ? {
+        ledgerPath: config.execution.ledger.path,
+        leasePath: config.execution.lease.path,
+      }
+    : defaultComputeStatePaths(config);
 }
 
 function defaultComputeStatePaths(config: NormalizedRunConfig): {

@@ -17,6 +17,8 @@ import {
   createNodeTigerBroker,
   createOfficialTigerTradingTransport,
   registerTigerTradingTransport,
+  type ActiveRunRegistrationV1,
+  type RunHistoryRecordV1,
 } from '../src/node.js';
 
 test('official Tiger trading transport rejects a missing credential profile path', () => {
@@ -219,6 +221,9 @@ interface CliHarness {
   readonly logs: string[];
   readonly addedSignals: string[];
   readonly removedSignals: string[];
+  readonly registrations: ActiveRunRegistrationV1[];
+  readonly histories: RunHistoryRecordV1[];
+  readonly registryCounts: { heartbeatStarts: number; heartbeatStops: number };
   readonly counts: {
     provider: number;
     paperBroker: number;
@@ -244,6 +249,10 @@ function createCliHarness(
   const logs: string[] = [];
   const addedSignals: string[] = [];
   const removedSignals: string[] = [];
+  const registrations: ActiveRunRegistrationV1[] = [];
+  const histories: RunHistoryRecordV1[] = [];
+  const registryCounts = { heartbeatStarts: 0, heartbeatStops: 0 };
+  const activeRegistrations = new Map<string, ActiveRunRegistrationV1>();
   const counts = {
     provider: 0,
     paperBroker: 0,
@@ -299,6 +308,41 @@ function createCliHarness(
         leaseId: `cli-lease-${sequence}-${counts.lease}`,
       });
     },
+    createRunRegistry: () => ({
+      async writeActive(record) {
+        const value = structuredClone(record);
+        activeRegistrations.set(record.instanceId, value);
+        registrations.push(value);
+      },
+      async updateActive(instanceId, update) {
+        const current = activeRegistrations.get(instanceId);
+        if (!current) throw new Error('test active registration is missing');
+        const value = structuredClone(await update(structuredClone(current)));
+        activeRegistrations.set(instanceId, value);
+        registrations.push(value);
+        return value;
+      },
+      createHeartbeatService() {
+        return {
+          start() {
+            registryCounts.heartbeatStarts++;
+          },
+          async stop() {
+            registryCounts.heartbeatStops++;
+          },
+        };
+      },
+      async completeRun(record) {
+        histories.push(structuredClone(record));
+        return { activeRemoved: activeRegistrations.delete(record.instanceId) };
+      },
+    }),
+    createRunInstanceId: () => sequence.toString(16).padStart(32, '0'),
+    readBootBoundProcessIdentity: async () => undefined,
+    resolveRunRegistrationPath: (path) => (path.startsWith('/') ? path : `/virtual/${path}`),
+    now: () => new Date(sequence * 1_000),
+    pid: 10_000 + sequence,
+    cwd: () => '/virtual',
     readTigerDataCredentials: () => {
       counts.dataCredentials++;
       throw new Error('Tiger data credentials must remain untouched');
@@ -311,7 +355,17 @@ function createCliHarness(
     addSignalHandler: (signal) => addedSignals.push(signal),
     removeSignalHandler: (signal) => removedSignals.push(signal),
   };
-  return { dependencies, events, logs, addedSignals, removedSignals, counts };
+  return {
+    dependencies,
+    events,
+    logs,
+    addedSignals,
+    removedSignals,
+    registrations,
+    histories,
+    registryCounts,
+    counts,
+  };
 }
 
 function finalJsonLog(logs: readonly string[]): Record<string, unknown> {
@@ -327,6 +381,8 @@ test('CLI help advertises run, validate, parity, upgrade, and version', async ()
     'pinelive run --config <pinelive.json>',
     'pinelive validate --config <pinelive.json>',
     'pinelive status --ledger <path> [--json] [--recent <n>]',
+    'pinelive status --all [--json] [--recent <n>]',
+    'pinelive status --instance <instance-id> [--json] [--recent <n>]',
     'pinelive recover --ledger <path> --lease <path> [--account-claim <path>] --confirm',
     'pinelive parity <live.jsonl> <expected.jsonl>',
     'pinelive upgrade [--check]',
@@ -994,4 +1050,241 @@ test('mirrored startup releases its administrative mutex only after durable leas
 
   await main(['run', '--config', 'durable-handoff.json'], dependencies);
   expect(releaseObservedDurableOwner).toBe(true);
+});
+
+test('status aggregate and exact-instance selectors are read-only and mutually exclusive', async () => {
+  const logs: string[] = [];
+  let aggregateReads = 0;
+  let instanceReads = 0;
+  let explicitLedgerReads = 0;
+  const instanceId = 'a'.repeat(32);
+  const aggregate = {
+    statusListVersion: 1 as const,
+    generatedAt: new Date(0).toISOString(),
+    items: [],
+  };
+  const terminal = {
+    discoveryVersion: 1 as const,
+    kind: 'terminal' as const,
+    generatedAt: new Date(0).toISOString(),
+    instanceId,
+    history: {
+      historyVersion: 1 as const,
+      instanceId,
+      startedAt: new Date(0).toISOString(),
+      endedAt: new Date(1).toISOString(),
+      outcome: 'failed-startup' as const,
+      finalReasonCode: 'startup-failed',
+      configVersion: 3 as const,
+      brokerId: 'compute-only' as const,
+      posture: 'compute-only' as const,
+    },
+    durable: { availability: 'not-recorded' as const, reason: 'startup failed before storage' },
+    lifecycle: { state: 'stopped' as const, reasons: [] },
+    warnings: [],
+  };
+  const dependencies: Partial<CliDependencies> = {
+    readPineliveStatusList: async () => {
+      aggregateReads++;
+      return aggregate;
+    },
+    readPineliveInstanceStatus: async () => {
+      instanceReads++;
+      return terminal;
+    },
+    readPineliveStatus: async () => {
+      explicitLedgerReads++;
+      throw new Error('explicit ledger reader must remain untouched');
+    },
+    createMarketDataProvider: (() => {
+      throw new Error('status must not create a provider');
+    }) as CliDependencies['createMarketDataProvider'],
+    createTigerBroker: (() => {
+      throw new Error('status must not create a broker');
+    }) as CliDependencies['createTigerBroker'],
+    createRunRegistry: () => {
+      throw new Error('injected status readers must own registry access');
+    },
+    log: (message) => logs.push(message),
+  };
+
+  await main(['status', '--all', '--json'], dependencies);
+  expect(JSON.parse(logs.pop()!)).toEqual(aggregate);
+  await main(['status', '--instance', instanceId, '--json'], dependencies);
+  expect(JSON.parse(logs.pop()!)).toEqual(terminal);
+  expect(aggregateReads).toBe(1);
+  expect(instanceReads).toBe(1);
+  expect(explicitLedgerReads).toBe(0);
+
+  await expect(
+    main(['status', '--all', '--ledger', '/virtual/ledger.jsonl'], dependencies),
+  ).rejects.toThrow('requires exactly one');
+  await expect(main(['status', '--all', '--recover'], dependencies)).rejects.toThrow(
+    'status does not allow --recover',
+  );
+  expect(aggregateReads).toBe(1);
+  expect(instanceReads).toBe(1);
+  expect(explicitLedgerReads).toBe(0);
+});
+
+test('run registration advances starting to running and stopping before terminal history', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'registered.json'], harness.dependencies);
+
+  expect(harness.registrations.map((record) => record.lifecycle)).toEqual([
+    'starting',
+    'running',
+    'stopping',
+  ]);
+  expect(harness.registrations[0]).toMatchObject({
+    brokerId: 'compute-only',
+    posture: 'compute-only',
+    paths: {
+      ledger: '/virtual/.pinelive/cli-current.pine-X-1m.jsonl',
+      executionLease: '/virtual/.pinelive/cli-current.pine-X-1m.jsonl.lock',
+      config: '/virtual/registered.json',
+    },
+  });
+  expect(harness.registrations[1]).toMatchObject({
+    lifecycle: 'running',
+    runId: expect.any(String),
+    executionId: expect.any(String),
+  });
+  expect(harness.histories).toHaveLength(1);
+  expect(harness.histories[0]).toMatchObject({
+    instanceId: harness.registrations[0]!.instanceId,
+    outcome: 'stopped',
+    finalLedgerPath: '/virtual/.pinelive/cli-current.pine-X-1m.jsonl',
+    finalLedgerSequence: recoverLedger(harness.events).lastSequence,
+    brokerId: 'compute-only',
+    posture: 'compute-only',
+  });
+  expect(harness.registryCounts).toEqual({ heartbeatStarts: 1, heartbeatStops: 1 });
+});
+
+test('registry failures stay advisory and never block an otherwise successful runtime', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'registry-unavailable.json'], {
+    ...harness.dependencies,
+    createRunRegistry: () => ({
+      async writeActive() {
+        throw new Error('sensitive registry failure');
+      },
+      async updateActive() {
+        throw new Error('must not update');
+      },
+      createHeartbeatService() {
+        throw new Error('must not heartbeat');
+      },
+      async completeRun() {
+        throw new Error('must not complete');
+      },
+    }),
+  });
+
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+  expect(harness.logs).toContain('pinelive registry warning: initial-registration-failed');
+  expect(harness.logs.join('\n')).not.toContain('sensitive registry failure');
+});
+
+test('a failure before storage opens produces normalized failed-startup history', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await expect(
+    main(['run', '--config', 'startup-failure.json'], {
+      ...harness.dependencies,
+      createFileExecutionLease: () => {
+        throw new Error('storage constructor failed');
+      },
+    }),
+  ).rejects.toThrow('storage constructor failed');
+
+  expect(harness.registrations.map((record) => record.lifecycle)).toEqual(['starting', 'stopping']);
+  expect(harness.histories).toEqual([
+    expect.objectContaining({
+      outcome: 'failed-startup',
+      finalReasonCode: 'startup-failed',
+    }),
+  ]);
+  expect(harness.histories[0]).not.toHaveProperty('finalLedgerPath');
+  expect(harness.histories[0]).not.toHaveProperty('finalLedgerSequence');
+  expect(harness.registryCounts).toEqual({ heartbeatStarts: 1, heartbeatStops: 1 });
+});
+
+test('nonsettling registry operations remain bounded and cannot hold CLI shutdown open', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  const never = new Promise<never>(() => undefined);
+  const dependencies: Partial<CliDependencies> = {
+    ...harness.dependencies,
+    registryOperationTimeoutMs: 5,
+    createRunRegistry: () => ({
+      async writeActive(record) {
+        harness.registrations.push(structuredClone(record));
+      },
+      updateActive() {
+        return never;
+      },
+      createHeartbeatService() {
+        return {
+          start() {
+            harness.registryCounts.heartbeatStarts++;
+          },
+          stop() {
+            return never;
+          },
+        };
+      },
+      completeRun() {
+        return never;
+      },
+    }),
+  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      main(['run', '--config', 'nonsettling-registry.json'], dependencies),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('nonsettling advisory registry blocked CLI shutdown')),
+          500,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+  expect(harness.counts.ledgerClose).toBe(1);
+  expect(harness.logs).toContain('pinelive registry warning: stopping-update-failed');
+  expect(harness.logs).toContain('pinelive registry warning: heartbeat-stop-failed');
+  expect(harness.logs).toContain('pinelive registry warning: terminal-history-write-failed');
+});
+
+test('human status output visibly escapes C0, C1, ESC, and OSC controls', async () => {
+  const logs: string[] = [];
+  const controls = `line\nalert\u0007\u001b]0;title\u0007\u001b]52;c;Y2FuYXJ5\u0007`;
+  await main(['status', '--all'], {
+    readPineliveStatusList: async () => ({
+      statusListVersion: 1,
+      generatedAt: new Date(0).toISOString(),
+      items: [
+        {
+          ok: false,
+          path: `/tmp/${controls}`,
+          error: { code: 'corrupt-record', message: controls },
+        },
+      ],
+    }),
+    log: (message) => logs.push(message),
+  });
+
+  const output = logs.join('');
+  expect(output).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+  expect(output).toContain('\\u000a');
+  expect(output).toContain('\\u0007');
+  expect(output).toContain('\\u001b]52');
 });

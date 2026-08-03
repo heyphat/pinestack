@@ -18,6 +18,7 @@ import { COMMANDS } from './flags/schema.js';
 import type { EditorState } from './editor/state.js';
 import { initialEditor } from './editor/state.js';
 import type { LogLine } from './run/spawn.js';
+import { initialTerminalPane, type TerminalPaneState } from './term/pane.js';
 
 export type RunStatus = 'idle' | 'running' | 'ok' | 'failed';
 
@@ -162,6 +163,12 @@ export interface AppState {
    */
   editor: EditorState;
   /**
+   * The EDITOR page's shell pane. Not persisted, for a stronger reason than the
+   * buffer: a session is a live child process, and a "restored" one would be a
+   * pane pointing at a pid that died with the last run.
+   */
+  terminal: TerminalPaneState;
+  /**
    * Reveal the rarely-touched flags (`--mintick`, `--data-dir`, the magnifier
    * overrides, …). Off by default so the config pane stays readable, but it must
    * be reachable: every flag has to be settable from the UI, or the user is back
@@ -224,6 +231,7 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
     overlay: { kind: 'none', buffer: '', cursor: 0 },
     edit: null,
     editor: initialEditor(),
+    terminal: initialTerminalPane(),
     showAdvanced: false,
     tradeFilter: '',
     logScope: null,

@@ -113,6 +113,7 @@ export class Terminal {
   private readonly stdout: NodeJS.WriteStream;
   private readonly keyHandlers = new Set<(key: Key) => void>();
   private readonly resizeHandlers = new Set<(size: TerminalSize) => void>();
+  private readonly rawHandlers = new Set<(chunk: string) => boolean>();
   private opened = false;
   /** False for one tick after `open()`, while a stale input backlog flushes. */
   private accepting = false;
@@ -167,7 +168,16 @@ export class Terminal {
 
     this.onData = (data) => {
       if (!this.accepting) return;
-      for (const key of decodeKeys(String(data))) {
+      const chunk = String(data);
+      // A raw consumer sees the bytes before they are decoded, and decoding is
+      // skipped entirely when one takes them. The terminal pane needs this:
+      // `decodeKeys` is lossy by design — it normalizes to a small named set and
+      // throws away sequences it does not recognize — and a shell needs the
+      // actual bytes, modifiers, mouse reports and all.
+      for (const handler of [...this.rawHandlers]) {
+        if (handler(chunk)) return;
+      }
+      for (const key of decodeKeys(chunk)) {
         for (const handler of [...this.keyHandlers]) handler(key);
       }
     };
@@ -201,6 +211,19 @@ export class Terminal {
   onKey(handler: (key: Key) => void): () => void {
     this.keyHandlers.add(handler);
     return () => this.keyHandlers.delete(handler);
+  }
+
+  /**
+   * Claim raw stdin. The handler returns true to consume the chunk, which stops
+   * it from being decoded into `Key`s at all.
+   *
+   * Registered handlers run before decoding on every chunk, so one that wants to
+   * claim conditionally does so by returning false — it does not need to
+   * subscribe and unsubscribe as focus moves.
+   */
+  onRaw(handler: (chunk: string) => boolean): () => void {
+    this.rawHandlers.add(handler);
+    return () => this.rawHandlers.delete(handler);
   }
 
   onResizeEvent(handler: (size: TerminalSize) => void): () => void {

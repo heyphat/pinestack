@@ -69,6 +69,20 @@ export interface VimOutcome {
 }
 
 const PASS: VimOutcome = { consumed: false };
+
+/**
+ * Keys the frame keeps even while the buffer has focus (§4.8.i).
+ *
+ * One list rather than a repeated condition, because it is now checked from
+ * three modes and a key that passes in normal but not in visual is a trap that
+ * only shows up when you are already in the wrong mode. See the call in
+ * `onNormal` for why each one is here.
+ */
+function isFrameKey(name: string): boolean {
+  return (
+    name === 'tab' || name === 'shift-tab' || name === 'ctrl-p' || name === 'ctrl-t' || name === ' '
+  );
+}
 const TOOK: VimOutcome = { consumed: true };
 
 function setMessage(editor: EditorState, text: string, error = false): void {
@@ -94,7 +108,9 @@ export function openFile(editor: EditorState, path: string, io: EditorIo = edito
   } catch {
     isNew = true;
   }
-  const buffer = newBuffer(path, text, isNew);
+  // Stamped as it is read, so a write by someone else between this read and the
+  // next check is noticed rather than baked in as the new normal.
+  const buffer = newBuffer(path, text, isNew, isNew ? null : (io.stamp?.(path) ?? null));
   editor.buffer = buffer;
   editor.mode = 'normal';
   editor.anchor = null;
@@ -103,6 +119,85 @@ export function openFile(editor: EditorState, path: string, io: EditorIo = edito
   editor.count = '';
   editor.cmdline = '';
   setMessage(editor, isNew ? `"${path}" [New]` : `"${path}" ${buffer.lines.length}L`);
+}
+
+/**
+ * Pick up a change somebody else made to the open file.
+ *
+ * The shell pane made this necessary rather than merely nice: the buffer and a
+ * terminal now sit side by side on one page, so `sed -i` or a `git checkout` in
+ * that column changes the very file being displayed, and a buffer that keeps
+ * showing the old bytes is actively misleading — it is the stale-report problem
+ * the whole app exists to remove, reappearing one pane over.
+ *
+ * The rule is the same one `:e` and `e` already follow (§4.5.c): **an unwritten
+ * buffer is never overwritten.** A clean buffer reloads silently, keeping the
+ * cursor where it was; a modified one is flagged and left alone, because throwing
+ * away the user's edits to fix a display problem would be a worse bug than the one
+ * being fixed. `:e!` is the way out, and it already exists.
+ *
+ * Returns true when the buffer or its flags changed, so the caller can repaint.
+ */
+export function syncWithDisk(editor: EditorState, io: EditorIo = editorIo()): boolean {
+  const buffer = editor.buffer;
+  if (buffer == null || buffer.path === '') return false;
+  // An io that cannot stat opts out: there is nothing to compare against.
+  if (io.stamp == null) return false;
+
+  const now = io.stamp(buffer.path);
+
+  // A file that has gone is not a reload: the buffer is the only copy left, and
+  // silently emptying it would destroy it. `isNew` says `:w` will recreate it.
+  if (now == null) {
+    if (buffer.isNew) return false;
+    buffer.isNew = true;
+    buffer.disk = null;
+    setMessage(editor, `"${buffer.path}" no longer on disk — :w recreates it`, true);
+    return true;
+  }
+
+  const was = buffer.disk;
+  if (was != null && was.mtimeMs === now.mtimeMs && was.size === now.size) return false;
+
+  // First stamp for a buffer that had none (a new file someone else created).
+  if (was == null) {
+    buffer.disk = now;
+    if (!buffer.modified) {
+      const at = { line: buffer.line, col: buffer.col, top: buffer.top };
+      openFile(editor, buffer.path, io);
+      restoreCursor(editor, at);
+      setMessage(editor, `"${buffer.path}" appeared on disk — reloaded`);
+      return true;
+    }
+    return false;
+  }
+
+  if (buffer.modified) {
+    if (buffer.staleOnDisk === true) return false;
+    buffer.staleOnDisk = true;
+    setMessage(editor, `"${buffer.path}" changed on disk — :e! to reload, :w to overwrite`, true);
+    return true;
+  }
+
+  const at = { line: buffer.line, col: buffer.col, top: buffer.top };
+  openFile(editor, buffer.path, io);
+  restoreCursor(editor, at);
+  setMessage(editor, `"${buffer.path}" reloaded — changed on disk`);
+  return true;
+}
+
+/**
+ * Put the cursor back after a reload, clamped to a file that may have shrunk.
+ * The line is what a reader tracks, so it is preserved ahead of the column.
+ */
+function restoreCursor(editor: EditorState, at: { line: number; col: number; top: number }): void {
+  const buffer = editor.buffer;
+  if (buffer == null) return;
+  buffer.line = Math.max(0, Math.min(at.line, buffer.lines.length - 1));
+  buffer.col = Math.max(0, Math.min(at.col, lineAt(buffer, buffer.line).length));
+  buffer.wantCol = buffer.col;
+  buffer.top = Math.max(0, Math.min(at.top, Math.max(0, buffer.lines.length - 1)));
+  scrollIntoView(editor);
 }
 
 /** `:w [path]`. Returns the path written, so the caller can rescan the project. */
@@ -127,6 +222,9 @@ export function writeFile(
   buffer.path = target;
   buffer.modified = false;
   buffer.isNew = false;
+  // Our own write must not read back as somebody else's.
+  buffer.disk = io.stamp?.(target) ?? null;
+  buffer.staleOnDisk = false;
   setMessage(editor, `"${target}" ${buffer.lines.length}L written`);
   return target;
 }
@@ -221,6 +319,12 @@ export function handleKey(editor: EditorState, key: Key, io: EditorIo = editorIo
 
 function onInsert(editor: EditorState, key: Key): VimOutcome {
   const buffer = editor.buffer!;
+
+  // `ctrl-t` reaches the frame from insert mode too, unlike `tab` and `space`
+  // which are indentation and a character here. The escape hatch is only an
+  // escape hatch if it does not depend on which mode you happen to be in — and
+  // vim's own insert-mode `ctrl-t` indents, which this buffer does not implement.
+  if (key.name === 'ctrl-t') return PASS;
 
   switch (key.name) {
     case 'escape':
@@ -405,10 +509,14 @@ function onNormal(editor: EditorState, key: Key): VimOutcome {
   //   tab / shift-tab  leave the pane, so the buffer is never a keyboard trap
   //   space            the page prefix: `space 3` is page 3, here as everywhere
   //   ctrl-p           the command palette, which reaches any page by name
+  //   ctrl-t           the shell pane, which is the buffer's companion column
   //
   // vim leaves `ctrl-p` unbound in normal mode, and space there only means "one
-  // character right", which `l` already does. Everything else is the buffer's.
-  if (name === 'tab' || name === 'shift-tab' || name === 'ctrl-p' || name === ' ') return PASS;
+  // character right", which `l` already does. `ctrl-t` is vim's indent key, which this
+  // buffer does not implement — and a bare `t` is the till motion, so the shell
+  // pane's letter cannot be handed back here and its ctrl form is the way in.
+  // Everything else is the buffer's.
+  if (isFrameKey(name)) return PASS;
 
   // Counts accumulate; a bare `0` is the line-start motion, not a count digit.
   if (/^[1-9]$/.test(name) || (name === '0' && editor.count !== '')) {
@@ -760,7 +868,7 @@ function onVisual(editor: EditorState, key: Key): VimOutcome {
   const anchor = editor.anchor ?? cursorOf(buffer);
 
   if (editor.pending != null) return onPending(editor, key);
-  if (name === 'tab' || name === 'shift-tab' || name === 'ctrl-p' || name === ' ') return PASS;
+  if (isFrameKey(name)) return PASS;
 
   if (name === 'escape') {
     enterNormal(editor);

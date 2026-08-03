@@ -89,6 +89,20 @@ export class Screen {
     cell.style = style;
   }
 
+  /**
+   * Write exactly one cell, including the empty-string case that `text` cannot
+   * express — it iterates characters, so `''` writes nothing and leaves whatever
+   * was there before.
+   *
+   * The terminal pane needs that distinction. A double-width glyph occupies two
+   * cells: the first carries the character, and the second must contribute *no
+   * bytes at all*, because the emulator has already advanced two columns for the
+   * glyph itself. A space there would push the rest of the row right by one.
+   */
+  cell(x: number, y: number, ch: string, style: Style = STYLE.none, clip?: Rect): void {
+    this.put(x, y, ch, style, clip);
+  }
+
   /** Write one line of text. Never wraps; clipped at `clip` (default: screen). */
   text(x: number, y: number, value: string, style: Style = STYLE.none, clip?: Rect): void {
     let col = x;

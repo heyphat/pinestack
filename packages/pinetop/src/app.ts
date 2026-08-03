@@ -9,6 +9,7 @@
  */
 
 import { handOff } from './editor/handoff.js';
+import { syncWithDisk } from './editor/vim.js';
 import { drawFrame, widthWarning, windowTitle } from './frame.js';
 import {
   cloneModel,
@@ -45,7 +46,9 @@ import {
 import { backtestPage } from './pages/backtest.js';
 import { comparePage } from './pages/compare.js';
 import { firstUnmetRow, isRunRow, runRowCount, visibleFlags } from './pages/config-pane.js';
-import { editorPage, ensureEditorFile } from './pages/editor.js';
+import { editorPage, ensureEditorFile, TERMINAL_MIN_BODY } from './pages/editor.js';
+import { routeRawKey, TERMINAL_DEFAULT_RETURN, TERMINAL_PANE } from './term/pane.js';
+import { TermSession } from './term/session.js';
 import { evictHistory } from './pages/history-pane.js';
 import type { Page } from './pages/page.js';
 import { clampCursor } from './pages/page.js';
@@ -63,6 +66,36 @@ import type { AppState, EditState, RunState } from './state.js';
 import { applyProposal, nextRunId, overridesFor, revertOverrides } from './state.js';
 import { groundReport, parseAskResponse, type AskProvider } from './ask/protocol.js';
 import type { Key, Terminal } from './terminal.js';
+
+/**
+ * How often the shell pane is drained, in milliseconds.
+ *
+ * This is the deadline for answering a terminal query, not a frame rate — see
+ * `startTerminalTick`. Low enough that a capability probe is answered while the
+ * program that asked is still waiting for it.
+ */
+const TERMINAL_POLL_MS = 4;
+
+/**
+ * The shortest gap between two repaints driven by the shell pane.
+ *
+ * Reading and repainting are deliberately on different clocks. Painting is the
+ * expensive half — a full frame of cells, every pane on the page — and letting a
+ * repaint gate the next read is what made query replies late enough to be
+ * delivered to the wrong process: `claude` exits, and its cursor-position answer
+ * lands in the shell's prompt as `35;3R`. So the tick always drains the pty (cheap,
+ * and it is what answers queries) and only sometimes paints.
+ */
+const TERMINAL_PAINT_MS = 16;
+
+/**
+ * How often the open buffer is checked against the file on disk.
+ *
+ * A `stat` is cheap but not free, and nothing the user does needs sub-second
+ * notice of an external edit — this is about the buffer not lying, not about
+ * keystroke latency.
+ */
+const DISK_CHECK_MS = 300;
 
 /** Said once before `q` will discard an unwritten editor buffer. */
 const QUIT_WARNING = 'unwritten changes in the editor — :w to write, or q again to discard';
@@ -142,6 +175,18 @@ export class App {
   private pagePrefix = false;
   /** Letters typed so far toward a pane accelerator (§4.2.h). */
   private paneJump = '';
+  /**
+   * The repaint tick for the shell pane.
+   *
+   * The app is otherwise entirely event-driven — it paints on a keypress and on a
+   * resize, and nothing else. A shell breaks that: its output arrives whenever
+   * the child feels like producing it, with no keystroke to hang a repaint on. So
+   * a tick runs for exactly as long as a session is open, and stops again the
+   * moment it closes.
+   */
+  private terminalTick?: ReturnType<typeof setInterval>;
+  /** When the open buffer was last compared with the file on disk. */
+  private lastDiskCheck = 0;
 
   constructor(opts: AppOptions) {
     this.terminal = opts.terminal;
@@ -226,15 +271,46 @@ export class App {
   }
 
   paint(): void {
+    this.checkDisk();
     this.terminal.paint(this.render());
+  }
+
+  /**
+   * Notice an external change to the open file.
+   *
+   * Hung off `paint` rather than a timer of its own, so it runs whenever the frame
+   * is about to be shown — which covers both cases that matter: a keypress (the
+   * user came back from somewhere) and the shell pane's tick (something in the
+   * terminal just wrote the file). Throttled, because paints can be frequent while
+   * a shell is producing output and this is a syscall.
+   */
+  private checkDisk(): void {
+    const now = Date.now();
+    if (now - this.lastDiskCheck < DISK_CHECK_MS) return;
+    this.lastDiskCheck = now;
+    if (this.state.editor.buffer == null) return;
+    // The FILES list is discovered from the same directory, so a file created or
+    // deleted out there has to move the sidebar too, not just the buffer.
+    if (syncWithDisk(this.state.editor)) refreshScripts();
   }
 
   start(): void {
     this.terminal.open();
     if (this.state.page === 'editor') ensureEditorFile(this.state);
     process.stdout.write(`\x1b]2;${windowTitle(this.state)}\x07`);
+    // Raw first: while the shell pane has focus the child gets the bytes, and the
+    // decode-to-`Key` path never runs at all.
+    this.disposers.push(this.terminal.onRaw((chunk) => this.onRawKey(chunk)));
     this.disposers.push(this.terminal.onKey((key) => this.onKey(key)));
-    this.disposers.push(this.terminal.onResizeEvent(() => this.paint()));
+    this.disposers.push(
+      this.terminal.onResizeEvent(() => {
+        // A window narrowed below the shell column's minimum drops that column,
+        // and focus cannot be left on a pane that is no longer drawn — it takes
+        // every keystroke, so that would be typing into nothing.
+        this.reconcileTerminalFocus();
+        this.paint();
+      }),
+    );
     this.paint();
   }
 
@@ -242,8 +318,255 @@ export class App {
     for (const dispose of this.disposers) dispose();
     this.disposers = [];
     this.abort?.abort();
+    // Before the flags are saved, because a shell holding the pty open would keep
+    // the process alive past the frame coming down.
+    this.closeTerminal();
     saveFlags(this.state.flags, this.cwd);
     this.terminal.close();
+  }
+
+  // ———————————————————————————————————————————————————————— the shell pane
+
+  /**
+   * Route raw stdin when — and only when — the shell pane has focus. Returns true
+   * to consume the chunk, which is what stops it reaching `decodeKeys`.
+   */
+  private onRawKey(chunk: string): boolean {
+    if (this.state.page !== 'editor') return false;
+    if (this.focusId() !== TERMINAL_PANE) return false;
+
+    const verdict = routeRawKey(this.state.terminal, chunk);
+    switch (verdict.kind) {
+      case 'leave':
+        this.leaveTerminal();
+        this.state.status =
+          verdict.reason === 'hatch' ? 'left the shell' : 'left the shell — t returns';
+        this.paint();
+        return true;
+      case 'pane':
+        // The pane took it for itself — armed the prefix, or scrolled. Nothing
+        // reached the child, so the tick has no reason to repaint and this must.
+        this.paint();
+        return true;
+      case 'sent':
+        // No paint here. The child has the keystroke; what it does about it
+        // arrives on the tick, and painting now would draw the grid as it was
+        // before the keystroke landed.
+        return true;
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * `t` (or `ctrl-t`). Open and focus the shell, or hand focus back to the buffer.
+   *
+   * Three states rather than two, because "toggle" over a live child process is
+   * ambiguous and the destructive reading is the wrong one: focus leaves, the
+   * session stays. A shell is closed by exiting it — `exit`, `ctrl-d` — which is
+   * how every other shell in the user's life closes. The one exception is a child
+   * that has already gone: the key on a dead pane clears it away.
+   */
+  private toggleTerminal(): void {
+    const pane = this.state.terminal;
+
+    if (this.state.page !== 'editor') {
+      this.dispatch({ kind: 'page', page: 'editor' });
+    }
+
+    // Refuse rather than focus a column that cannot be drawn. Focusing an undrawn
+    // shell pane means every keystroke goes to a child you cannot see, which is
+    // strictly worse than the key doing nothing and saying why.
+    //
+    // Checked for an already-open pane too, not just a new one: a session opened
+    // at a comfortable width and then narrowed is still open, and `t` must not
+    // walk back into it.
+    if (!this.terminalFits()) {
+      if (pane.open && this.focusId() === TERMINAL_PANE) this.leaveTerminal();
+      // Key numbers first: on a terminal too narrow for the column, the status
+      // row is also too narrow for a sentence, so this has to survive truncation.
+      this.state.status = `needs ${TERMINAL_MIN_BODY} cols — have ${this.terminal.size.cols}`;
+      return;
+    }
+
+    if (pane.open && pane.session?.running === false) {
+      this.closeTerminal();
+      this.state.status = 'shell closed';
+      return;
+    }
+
+    if (pane.open && this.focusId() === TERMINAL_PANE) {
+      this.leaveTerminal();
+      this.state.status = 'left the shell — t returns';
+      return;
+    }
+
+    if (!pane.open) {
+      pane.open = true;
+      pane.error = undefined;
+      if (pane.session == null) this.openTerminal();
+    }
+
+    if (pane.session != null) {
+      this.enterTerminal();
+      this.state.status = 'shell — ctrl-t leaves, esc leaves unless a full-screen app has it';
+    }
+  }
+
+  /**
+   * Start the shell.
+   *
+   * `$SHELL` interactive, so the user's own rc file runs and the pane is the shell
+   * they actually have rather than a bare `sh`. A failure to start is reported in
+   * the pane and nowhere else — no pty on this platform is a reason for one pane
+   * to be empty, not for pinetop to refuse to run.
+   *
+   * The initial size is a guess that the first `drawTerminal` corrects on the same
+   * frame, since only the draw knows the rect.
+   */
+  private openTerminal(): void {
+    const pane = this.state.terminal;
+    const shell = process.env['SHELL'] ?? '/bin/sh';
+    try {
+      pane.session = new TermSession({
+        argv: [shell, '-i'],
+        cwd: this.cwd,
+        rows: Math.max(4, this.terminal.size.rows - 8),
+        cols: 80,
+      });
+      pane.error = undefined;
+      this.startTerminalTick();
+    } catch (err) {
+      pane.session = null;
+      pane.error = `no shell: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  /**
+   * Focus the shell, remembering the pane it took focus from.
+   *
+   * A pane that is itself the shell is never recorded, so a second `ctrl-t` while
+   * already inside cannot make the shell its own return target.
+   */
+  private enterTerminal(): void {
+    const current = this.focusId();
+    if (current !== TERMINAL_PANE && current !== '') {
+      this.state.terminal.returnTo = current;
+    }
+    this.state.panes.editor.focus = TERMINAL_PANE;
+  }
+
+  /**
+   * Hand focus back where the shell took it from.
+   *
+   * Falls back to FILES rather than the buffer when the remembered pane is gone —
+   * see `returnTo` in `term/pane.ts` for why landing in the buffer is the one
+   * outcome this must not have.
+   */
+  private leaveTerminal(): void {
+    // SCROLL mode must not survive leaving: the keys mean something else out here.
+    this.state.terminal.scrolling = false;
+    const panes = editorPage.panes(this.state);
+    const target = this.state.terminal.returnTo;
+    this.state.panes.editor.focus =
+      target !== TERMINAL_PANE && panes.includes(target) ? target : TERMINAL_DEFAULT_RETURN;
+  }
+
+  /**
+   * Whether this terminal is wide enough for the shell column. The body rect is
+   * the full screen width, so the page's gate and this are the same number.
+   */
+  private terminalFits(): boolean {
+    return this.terminal.size.cols >= TERMINAL_MIN_BODY;
+  }
+
+  /**
+   * Move focus off the shell column when it is no longer being drawn.
+   *
+   * Width only changes on a resize, so this is the only moment the invariant
+   * "focus is on a pane you can see" can be broken. The session is left running —
+   * widening the window and pressing `t` returns to the same prompt.
+   */
+  private reconcileTerminalFocus(): void {
+    const pane = this.state.terminal;
+    if (!pane.open || this.terminalFits()) return;
+    pane.visible = false;
+    if (this.state.page !== 'editor') return;
+    if (this.state.panes.editor.focus !== TERMINAL_PANE) return;
+    this.leaveTerminal();
+    this.state.status = `shell hidden — needs ${TERMINAL_MIN_BODY} cols`;
+  }
+
+  private closeTerminal(): void {
+    const pane = this.state.terminal;
+    const held = this.state.panes.editor.focus === TERMINAL_PANE;
+    pane.session?.dispose();
+    pane.session = null;
+    pane.open = false;
+    pane.visible = false;
+    this.stopTerminalTick();
+    // `open` is already false, so the ring no longer offers the shell and
+    // `leaveTerminal` resolves against a ring it is absent from.
+    if (this.state.page === 'editor' && held) this.leaveTerminal();
+  }
+
+  /**
+   * Drain the child and repaint only when the grid actually moved.
+   *
+   * The interval is a *reply deadline*, not a frame rate, and that is what sets it
+   * so low. A terminal is interrogated by the programs inside it — `\x1b[6n` and
+   * friends — and the emulator cannot answer a question it has not read yet, so the
+   * tick period is the floor on how long a child waits for an answer. At 50ms that
+   * was slow enough to be wrong twice: a program that gives up on a capability
+   * probe concludes the terminal cannot do it, and a reply that lands after the
+   * program exits is delivered to whatever took its place — a `5;3R` typed into the
+   * shell's prompt, which is how this was found.
+   *
+   * A tick is a single non-blocking read that almost always returns EAGAIN, so the
+   * idle cost of the tighter loop is a syscall. Repaints are still gated on the
+   * grid actually changing, so a chatty child does not turn this into a repaint
+   * loop that starves the keyboard.
+   */
+  private startTerminalTick(): void {
+    if (this.terminalTick != null) return;
+    let dirty = false;
+    let painted = 0;
+    this.terminalTick = setInterval(() => {
+      const session = this.state.terminal.session;
+      if (session == null) {
+        this.stopTerminalTick();
+        return;
+      }
+      // Always drain, whatever the paint clock says: this is the call that feeds
+      // the emulator, and the emulator is what answers the child's questions.
+      if (session.poll()) dirty = true;
+      // `exit` or `ctrl-d` ends the shell, and that is the user closing the pane —
+      // there is nothing left to look at, and a column holding a dead prompt is
+      // one more thing to dismiss. So the column goes as soon as the child does,
+      // and focus returns wherever the shell took it from.
+      if (session.exitCode != null) {
+        const code = session.exitCode;
+        this.closeTerminal();
+        this.state.status = code === 0 ? 'shell closed' : `shell closed (exit ${code})`;
+        this.paint();
+        return;
+      }
+      const now = Date.now();
+      if (dirty && now - painted >= TERMINAL_PAINT_MS) {
+        dirty = false;
+        painted = now;
+        this.paint();
+      }
+    }, TERMINAL_POLL_MS);
+    // Never hold the process open on the shell's account: the frame coming down
+    // is what ends the session, not the other way round.
+    this.terminalTick.unref?.();
+  }
+
+  private stopTerminalTick(): void {
+    if (this.terminalTick == null) return;
+    clearInterval(this.terminalTick);
+    this.terminalTick = undefined;
   }
 
   private focusId(): string {
@@ -490,6 +813,9 @@ export class App {
         // has to be reclaimed: the editor will have set its own (§4.8.g).
         state.status = handOff(state, this.terminal, this.cwd);
         process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
+        break;
+      case 'toggle-terminal':
+        this.toggleTerminal();
         break;
       case 'filter':
         state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };

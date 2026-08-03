@@ -13,14 +13,33 @@
  * the `Page` contract, which carries no services.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+/**
+ * Enough of a file's identity to notice someone else changed it.
+ *
+ * Size as well as mtime, because a filesystem with coarse timestamps (or an edit
+ * that lands inside the same tick) can change a file without moving its mtime.
+ */
+export interface FileStamp {
+  mtimeMs: number;
+  size: number;
+}
 
 export interface EditorIo {
   read(path: string): string;
   /** Creates parent directories; a `:w` to a new path must not need a shell. */
   write(path: string, text: string): void;
   exists(path: string): boolean;
+  /**
+   * The file's stamp, or null when it cannot be read (gone, or never existed).
+   *
+   * Optional: an in-memory disk has no meaningful mtime, and an implementation that
+   * cannot answer simply opts out of external-change detection rather than having to
+   * fake one. `nodeIo` always answers.
+   */
+  stamp?(path: string): FileStamp | null;
 }
 
 export const nodeIo: EditorIo = {
@@ -30,6 +49,14 @@ export const nodeIo: EditorIo = {
     writeFileSync(path, text, 'utf8');
   },
   exists: (path) => existsSync(path),
+  stamp: (path) => {
+    try {
+      const info = statSync(path);
+      return { mtimeMs: info.mtimeMs, size: info.size };
+    } catch {
+      return null;
+    }
+  },
 };
 
 let current: EditorIo = nodeIo;

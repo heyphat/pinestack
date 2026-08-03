@@ -11,8 +11,6 @@ metrics.
 
 ![The BACKTEST page: strategies, config, and history on the left; price, equity, and drawdown charts with the full tearsheet beside them; monthly returns and trades below](../../docs/assets/pinetop-backtest.png)
 
-See [design.md](./design.md) for the decisions behind it.
-
 ## Install
 
 pinetop ships as a prebuilt, self-contained binary alongside `pinerun` — Bun
@@ -180,6 +178,7 @@ ordinals. `:` and `?` list them all.
 | `↵`                  | Edit the focused config flag · load selection · apply pending proposal |
 | `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)           |
 | `e`                  | Edit this page's script in `$EDITOR`, then reload it                   |
+| `t` / `ctrl-t`       | Shell pane on the editor page — and the way back out of it             |
 | `/`                  | Filter fills                                                           |
 | `.`                  | Show / hide the advanced flags                                         |
 | `ctrl-u`             | Clear the field being edited                                           |
@@ -320,12 +319,90 @@ shell, so nothing in that variable can be interpreted as `;` or `$(…)`. The co
 is that an argument containing spaces cannot be expressed — point `$EDITOR` at a
 wrapper script if you need one.
 
-What this does not do is run your editor _inside_ a pane. That needs a pty and a
-terminal emulator to parse the editor's output into pinetop's cell grid, and the
-pty means a native module — which would end the self-contained single-binary
-build. So the frame goes away while you edit and comes back after. That is the
-whole trade, and it is why the in-frame buffer exists for the edits that are not
-worth it.
+`e` gives your editor the **whole terminal**. When you want something running
+_beside_ the buffer instead, that is the shell pane below.
+
+### `t` — a shell beside the buffer
+
+`t` opens a real terminal as a third column on the editor page: sidebar,
+buffer, shell. It is your `$SHELL`, interactive, started in the project
+directory — so `git diff`, a `pinerun` invocation you want to type by hand, or
+`vim` itself all run there with the source still on screen.
+
+`t` is the everyday key. `ctrl-t` is the same toggle for the two places a bare
+letter cannot reach: inside the editor buffer, where `t` is vim's till motion, and
+inside the shell pane itself.
+
+Everything you type goes to the shell, including the keys pinetop normally binds:
+`ctrl-c` interrupts the child rather than quitting pinetop, `tab` completes,
+`space` is a space, `t` is a `t`. Two keys get you back out:
+
+| Key      | Leaves the pane                                                    |
+| -------- | ------------------------------------------------------------------ |
+| `ctrl-t` | Always — whatever the child is doing. This is the guaranteed exit  |
+| `esc`    | At a shell prompt only. A full-screen program in the pane keeps it |
+
+`ctrl-t` is a **prefix**, the way `tmux` uses one: it is reserved from the child, and
+the key after it belongs to the pane. That is what pays for scrollback without taking
+`PageUp` — or any other key — away from the program running inside.
+
+| After `ctrl-t` |                                                |
+| -------------- | ---------------------------------------------- |
+| `k` / `j`      | Back / forward one line                        |
+| `u` / `d`      | Back / forward one page                        |
+| `g` / `G`      | Top of history / back to the live view         |
+| `ctrl-t`       | Leave the pane                                 |
+| anything else  | Abandons the prefix; the key reaches the child |
+
+1000 lines of history are kept. While you are scrolled the border reads `↑ 47 ·
+ctrl-t G to follow`, because a pane showing old output while the child keeps working
+would otherwise look frozen — and typing anything returns to the live view, since
+input you cannot see the result of is worse than losing your place.
+
+Scrollback is a normal-screen thing. On the alternate screen — `vim`, `htop`, `less` —
+there is no history to show and the scroll keys do nothing, which is what a real
+terminal does too.
+
+That `esc` split is deliberate. At a prompt `esc` does nothing, so it is a cheap
+way out; but once the child switches to the alternate screen — vim, `htop`,
+`less` — `esc` is the key that program most needs, so it goes to the child and
+`ctrl-t` becomes the only exit. The pane's border says which is which: it reads
+`esc / ctrl-t leaves` at a prompt and `ctrl-t leaves` when a full-screen app has
+taken over.
+
+Leaving does not kill the shell — focus returns to the pane you came from and the
+session keeps running, so `t` comes back to the same prompt with your history and
+working directory intact. (It returns you to the _buffer_ only if that is where you
+opened it from; landing in the buffer by accident would turn every shortcut into a
+vim command.)
+
+**To close it completely, end the shell: `ctrl-d`, or `exit`.** The column
+disappears the moment the child does — there is nothing left to look at — and focus
+returns where the shell took it from. Quitting pinetop closes it too, and takes
+whatever was running inside it: the foreground process group is signalled, not just
+the shell, so a `claude` or `vim` in the pane does not survive as an orphan.
+
+The column needs the width to be worth having: below 108 columns of body it is
+dropped entirely rather than squeezing the source into nothing.
+
+**The buffer follows the file.** Change the open `.pine` from the shell — `sed -i`,
+`git checkout`, a formatter — and the editor pane reloads it, keeping your cursor
+where it was. An _unwritten_ buffer is never overwritten: it says
+`changed on disk — :e! to reload, :w to overwrite` and leaves your edits alone. A
+file deleted underneath you keeps its buffer, marked new, so `:w` puts it back.
+
+One rough edge to know about: a full-screen program that queries the terminal as it
+exits (`claude` does) can leave a stray cursor report such as `35;3R` on the shell
+prompt afterwards. It is harmless — `ctrl-u` clears the line — but it will make the
+next command fail if you do not. Fixing it properly needs the pane's pty to be a
+real controlling terminal, which needs `setsid` before `exec`; `Bun.spawn` cannot do
+that, so the pane has no job control and no way to tell the asker from its
+successor.
+
+No native module is involved, so the single-binary install is unaffected — the
+pty comes from the libc the OS already ships, reached through `bun:ffi`, and the
+VT parsing is `@xterm/headless`, which is pure JavaScript and bundles into the
+compiled binary.
 
 ## How it behaves
 

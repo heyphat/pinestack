@@ -31,6 +31,7 @@ import { highlight } from '../editor/syntax.js';
 import { modeLabel, type EditorState } from '../editor/state.js';
 import { handleKey, openFile } from '../editor/vim.js';
 import { drawInputsPane } from './inputs-pane.js';
+import { drawTerminal, TERMINAL_PANE, ESCAPE_HATCH } from '../term/pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
 /**
@@ -39,6 +40,34 @@ import { clampCursor, columns, rows, windowFor, type Page, type PageContext } fr
  * outline you glance at, so it sits last in the ring.
  */
 const PANES = ['files', 'editor', 'inputs'] as const;
+
+/**
+ * Width of the shell column when it is open.
+ *
+ * Sized generously — 80 columns is what a shell's own output is written for, and
+ * a terminal narrower than that wraps `git status` and every compiler error into
+ * unreadable ribbons. It gives way before the buffer does, though: below
+ * `TERMINAL_MIN_BODY` the column is dropped entirely rather than squeezing the
+ * source into nothing.
+ */
+function terminalWidth(bodyW: number): number {
+  return Math.min(80, Math.max(32, Math.floor(bodyW * 0.38)));
+}
+
+/**
+ * Total width below which the shell column is not drawn at all. The buffer plus
+ * the sidebar is the page's reason to exist; the shell is the guest.
+ *
+ * The body is the full width of the screen (`frame.ts` returns `w: screen.cols`),
+ * so this is comparable to the terminal's own column count without adjustment —
+ * which is what lets the app refuse to *open* a column it could not draw.
+ */
+export const TERMINAL_MIN_BODY = 108;
+
+/** Whether the shell column is both open and affordable at this width. */
+export function terminalVisible(state: AppState, bodyW: number): boolean {
+  return state.terminal.open && bodyW >= TERMINAL_MIN_BODY;
+}
 
 /**
  * Open something worth looking at the first time the page is shown.
@@ -307,7 +336,28 @@ const EDITOR_HINTS: readonly { key: string; label: string }[] = [
   { key: ':w', label: 'write' },
   { key: ':q', label: 'close' },
   { key: 'tab', label: 'pane' },
+  { key: ESCAPE_HATCH, label: 'shell' },
   { key: '?', label: 'help' },
+];
+
+/**
+ * The shell pane's hints. Nothing but the exits: every other key on the strip
+ * would be one the child is about to receive, and a hint for a key that reaches
+ * the shell instead of the app is worse than no hint.
+ */
+const TERMINAL_HINTS: readonly { key: string; label: string }[] = [
+  { key: ESCAPE_HATCH, label: 'scroll' },
+  { key: 'esc', label: 'leave (not in vim)' },
+  { key: 'tab', label: 'leave' },
+];
+
+/** SCROLL mode's own strip. Only the keys the mode actually defines. */
+const TERMINAL_SCROLL_HINTS: readonly { key: string; label: string }[] = [
+  { key: 'k/j', label: 'line' },
+  { key: 'u/d', label: 'page' },
+  { key: 'g/G', label: 'top/live' },
+  { key: 'esc', label: 'resume' },
+  { key: 'tab', label: 'leave' },
 ];
 
 export const editorPage: Page = {
@@ -318,7 +368,13 @@ export const editorPage: Page = {
   minCols: 72,
   degradeNote: 'the buffer loses columns',
 
-  panes: () => [...PANES],
+  // The shell joins the ring only while it is actually on screen, so `tab` never
+  // stops on a pane you cannot see — which would be a keyboard trap, because that
+  // pane takes every keystroke. `visible` is what the last frame decided; it is
+  // open-and-wide-enough, and `open` alone is not sufficient. Last in the ring for
+  // the same reason INPUTS is late: `tab` from FILES must still land in the buffer.
+  panes: (state) =>
+    state.terminal.open && state.terminal.visible ? [...PANES, TERMINAL_PANE] : [...PANES],
 
   rowCount: (state, paneId) => {
     switch (paneId) {
@@ -329,11 +385,19 @@ export const editorPage: Page = {
       case 'editor':
         return state.editor.buffer?.lines.length ?? 0;
       default:
+        // The shell has no rows to select. `j`/`k` there are characters the child
+        // receives, and they never reach the cursor layer at all.
         return 0;
     }
   },
 
-  hints: (state) => (state.panes.editor.focus === 'editor' ? EDITOR_HINTS : HINTS),
+  hints: (state) => {
+    const focus = state.panes.editor.focus;
+    if (focus === TERMINAL_PANE) {
+      return state.terminal.scrolling === true ? TERMINAL_SCROLL_HINTS : TERMINAL_HINTS;
+    }
+    return focus === 'editor' ? EDITOR_HINTS : HINTS;
+  },
 
   breadcrumb: (state) => {
     const crumbs = ['pinetop'];
@@ -349,6 +413,11 @@ export const editorPage: Page = {
   confirm: (state) => {
     const focus = state.panes.editor.focus;
     if (focus === 'inputs') return undefined;
+    // ↵ in the shell is the child's, and it already got it through the raw input
+    // path — this branch only guards against a `confirm` dispatched some other
+    // way (the palette) from running FILES' open-a-file logic while the shell
+    // has focus.
+    if (focus === TERMINAL_PANE) return undefined;
 
     // ↵ on FILES opens the file. It does not load it as the strategy to run —
     // that is BACKTEST's own ↵, and doing both here would make one keypress
@@ -371,8 +440,15 @@ export const editorPage: Page = {
    * The buffer owns the keyboard whenever it has focus. `tab` and `ctrl-c` are
    * the exceptions the vim layer refuses to take, so the rest of the app is
    * always one keystroke away.
+   *
+   * The shell claims it far harder — it takes `ctrl-c` and `tab` too, because a
+   * shell without them is not a shell (see `term/pane.ts`). Both are reported
+   * here so the frame stops drawing pane accelerators that are about to be eaten.
    */
-  claimsKeyboard: (state) => state.panes.editor.focus === 'editor',
+  claimsKeyboard: (state) => {
+    const focus = state.panes.editor.focus;
+    return focus === 'editor' || focus === TERMINAL_PANE;
+  },
 
   onKey: (state, key) => {
     if (state.panes.editor.focus !== 'editor') return false;
@@ -385,9 +461,22 @@ export const editorPage: Page = {
   },
 
   render: (ctx) => {
-    const { body, screen } = ctx;
+    const { body, screen, state } = ctx;
     const sidebarW = Math.min(34, Math.max(22, Math.floor(screen.cols * 0.2)));
-    const [sidebar, main] = columns(body, [sidebarW]) as [Rect, Rect];
+
+    // Three columns when the shell is up, two when it is not. `columns` always
+    // appends one rect that absorbs the remainder, so the buffer is the absorber
+    // in both cases and never has to be measured.
+    const showTerminal = terminalVisible(state, body.w);
+    // Published for the focus ring, which cannot measure anything itself. Written
+    // every frame, so a resize is reflected by the time the next key is handled.
+    state.terminal.visible = showTerminal;
+    const termW = showTerminal ? terminalWidth(body.w) : 0;
+    const [sidebar, main, terminalRect] = (
+      showTerminal
+        ? columns(body, [sidebarW, body.w - sidebarW - termW])
+        : [...columns(body, [sidebarW]), { x: 0, y: 0, w: 0, h: 0 }]
+    ) as [Rect, Rect, Rect];
 
     const inputsH = Math.min(12, Math.max(4, Math.floor(sidebar.h * 0.32)));
     const [filesRect, inputsRect] = rows(sidebar, [sidebar.h - inputsH]) as [Rect, Rect];
@@ -395,5 +484,12 @@ export const editorPage: Page = {
     drawFiles(ctx, filesRect);
     drawInputs(ctx, inputsRect);
     drawBuffer(ctx, main);
+
+    if (showTerminal) {
+      drawTerminal(screen, terminalRect, state.terminal, {
+        focused: ctx.focus === TERMINAL_PANE,
+        key: ctx.paneKey(TERMINAL_PANE),
+      });
+    }
   },
 };

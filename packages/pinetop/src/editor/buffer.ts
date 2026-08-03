@@ -16,6 +16,8 @@
  *    can.
  */
 
+import type { FileStamp } from './io.js';
+
 /** A position in the buffer. Both are 0-based; `col` is a character index. */
 export interface Cursor {
   line: number;
@@ -45,6 +47,17 @@ export interface EditorBuffer {
   modified: boolean;
   /** True when the path has no file behind it yet; `:w` creates it. */
   isNew: boolean;
+  /**
+   * The file as it was when this buffer last agreed with it — set on open and on
+   * `:w`. A stamp that no longer matches means someone else wrote the file.
+   */
+  disk: FileStamp | null;
+  /**
+   * Set when the file changed underneath an *unwritten* buffer. Such a buffer is
+   * never reloaded — that would throw away the user's edits to fix a display
+   * problem — so the divergence is reported instead, and `:e!` resolves it.
+   */
+  staleOnDisk?: boolean;
   undo: Snapshot[];
   redo: Snapshot[];
 }
@@ -61,9 +74,15 @@ export function splitLines(text: string): string[] {
   return lines.length === 0 ? [''] : lines;
 }
 
-export function newBuffer(path: string, text = '', isNew = false): EditorBuffer {
+export function newBuffer(
+  path: string,
+  text = '',
+  isNew = false,
+  disk: FileStamp | null = null,
+): EditorBuffer {
   return {
     path,
+    disk,
     lines: splitLines(text),
     line: 0,
     col: 0,

@@ -7,11 +7,19 @@
  * honest way to provide that is to get out of the way — suspend the frame, give
  * the terminal to `$EDITOR`, and take it back when it exits.
  *
- * What this cannot do is run the editor *inside* a pane. That needs a pty plus a
- * terminal emulator to parse the editor's escape output into pinetop's cell grid,
- * and the pty means a native module — which would end the self-contained
- * single-binary build the installer depends on. So the frame goes away for the
- * duration, and comes back after. That is the whole trade.
+ * This used to carry the claim that running an editor *inside* a pane was
+ * impossible — a pty meant a native module, and that would end the
+ * self-contained single-binary build. That turned out to be wrong: `bun:ffi` can
+ * call the POSIX pty entry points in the libc the OS already ships, and it
+ * survives `bun build --compile`. `term/pty.ts` does exactly that, and `t`
+ * runs a shell in a column beside the buffer.
+ *
+ * So the trade this key makes is no longer about packaging, and it is narrower
+ * than it was: the shell pane is a *column*, sized to whatever is left beside the
+ * buffer and the sidebar. `$EDITOR` gets the whole terminal. For a one-line tweak
+ * the pane is enough; for real work in a real editor — full width, your own
+ * colours, your own plugins — the frame still gets out of the way, and that is
+ * what `e` is for.
  *
  * The two seams here — the launcher and `Suspendable` — exist so this is testable
  * without a TTY or a real editor. Same reasoning as `EditorIo`.

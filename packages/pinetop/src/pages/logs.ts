@@ -94,6 +94,7 @@ function drawLedger(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'LEDGER',
     focused: ctx.focus === 'ledger',
+    key: ctx.paneKey('ledger'),
     legend: legend.join(' · '),
   });
   if (inner.h <= 1) return;
@@ -219,6 +220,7 @@ function drawLog(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'ENGINE LOG',
     focused: ctx.focus === 'log',
+    key: ctx.paneKey('log'),
     legend: legend.length > 0 ? legend.join(' · ') : undefined,
   });
   if (inner.h <= 0) return;

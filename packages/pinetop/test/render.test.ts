@@ -89,6 +89,42 @@ describe('pane titles are never clipped (§4.4)', () => {
     const inner = drawPane(screen, { x: 2, y: 1, w: 10, h: 5 }, { title: 'X' });
     expect(inner).toEqual({ x: 3, y: 2, w: 8, h: 3 });
   });
+
+  test('a pane wears its own key, beside its title (§4.2.h)', () => {
+    const screen = new Screen(30, 4);
+    drawPane(screen, { x: 0, y: 0, w: 30, h: 4 }, { title: 'HISTORY', key: { seq: 'h' } });
+    expect(plain(screen)[0]).toContain('HISTORY [h]');
+  });
+
+  test('the focused pane spends those columns on its legend instead', () => {
+    const screen = new Screen(30, 4);
+    drawPane(
+      screen,
+      { x: 0, y: 0, w: 30, h: 4 },
+      { title: 'TEARSHEET', focused: true, key: { seq: 'me' }, legend: '1/2 · j/k' },
+    );
+    const top = plain(screen)[0]!;
+    expect(top).not.toContain('[me]');
+    expect(top).toContain('1/2 · j/k');
+  });
+
+  test('…until a jump is half-typed, when every candidate shows its key', () => {
+    const screen = new Screen(30, 4);
+    drawPane(
+      screen,
+      { x: 0, y: 0, w: 30, h: 4 },
+      { title: 'TEARSHEET', focused: true, key: { seq: 'me', armed: true } },
+    );
+    expect(plain(screen)[0]).toContain('◆ TEARSHEET [me]');
+  });
+
+  test('a key is dropped rather than pushing the title off the border', () => {
+    const screen = new Screen(14, 4);
+    drawPane(screen, { x: 0, y: 0, w: 14, h: 4 }, { title: 'NOT RANKED', key: { seq: 'E' } });
+    const top = plain(screen)[0]!;
+    expect(top).toContain('NOT RANKED');
+    expect(top).not.toContain('[E]');
+  });
 });
 
 describe('column fitting drops the least important first (§4.4)', () => {

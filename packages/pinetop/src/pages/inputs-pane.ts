@@ -183,7 +183,12 @@ export function drawInputsPane(ctx: PageContext, rect: Rect, opts: InputsPaneOpt
   const { screen } = ctx;
   const focused = ctx.focus === opts.paneId;
 
-  const inner = drawPane(screen, rect, { title: 'INPUTS', focused, legend: opts.legend });
+  const inner = drawPane(screen, rect, {
+    title: 'INPUTS',
+    focused,
+    key: ctx.paneKey(opts.paneId),
+    legend: opts.legend,
+  });
   if (inner.h <= 0) return;
 
   if (opts.rows.length === 0) {

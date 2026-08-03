@@ -82,6 +82,7 @@ function drawUniverse(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'UNIVERSE',
     focused: ctx.focus === 'universe',
+    key: ctx.paneKey('universe'),
     legend: legend.length > 0 ? legend.join(' · ') : undefined,
   });
   if (inner.h <= 1) return;
@@ -167,6 +168,7 @@ function drawErrors(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'NOT RANKED',
     focused: ctx.focus === 'errors',
+    key: ctx.paneKey('errors'),
     legend: list.length > 0 ? `${list.length}` : undefined,
   });
   if (inner.h <= 0) return;

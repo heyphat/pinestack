@@ -100,6 +100,7 @@ export function drawHistoryPane(ctx: PageContext, rect: Rect, command: CommandId
   const inner = drawPane(screen, rect, {
     title: 'HISTORY',
     focused,
+    key: ctx.paneKey(HISTORY_PANE),
     legend: runs.length > 0 ? String(runs.length) : undefined,
   });
   if (inner.h <= 0) return;

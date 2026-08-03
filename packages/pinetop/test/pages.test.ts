@@ -1,8 +1,8 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
-import { App } from '../src/app.js';
+import { App, PAGE_MAP } from '../src/app.js';
 import { COMMANDS, PAGES, type CommandId, type PageId } from '../src/flags/schema.js';
 import { cachedScripts, refreshScripts } from '../src/scripts.js';
-import { BINDINGS } from '../src/keymap.js';
+import { BINDINGS, RESERVED_KEYS, matchSequence, paneAccelerators } from '../src/keymap.js';
 import { hiddenFlagCount, isRunRow, runRowCount, visibleFlags } from '../src/pages/config-pane.js';
 import { cloneModel, composeArgv, type Pair } from '../src/flags/model.js';
 import { HISTORY_LIMIT, evictHistory } from '../src/pages/history-pane.js';
@@ -47,6 +47,13 @@ function screenText(app: App, cols = 168, rows = 46): string {
     .render(cols, rows)
     .map((l) => stripAnsi(l))
     .join('\n');
+}
+
+/** `:`, type enough of an item's label to select it, `↵`. */
+function openPalette(app: App, query: string): void {
+  app.onKey({ name: ':', text: ':' });
+  for (const ch of query) app.onKey({ name: ch, text: ch });
+  app.onKey({ name: 'enter' });
 }
 
 let state: AppState;
@@ -308,6 +315,31 @@ describe('P1 — BACKTEST', () => {
     expect(text).toContain('JAN');
   });
 
+  test('MONTHLY TRADES is the second view of one pane, not a pane of its own', () => {
+    // At 168 only one grid fits, and the legend has to name the key that reveals
+    // the other — it is the whole of how the second half is discoverable.
+    const app = makeApp(state);
+    expect(screenText(app)).toContain('j/k → MONTHLY TRADES');
+    app.onKey({ name: 'm', text: 'm' });
+    app.onKey({ name: 'o', text: 'o' });
+    app.onKey({ name: 'j', text: 'j' });
+    expect(screenText(app)).toContain('◆ MONTHLY TRADES');
+  });
+
+  test('side by side, both grids say they are the same pane', () => {
+    // 220 columns fits both 99-column grids, so `j`/`k` has nothing to swap and
+    // the strip must not read as one reachable pane beside one unreachable one.
+    const app = makeApp(state, 220, 46);
+    const text = screenText(app, 220, 46);
+    expect(text).toContain('MONTHLY RETURNS % [mo]');
+    expect(text).toContain('MONTHLY TRADES [mo]');
+
+    state.panes.backtest.focus = 'monthly';
+    const focused = screenText(app, 220, 46);
+    expect(focused).toContain('◆ MONTHLY RETURNS %');
+    expect(focused).toContain('◆ MONTHLY TRADES');
+  });
+
   test('the monthly grids carry the CLI’s own green/red grading', () => {
     const app = makeApp(state);
     // The strip shows MONTHLY RETURNS first; both grids are 99 cols so at 168
@@ -434,16 +466,27 @@ describe('P2 — SWEEP and WALKFORWARD', () => {
     expect(screenText(makeApp(state))).toContain('overfit');
   });
 
-  test('w carries the sweep grid into walkforward instead of retyping it', () => {
+  test('the palette carries the sweep grid into walkforward instead of retyping it', () => {
     state.page = 'sweep';
     state.flags.sweep.scripts = ['a.pine'];
     state.flags.sweep.values['symbol'] = 'BTCUSDT';
     state.flags.sweep.values['input'] = [{ name: 'fast', value: '5,10' }];
     const app = makeApp(state);
-    app.onKey({ name: 'w', text: 'w' });
+    // This was `w` until §4.2.i left pages to their ordinals. It is an edit, not a
+    // page switch, so it is asked for by name.
+    openPalette(app, 'carry the sweep grid');
     expect(state.page).toBe('walkforward');
     expect(state.flags.walkforward.scripts).toEqual(['a.pine']);
     expect(state.flags.walkforward.values['input']).toEqual([{ name: 'fast', value: '5,10' }]);
+  });
+
+  test('there is nothing to carry from anywhere but SWEEP, and it says so', () => {
+    state.page = 'backtest';
+    const app = makeApp(state);
+    openPalette(app, 'carry the sweep grid');
+    expect(state.page).toBe('walkforward');
+    expect(state.status).toContain('no sweep grid to carry');
+    expect(state.flags.walkforward.scripts).toEqual([]);
   });
 });
 
@@ -1570,5 +1613,204 @@ describe('run history, per page', () => {
   test('an empty history says how to make one', () => {
     state.page = 'backtest';
     expect(screenText(makeApp(state))).toContain('no runs yet');
+  });
+});
+
+describe('pane accelerators (§4.2.h)', () => {
+  test('the first letter of each pane, when nothing else wants it', () => {
+    const keys = paneAccelerators(['files', 'inputs', 'verdict'], new Set());
+    expect([...keys]).toEqual([
+      ['files', 'f'],
+      ['inputs', 'i'],
+      ['verdict', 'v'],
+    ]);
+  });
+
+  test('two panes with the same initial take two letters — and three if they must', () => {
+    expect([...paneAccelerators(['config', 'charts'], new Set())]).toEqual([
+      ['config', 'co'],
+      ['charts', 'ch'],
+    ]);
+    // Each pane grows only as far as it has to: `ideas` is told apart at two
+    // letters and stops there, while the other two need a third.
+    expect([...paneAccelerators(['inputs', 'index', 'ideas'], new Set())]).toEqual([
+      ['inputs', 'inp'],
+      ['index', 'ind'],
+      ['ideas', 'id'],
+    ]);
+  });
+
+  test('a letter the app has claimed is taken shifted, never taken away', () => {
+    const keys = paneAccelerators(['ranked', 'editor', 'history']);
+    // `r` runs and `e` hands off to $EDITOR; `h` is nobody's binding.
+    expect(keys.get('ranked')).toBe('R');
+    expect(keys.get('editor')).toBe('E');
+    expect(keys.get('history')).toBe('h');
+  });
+
+  test('a shifted sequence shifts whole, so it is typed with shift held once', () => {
+    const keys = paneAccelerators(['ranked', 'runs', 'config']);
+    expect([...keys.values()]).toEqual(['RA', 'RU', 'c']);
+  });
+
+  test('no letter switches page, so the pane keys are the plain ones (§4.2.i)', () => {
+    const keys = paneAccelerators(['strategies', 'windows', 'sleeves', 'summary']);
+    // `s` and `w` were the sweep and walkforward pages until §4.2.i dropped them.
+    expect(keys.get('windows')).toBe('w');
+    expect([...keys.values()]).toEqual(['st', 'w', 'sl', 'su']);
+  });
+
+  test('a pane goes without a key rather than taking one the app needs', () => {
+    // `g` is "first row" and `G` is "last row": both cases are spoken for.
+    const keys = paneAccelerators(['grid', 'inputs']);
+    expect(keys.has('grid')).toBe(false);
+    expect(keys.get('inputs')).toBe('i');
+  });
+
+  test('two panes are never given the same key, nor one that shadows another', () => {
+    // `log` is a prefix of `logbook`, so typing it can only ever mean the shorter.
+    const keys = paneAccelerators(['log', 'logbook'], new Set());
+    expect(keys.get('log')).toBe('log');
+    expect(keys.has('logbook')).toBe(false);
+  });
+
+  test('every real page: keys are unique, prefix-free, and clear of the keymap', () => {
+    for (const page of PAGES) {
+      state.page = page;
+      const keys = [...paneAccelerators(PAGE_MAP[page].panes(state)).values()];
+      expect(new Set(keys).size, page).toBe(keys.length);
+      for (const key of keys) {
+        expect(RESERVED_KEYS.has(key[0]!), `${page}: ${key} shadows a binding`).toBe(false);
+        expect(
+          keys.filter((other) => other !== key && key.startsWith(other)),
+          page,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  test('every pane in every page’s ring is reachable by a key', () => {
+    // Nothing today needs `g`, so nothing today should be losing its accelerator.
+    for (const page of PAGES) {
+      state.page = page;
+      const panes = PAGE_MAP[page].panes(state);
+      expect([...paneAccelerators(panes).keys()], page).toEqual([...panes]);
+    }
+  });
+
+  test('one keystroke focuses a pane, and the ring is not walked to get there', () => {
+    const app = makeApp(state);
+    app.onKey({ name: 'h', text: 'h' });
+    expect(state.panes.backtest.focus).toBe('history');
+    // `s`, now that no letter switches page (§4.2.i).
+    app.onKey({ name: 's', text: 's' });
+    expect(state.panes.backtest.focus).toBe('strategies');
+    expect(state.page).toBe('backtest');
+  });
+
+  test('a two-letter key waits for its second letter, and says what it is waiting for', () => {
+    const app = makeApp(state);
+    app.onKey({ name: 'c', text: 'c' });
+    expect(state.panes.backtest.focus).toBe('strategies'); // nothing moved yet
+    expect(state.status).toContain('co config');
+    expect(state.status).toContain('ch charts');
+    app.onKey({ name: 'h', text: 'h' });
+    expect(state.panes.backtest.focus).toBe('charts');
+  });
+
+  test('the second letter does not need shift held down for it', () => {
+    // SWEEP's ranked pane is `R`, because `r` is the run dialog; a two-letter
+    // shifted key would be typed with shift down throughout, and need not be.
+    const keys = paneAccelerators(['ranked', 'runs']);
+    expect([...keys.values()]).toEqual(['RA', 'RU']);
+    expect(matchSequence('RA', 'Ra')).toBe('exact');
+    expect(matchSequence('RA', 'RA')).toBe('exact');
+    // The first keystroke is the one that must match case: that is what keeps `r`
+    // the run dialog rather than a half-typed pane jump.
+    expect(matchSequence('RA', 'ra')).toBe('none');
+  });
+
+  test('esc abandons a half-typed key', () => {
+    const app = makeApp(state);
+    app.onKey({ name: 'c', text: 'c' });
+    app.onKey({ name: 'escape' });
+    expect(state.status).toBe('pane jump cancelled');
+    // `h` is HISTORY again, not the `ch` it would have completed.
+    app.onKey({ name: 'h', text: 'h' });
+    expect(state.panes.backtest.focus).toBe('history');
+  });
+
+  test('a letter that cannot continue one sequence starts a new one', () => {
+    const app = makeApp(state);
+    app.onKey({ name: 'c', text: 'c' });
+    app.onKey({ name: 'm', text: 'm' });
+    expect(state.status).toContain('pane m…');
+    app.onKey({ name: 'o', text: 'o' });
+    expect(state.panes.backtest.focus).toBe('monthly');
+  });
+
+  test('the keys the app kept still do what they always did', () => {
+    state.page = 'sweep';
+    const app = makeApp(state);
+    // `r` is the run dialog, not SWEEP's RANKED pane, on a page that has both.
+    app.onKey({ name: 'r', text: 'r' });
+    expect(state.overlay.kind).toBe('run');
+    app.onKey({ name: 'escape' });
+    // RANKED took the shifted form instead, and reaches the pane.
+    app.onKey({ name: 'R', text: 'R' });
+    expect(state.overlay.kind).toBe('none');
+    expect(state.panes.sweep.focus).toBe('ranked');
+  });
+
+  test('the key is on the pane, and not on the pane you are already in', () => {
+    state.page = 'backtest';
+    const text = screenText(makeApp(state));
+    expect(text).toContain('HISTORY [h]');
+    expect(text).toContain('CHARTS [ch]');
+    expect(text).toContain('TEARSHEET [me]');
+    // STRATEGIES has focus, so its four columns go to its own legend instead.
+    expect(text).toContain('◆ STRATEGIES ');
+    expect(text).not.toContain('◆ STRATEGIES [s]');
+  });
+
+  test('a half-typed key lights up the panes it could still reach', () => {
+    state.page = 'portfolio';
+    const app = makeApp(state);
+    app.onKey({ name: 's', text: 's' });
+    const text = screenText(app);
+    // Including the focused one, which is a candidate like any other.
+    expect(text).toContain('◆ STRATEGIES [st]');
+    expect(text).toContain('SLEEVES [sl]');
+  });
+
+  test('? lists this page’s keys, generated from the ones the app resolved', () => {
+    state.page = 'logs';
+    const app = makeApp(state);
+    app.onKey({ name: '?', text: '?' });
+    const text = screenText(app);
+    expect(text).toContain('PANES');
+    expect(text).toContain('le ledger');
+    expect(text).toContain('lo log');
+  });
+
+  test('the EDITOR buffer keeps every letter, and stops advertising pane keys', () => {
+    state.page = 'editor';
+    state.panes.editor.focus = 'editor';
+    const app = makeApp(state);
+    const text = screenText(app);
+    expect(text).not.toContain('[f]');
+    expect(text).not.toContain('[i]');
+
+    app.onKey({ name: 'f', text: 'f' });
+    expect(state.panes.editor.focus).toBe('editor');
+  });
+
+  test('outside the buffer, the EDITOR page has keys like any other page', () => {
+    state.page = 'editor';
+    state.panes.editor.focus = 'files';
+    const app = makeApp(state);
+    expect(screenText(app)).toContain('[i]');
+    app.onKey({ name: 'E', text: 'E' });
+    expect(state.panes.editor.focus).toBe('editor');
   });
 });

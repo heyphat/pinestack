@@ -1,0 +1,42 @@
+//@version=6
+// Demonstrates the two ways piner's book and pinelive's book silently diverge.
+//
+// The fixed quantity here (0.01 BTC) is a valid multiple of the instrument's
+// quantity step (0.001), but 04-paper-sub-minimum.json declares a much larger
+// `minOrderQty` (0.05). So on every entry:
+//
+//   piner   : books a long 0.01 position and starts accruing P&L on it
+//   pinelive: target 0.01, actual 0, delta 0.01, snapped quantity 0.01
+//             -> below minOrderQty -> returns action "noop", submits nothing
+//             -> writes an `evaluation.completed` row and records a breaker
+//                SUCCESS, even though the mirrored position never moved
+//
+// Then when the strategy closes, the second divergence appears: piner books a
+// closed trade with a realized P&L, while pinelive computes target 0 against an
+// actual of 0, sees a zero delta, and no-ops again. The strategy's entire trade
+// lifecycle happens with zero broker activity, and nothing in the ledger says
+// the two books disagreed.
+//
+// Position mirroring makes this safe (it can never sell a position you do not
+// hold, because the actual is re-read from the broker before every plan) but it
+// does not make it visible.
+strategy("Sub-minimum quantity (silent divergence)",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 0.01,
+     process_orders_on_close = true)
+
+fastLength = input.int(10, "fast", minval = 1)
+slowLength = input.int(30, "slow", minval = 2)
+
+fast = ta.sma(close, fastLength)
+slow = ta.sma(close, slowLength)
+
+if ta.crossover(fast, slow)
+    strategy.entry("long", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("long")
+
+plot(fast, "fast", color = color.teal)
+plot(slow, "slow", color = color.orange)

@@ -21,6 +21,7 @@ import {
   type DataProvider,
 } from './asset-class.js';
 import { BinanceProvider } from './adapters/binance.js';
+import { BinanceLiveProvider } from './adapters/binance-live.js';
 import { OkxProvider } from './adapters/okx.js';
 import { KrakenProvider } from './adapters/kraken.js';
 import { AlpacaProvider } from './adapters/alpaca.js';
@@ -244,7 +245,15 @@ export type ProviderConfig =
       expiry?: string;
     }
   | {
-      provider: 'binance' | 'okx';
+      provider: 'binance';
+      assetClass?: 'crypto' | 'futures';
+      baseUrl?: string;
+      maxBars?: number;
+      /** Kline WebSocket base for the live/intrabar path. Defaults per market. */
+      wsBaseUrl?: string;
+    }
+  | {
+      provider: 'okx';
       assetClass?: 'crypto' | 'futures';
       baseUrl?: string;
       maxBars?: number;
@@ -322,7 +331,12 @@ export function assertProviderConfig(value: unknown): ProviderConfig {
       optionalNumber(config, key, { minimum: Number.MIN_VALUE });
     optionalString(config, 'exchange');
     optionalString(config, 'expiry');
-  } else if (provider === 'binance' || provider === 'okx') {
+  } else if (provider === 'binance') {
+    assertAllowedKeys(config, ['provider', 'assetClass', 'baseUrl', 'maxBars', 'wsBaseUrl']);
+    optionalString(config, 'baseUrl');
+    optionalString(config, 'wsBaseUrl');
+    optionalNumber(config, 'maxBars', { minimum: 1, integer: true });
+  } else if (provider === 'okx') {
     assertAllowedKeys(config, ['provider', 'assetClass', 'baseUrl', 'maxBars']);
     optionalString(config, 'baseUrl');
     optionalNumber(config, 'maxBars', { minimum: 1, integer: true });
@@ -400,6 +414,16 @@ export function createMarketDataProvider(configInput: ProviderConfig): MarketDat
       pollIntervalMs: config.pollIntervalMs,
       retryDelayMs: config.retryDelayMs,
       maxRetries: config.maxRetries,
+    });
+  }
+  if (config.provider === 'binance') {
+    // Public keyless kline streams. This selects a DATA source only; execution
+    // authority stays with the consumer's broker configuration.
+    return new BinanceLiveProvider({
+      ...(config.assetClass === 'futures' ? { market: 'futures' as const } : {}),
+      ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+      ...(config.maxBars != null ? { maxBars: config.maxBars } : {}),
+      ...(config.wsBaseUrl ? { wsBaseUrl: config.wsBaseUrl } : {}),
     });
   }
   if (config.provider === 'csv')

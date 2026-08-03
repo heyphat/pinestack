@@ -368,6 +368,10 @@ function createCliHarness(
   };
 }
 
+function expectOperationalLine(logs: readonly string[], message: string): void {
+  expect(logs.some((line) => line.endsWith(` ${message}`))).toBe(true);
+}
+
 function finalJsonLog(logs: readonly string[]): Record<string, unknown> {
   const line = [...logs].reverse().find((value) => value.startsWith('{'));
   if (!line) throw new Error('test expected a JSON result line');
@@ -378,7 +382,7 @@ test('CLI help advertises run, validate, parity, upgrade, and version', async ()
   const logs: string[] = [];
   await main(['help'], { log: (message) => logs.push(message) });
   expect(logs).toEqual([
-    'pinelive run --config <pinelive.json>',
+    'pinelive run --config <pinelive.json> [--verbose] [--log-file <path>]',
     'pinelive validate --config <pinelive.json>',
     'pinelive status --ledger <path> [--json] [--recent <n>]',
     'pinelive status --all [--json] [--recent <n>]',
@@ -1185,7 +1189,7 @@ test('registry failures stay advisory and never block an otherwise successful ru
   });
 
   expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
-  expect(harness.logs).toContain('pinelive registry warning: initial-registration-failed');
+  expectOperationalLine(harness.logs, 'pinelive registry warning: initial-registration-failed');
   expect(harness.logs.join('\n')).not.toContain('sensitive registry failure');
 });
 
@@ -1259,9 +1263,9 @@ test('nonsettling registry operations remain bounded and cannot hold CLI shutdow
 
   expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
   expect(harness.counts.ledgerClose).toBe(1);
-  expect(harness.logs).toContain('pinelive registry warning: stopping-update-failed');
-  expect(harness.logs).toContain('pinelive registry warning: heartbeat-stop-failed');
-  expect(harness.logs).toContain('pinelive registry warning: terminal-history-write-failed');
+  expectOperationalLine(harness.logs, 'pinelive registry warning: stopping-update-failed');
+  expectOperationalLine(harness.logs, 'pinelive registry warning: heartbeat-stop-failed');
+  expectOperationalLine(harness.logs, 'pinelive registry warning: terminal-history-write-failed');
 });
 
 test('human status output visibly escapes C0, C1, ESC, and OSC controls', async () => {
@@ -1287,4 +1291,100 @@ test('human status output visibly escapes C0, C1, ESC, and OSC controls', async 
   expect(output).toContain('\\u000a');
   expect(output).toContain('\\u0007');
   expect(output).toContain('\\u001b]52');
+});
+
+test('run --verbose logs one timestamped line per durable evaluation', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'verbose.json', '--verbose'], harness.dependencies);
+
+  const evaluationLines = harness.logs.filter((line) => line.includes(' evaluation bar='));
+  const result = finalJsonLog(harness.logs);
+  expect(evaluationLines.length).toBe(result.evaluations as number);
+  expect(evaluationLines.length).toBeGreaterThan(0);
+  for (const line of evaluationLines) {
+    // ISO timestamp prefix, then greppable key=value fields.
+    expect(line).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z evaluation bar=\d+ revision=\d+ phase=(forming|final) target=-?[\d.]+ reason=\S+/,
+    );
+  }
+  // The machine-readable result line stays untimestamped and parseable.
+  expect(harness.logs.at(-1)!.startsWith('{')).toBe(true);
+});
+
+test('run without --verbose logs no evaluation lines', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'quiet.json'], harness.dependencies);
+
+  expect(harness.logs.some((line) => line.includes(' evaluation bar='))).toBe(false);
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+});
+
+test('run --log-file tees output, registers the log path, and closes the sink', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  const fileLines: string[] = [];
+  let opened: string | undefined;
+  let closed = 0;
+
+  await main(['run', '--config', 'teed.json', '--verbose', '--log-file', 'run.log'], {
+    ...harness.dependencies,
+    openRunLogFile: (path) => {
+      opened = path;
+      return {
+        write: (line) => void fileLines.push(line),
+        close: async () => void closed++,
+      };
+    },
+  });
+
+  expect(opened).toBe('run.log');
+  expect(closed).toBe(1);
+  // The file receives exactly what the console received during the run:
+  // timestamped operational lines plus the untimestamped final result.
+  const consoleEvaluations = harness.logs.filter((line) => line.includes(' evaluation bar='));
+  expect(fileLines.filter((line) => line.includes(' evaluation bar='))).toEqual(consoleEvaluations);
+  expect(fileLines.at(-1)).toBe(harness.logs.at(-1)!);
+  // The registry records where the log went, resolved against the run's cwd.
+  expect(harness.registrations[0]!.paths.log).toBe('/virtual/run.log');
+});
+
+test('an unopenable log file degrades to a warning and never fails the run', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'bad-log-path.json', '--log-file', '/nope/run.log'], {
+    ...harness.dependencies,
+    openRunLogFile: () => {
+      throw new Error('EACCES sensitive path detail');
+    },
+  });
+
+  expect(harness.logs).toContain('pinelive log warning: log-file-open-failed');
+  expect(harness.logs.join('\n')).not.toContain('sensitive path detail');
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+  // A sink that never opened is not registered as evidence.
+  expect(harness.registrations[0]!.paths).not.toHaveProperty('log');
+});
+
+test('a failing log-file write warns once and the console remains authoritative', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  let closed = 0;
+
+  await main(['run', '--config', 'failing-log-writes.json', '--verbose', '--log-file', 'w.log'], {
+    ...harness.dependencies,
+    openRunLogFile: () => ({
+      write: () => {
+        throw new Error('ENOSPC sensitive detail');
+      },
+      close: async () => void closed++,
+    }),
+  });
+
+  const warnings = harness.logs.filter(
+    (line) => line === 'pinelive log warning: log-file-write-failed',
+  );
+  expect(warnings).toHaveLength(1);
+  expect(harness.logs.join('\n')).not.toContain('sensitive detail');
+  expect(harness.logs.some((line) => line.includes(' evaluation bar='))).toBe(true);
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
 });

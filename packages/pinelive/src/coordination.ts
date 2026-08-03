@@ -15,7 +15,15 @@ import {
 const execFileAsync = promisify(execFile);
 
 export interface BootBoundProcessIdentity {
-  readonly kind: 'darwin-start-time' | 'linux-start-ticks';
+  /**
+   * `darwin-start-time` is legacy evidence recorded by earlier releases. Its boot
+   * hash was derived from `kern.boottime`, which the kernel recomputes as
+   * `now - uptime`, so ordinary NTP clock adjustments changed it without a reboot
+   * and made a live owner probe falsely `dead`. It is still decoded from existing
+   * records, but it is never produced anymore and the probe reports it
+   * unverifiable rather than comparing it.
+   */
+  readonly kind: 'darwin-boot-session' | 'darwin-start-time' | 'linux-start-ticks';
   readonly value: string;
   readonly bootIdentityHash: string;
 }
@@ -63,23 +71,27 @@ export async function readBootBoundProcessIdentity(
   }
   if (process.platform === 'darwin') {
     try {
-      const [{ stdout: started }, { stdout: boot }] = await Promise.all([
+      // kern.bootsessionuuid is regenerated once per boot and never drifts within
+      // one. kern.boottime must NOT be used here: the kernel derives it from the
+      // current wall clock, so NTP adjustments change it without a reboot, which
+      // turned live owners into false `dead` probe results.
+      const [{ stdout: started }, { stdout: session }] = await Promise.all([
         execFileAsync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
           timeout: 2_000,
           maxBuffer: 16_384,
         }),
-        execFileAsync('/usr/sbin/sysctl', ['-n', 'kern.boottime'], {
+        execFileAsync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], {
           timeout: 2_000,
           maxBuffer: 16_384,
         }),
       ]);
       const value = started.trim();
-      const bootValue = boot.trim();
-      if (!value || !bootValue) return undefined;
+      const sessionValue = session.trim();
+      if (!value || !/^[0-9a-f-]{36}$/i.test(sessionValue)) return undefined;
       return {
-        kind: 'darwin-start-time',
+        kind: 'darwin-boot-session',
         value,
-        bootIdentityHash: sha256(`pinelive-boot-v1\0${bootValue}`),
+        bootIdentityHash: sha256(`pinelive-boot-session-v1\0${sessionValue}`),
       };
     } catch {
       return undefined;
@@ -106,8 +118,18 @@ export async function probeProcessOwner(evidence: LeaseOwnerEvidence): Promise<P
   const current = await readBootBoundProcessIdentity(evidence.pid);
   if (!current)
     return { state: 'unsupported', reason: 'boot-bound process identity is unavailable' };
+  if (current.kind !== evidence.processIdentity.kind) {
+    // A scheme difference proves nothing about the process: the recorded evidence
+    // was produced by a different identity mechanism (an older release, or another
+    // platform's record). Reporting `dead` here would satisfy recovery's
+    // dead-owner proof against a possibly live owner, so it must fail closed as
+    // unverifiable instead.
+    return {
+      state: 'alive-unverified',
+      reason: 'recorded process identity scheme differs and cannot be verified',
+    };
+  }
   if (
-    current.kind !== evidence.processIdentity.kind ||
     current.value !== evidence.processIdentity.value ||
     current.bootIdentityHash !== evidence.processIdentity.bootIdentityHash
   ) {

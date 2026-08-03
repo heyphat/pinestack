@@ -1,0 +1,49 @@
+//@version=6
+// Identical to intrabar-sma-cross.pine except that process_orders_on_close is
+// left at its default of false. Run both through every-update-runner.ts:
+//
+//   bun examples/pinelive/every-update-runner.ts \
+//     --strategy examples/pinelive/intrabar-sma-cross.pine
+//   bun examples/pinelive/every-update-runner.ts \
+//     --strategy examples/pinelive/intrabar-sma-cross-pooc-off.pine
+//
+// Only one of them can ever show a target that changes DURING a bar, because of
+// how piner's tick order interacts with its rollback:
+//
+//   1. rollback()      broker state returns to the last committed bar
+//   2. onStrategyBar() fill pass over the developing bar -> position_size changes
+//   3. body            strategy.entry() only queues
+//   4. onStrategyBarClose() extra fill pass, ONLY on the closing tick
+//
+// With process_orders_on_close=true, every order fills in step 4, so nothing is
+// ever pending when the bar commits. Step 1 then discards anything a forming tick
+// queued, and step 2 has nothing to fill — so every forming evaluation reports the
+// last committed position. The forming path is informationally empty.
+//
+// With it false, an order queued by bar N's body is still pending at commit, so
+// bar N+1's step 2 fills it against the DEVELOPING range — including on N+1's
+// forming ticks. Forming targets can then move, and move again, before the close.
+//
+// That is the tension: `calc_on_every_tick` only surfaces new information when
+// `process_orders_on_close` is false, which is exactly the setting that costs you
+// a bar of fill latency when mirroring.
+strategy("Intrabar SMA cross (POOC off)",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 50,
+     calc_on_every_tick = true)
+
+fastLength = input.int(10, "fast", minval = 1)
+slowLength = input.int(30, "slow", minval = 2)
+
+fast = ta.sma(close, fastLength)
+slow = ta.sma(close, slowLength)
+
+if ta.crossover(fast, slow)
+    strategy.entry("long", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("long")
+
+plot(fast, "fast", color = color.teal)
+plot(slow, "slow", color = color.orange)

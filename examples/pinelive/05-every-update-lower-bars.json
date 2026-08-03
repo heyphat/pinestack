@@ -1,0 +1,29 @@
+{
+  "configVersion": 3,
+  "strategy": "examples/pinelive/intrabar-sma-cross.pine",
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "warmupBars": 60,
+  "data": {
+    "provider": "csv",
+    "dataDir": "examples/data",
+    "cutoverTime": 1705867200
+  },
+  "historical": {
+    "mode": "standard"
+  },
+  "live": {
+    "cadence": "every-update",
+    "source": {
+      "kind": "lower-bars",
+      "timeframe": "5m"
+    },
+    "throttleMs": 250
+  },
+  "security": {
+    "enabled": false
+  },
+  "execution": {
+    "kind": "compute-only"
+  }
+}

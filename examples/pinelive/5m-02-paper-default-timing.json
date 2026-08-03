@@ -1,0 +1,36 @@
+{
+  "configVersion": 3,
+  "strategy": "examples/pinelive/sma-cross-default-timing.pine",
+  "symbol": "BTCUSDT",
+  "timeframe": "5m",
+  "warmupBars": 60,
+  "data": {
+    "provider": "csv",
+    "dataDir": "examples/pinelive/data",
+    "cutoverTime": 1785666600
+  },
+  "historical": {
+    "mode": "standard"
+  },
+  "live": {
+    "cadence": "bar-close"
+  },
+  "security": {
+    "enabled": false
+  },
+  "execution": {
+    "kind": "mirrored",
+    "mirrorOn": "bar-close",
+    "broker": {
+      "id": "paper",
+      "initialBalance": 10000
+    },
+    "ledger": {
+      "path": ".pinelive/5m-02-default-timing.jsonl",
+      "durability": "sync"
+    },
+    "lease": {
+      "path": ".pinelive/5m-02-default-timing.lock"
+    }
+  }
+}

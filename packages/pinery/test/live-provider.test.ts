@@ -8,6 +8,7 @@ import {
   assertLiveSymbolMatchesConfig,
   createMarketDataProvider,
   isMarketDataProvider,
+  supportsLiveBars,
   InstrumentRouter,
   type Bar,
   type TigerBarsRequest,
@@ -75,7 +76,18 @@ test('strict live config rejects mismatched addresses and historical-only provid
       transport: new FixtureTigerTransport(),
     }),
   ).toThrow('does not match');
-  expect(() => createMarketDataProvider({ provider: 'binance' })).toThrow('historical-only');
+  // Binance now serves a live provider (public keyless kline streams). Selecting it
+  // is a DATA decision only; execution authority stays with the broker config.
+  const binance = createMarketDataProvider({ provider: 'binance' });
+  expect(supportsLiveBars(binance)).toBe(true);
+  expect(binance.id).toBe('binance');
+  expect(createMarketDataProvider({ provider: 'binance', assetClass: 'futures' }).id).toBe(
+    'binance-futures',
+  );
+  // Everything without a live contract must still be refused for a live run.
+  for (const provider of ['okx', 'kraken', 'alpaca', 'massive'] as const) {
+    expect(() => createMarketDataProvider({ provider })).toThrow('historical-only');
+  }
   expect(() => createMarketDataProvider({ provider: 'tiger', assetClass: 'futures' })).toThrow(
     'transport',
   );

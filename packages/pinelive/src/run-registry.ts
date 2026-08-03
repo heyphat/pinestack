@@ -909,7 +909,9 @@ function optionalProcessIdentity(value: unknown): BootBoundProcessIdentity | und
   assertExactKeys(identity, ['kind', 'value', 'bootIdentityHash'], 'process identity');
   const kind = enumValue(
     identity.kind,
-    ['darwin-start-time', 'linux-start-ticks'] as const,
+    // darwin-start-time is legacy: still decoded so existing records stay readable,
+    // never produced, and never treated as verifiable liveness evidence.
+    ['darwin-boot-session', 'darwin-start-time', 'linux-start-ticks'] as const,
     'process identity kind',
   );
   const identityValue = boundedString(

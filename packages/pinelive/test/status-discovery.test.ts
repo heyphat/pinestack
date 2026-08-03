@@ -966,3 +966,228 @@ test('terminal histories remain readable after a shared append-only ledger grows
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+// Every CLI registration carries an executionLease path, including compute-only,
+// whose posture journals no durable lease row at all. The fixtures above omit that
+// path, which is why a healthy compute-only run reporting `lifecycle: unknown` was
+// invisible to this suite. These cases model the real registration shape.
+test('a compute-only run owning its physical state lock reports running, not unknown', async () => {
+  const temporary = await temporaryDirectory();
+  try {
+    const leasePath = join(temporary, 'compute.lock');
+    const registration = active(temporary, 1, {
+      posture: 'compute-only',
+      brokerId: 'compute-only',
+      paths: { ledger: join(temporary, 'ledger.jsonl'), executionLease: leasePath },
+    });
+    const lease = {
+      leaseVersion: 2 as const,
+      resource: registration.paths.ledger,
+      leaseId: 'compute-lease-1',
+      ownerId: 'pinelive-runtime:compute',
+      acquiredAt: new Date(BASE_TIME).toISOString(),
+      pid: registration.pid,
+      processIdentity: PROCESS_IDENTITY,
+    };
+    await writeFile(leasePath, `${JSON.stringify(lease)}\n`, 'utf8');
+
+    // A compute-only ledger durably records its posture and blocked eligibility, and
+    // deliberately never records a lease row.
+    const status = durable(
+      registration.paths.ledger,
+      { runId: registration.runId, executionId: registration.executionId },
+      {
+        posture: { availability: 'known', value: 'compute-only' },
+        executionEligibility: {
+          availability: 'known',
+          value: {
+            state: 'disabled-by-posture',
+            reasons: ['compute-only posture does not permit broker execution'],
+          },
+        },
+      },
+    );
+
+    const [value] = successfulValues(
+      await readPineliveStatusList({
+        registry: registry({
+          entries: [{ instanceId: registration.instanceId, active: registration }],
+          errors: [],
+        }),
+        now: NOW,
+        processProbe: matchingProbe,
+        statusReader: statusReader(new Map([[registration.paths.ledger, status]])),
+      }),
+    );
+
+    expect(value).toMatchObject({
+      kind: 'active',
+      lifecycle: {
+        state: 'running',
+        physicalExecutionLease: { availability: 'known', value: 'same-owner' },
+        physicalAccountClaim: { availability: 'known', value: 'not-applicable' },
+        reasons: [],
+      },
+    });
+    // The relaxation must not misrepresent durable evidence.
+    expect(value.kind === 'active' && value.durable.ownership.durableLedgerLease).toMatchObject({
+      availability: 'not-recorded',
+    });
+    expect(value.kind === 'active' && value.durable.executionEligibility).toMatchObject({
+      availability: 'known',
+      value: { state: 'disabled-by-posture' },
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('the compute-only relaxation still requires exact physical process ownership', async () => {
+  const temporary = await temporaryDirectory();
+  try {
+    const leasePath = join(temporary, 'compute.lock');
+    const registration = active(temporary, 1, {
+      posture: 'compute-only',
+      paths: { ledger: join(temporary, 'ledger.jsonl'), executionLease: leasePath },
+    });
+    // Lock held by a different process than the registration claims.
+    const lease = {
+      leaseVersion: 2 as const,
+      resource: registration.paths.ledger,
+      leaseId: 'compute-lease-1',
+      ownerId: 'pinelive-runtime:compute',
+      acquiredAt: new Date(BASE_TIME).toISOString(),
+      pid: registration.pid + 1,
+      processIdentity: PROCESS_IDENTITY,
+    };
+    await writeFile(leasePath, `${JSON.stringify(lease)}\n`, 'utf8');
+    const status = durable(
+      registration.paths.ledger,
+      { runId: registration.runId, executionId: registration.executionId },
+      { posture: { availability: 'known', value: 'compute-only' } },
+    );
+
+    const [value] = successfulValues(
+      await readPineliveStatusList({
+        registry: registry({
+          entries: [{ instanceId: registration.instanceId, active: registration }],
+          errors: [],
+        }),
+        now: NOW,
+        processProbe: matchingProbe,
+        statusReader: statusReader(new Map([[registration.paths.ledger, status]])),
+      }),
+    );
+
+    expect(value).toMatchObject({
+      kind: 'active',
+      lifecycle: {
+        state: 'unknown',
+        physicalExecutionLease: { availability: 'known', value: 'different-owner' },
+      },
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('a mirrored posture never gets the compute-only lease relaxation', async () => {
+  const temporary = await temporaryDirectory();
+  try {
+    const leasePath = join(temporary, 'execution.lock');
+    const registration = active(temporary, 1, {
+      posture: 'live',
+      brokerId: 'paper',
+      paths: { ledger: join(temporary, 'ledger.jsonl'), executionLease: leasePath },
+    });
+    const lease = {
+      leaseVersion: 2 as const,
+      resource: registration.paths.ledger,
+      leaseId: 'lease-1',
+      ownerId: 'owner-1',
+      acquiredAt: new Date(BASE_TIME).toISOString(),
+      pid: registration.pid,
+      processIdentity: PROCESS_IDENTITY,
+    };
+    await writeFile(leasePath, `${JSON.stringify(lease)}\n`, 'utf8');
+    // A live posture with a physical lock but NO durable lease row must stay a
+    // mismatch: a mirrored run that lost its journaled ownership is not healthy.
+    const status = durable(
+      registration.paths.ledger,
+      { runId: registration.runId, executionId: registration.executionId },
+      { posture: { availability: 'known', value: 'live' } },
+    );
+
+    const [value] = successfulValues(
+      await readPineliveStatusList({
+        registry: registry({
+          entries: [{ instanceId: registration.instanceId, active: registration }],
+          errors: [],
+        }),
+        now: NOW,
+        processProbe: matchingProbe,
+        statusReader: statusReader(new Map([[registration.paths.ledger, status]])),
+      }),
+    );
+
+    expect(value).toMatchObject({
+      kind: 'active',
+      lifecycle: {
+        state: 'unknown',
+        physicalExecutionLease: { availability: 'known', value: 'different-owner' },
+        reasons: ['physical execution lease does not match durable ownership'],
+      },
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('a compute-only registration disagreeing with durable posture stays conservative', async () => {
+  const temporary = await temporaryDirectory();
+  try {
+    const leasePath = join(temporary, 'compute.lock');
+    // Registration claims compute-only; the durable ledger says live.
+    const registration = active(temporary, 1, {
+      posture: 'compute-only',
+      paths: { ledger: join(temporary, 'ledger.jsonl'), executionLease: leasePath },
+    });
+    const lease = {
+      leaseVersion: 2 as const,
+      resource: registration.paths.ledger,
+      leaseId: 'compute-lease-1',
+      ownerId: 'pinelive-runtime:compute',
+      acquiredAt: new Date(BASE_TIME).toISOString(),
+      pid: registration.pid,
+      processIdentity: PROCESS_IDENTITY,
+    };
+    await writeFile(leasePath, `${JSON.stringify(lease)}\n`, 'utf8');
+    const status = durable(
+      registration.paths.ledger,
+      { runId: registration.runId, executionId: registration.executionId },
+      { posture: { availability: 'known', value: 'live' } },
+    );
+
+    const [value] = successfulValues(
+      await readPineliveStatusList({
+        registry: registry({
+          entries: [{ instanceId: registration.instanceId, active: registration }],
+          errors: [],
+        }),
+        now: NOW,
+        processProbe: matchingProbe,
+        statusReader: statusReader(new Map([[registration.paths.ledger, status]])),
+      }),
+    );
+
+    expect(value).toMatchObject({
+      kind: 'active',
+      lifecycle: {
+        state: 'unknown',
+        physicalExecutionLease: { availability: 'known', value: 'different-owner' },
+      },
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

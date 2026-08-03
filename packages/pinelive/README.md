@@ -99,7 +99,7 @@ bun packages/pinelive/src/cli.ts --help
 The CLI commands are:
 
 ```text
-run --config <path>
+run --config <path> [--verbose] [--log-file <path>]
 validate --config <path>
 status --ledger <path> [--json] [--recent <n>]
 status --all [--json] [--recent <n>]
@@ -109,6 +109,13 @@ parity <live.jsonl> <expected.jsonl>
 upgrade [--check]
 --version
 ```
+
+`run --verbose` prints one timestamped line per evaluation, emitted only after
+that evaluation's durable ledger row exists — the log can never show a decision
+the ledger does not have. `run --log-file <path>` tees all run output (mode
+`0600`) and records the resolved path in the private run registry so discovery
+can point at it. Both are observability only: an unopenable or failing log file
+degrades to a normalized warning and never affects the run.
 
 ## Paper quick start
 

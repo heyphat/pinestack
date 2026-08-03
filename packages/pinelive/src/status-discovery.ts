@@ -503,11 +503,17 @@ async function prepareActive(
   const accountClaim = accountClaimResult.value;
   try {
     assertDurableIdentity(registration, durable);
+    // Durable posture, not the advisory registration, is the authority for whether a
+    // missing durable lease row is expected. A disagreement between the two falls
+    // through to `different-owner` and therefore to a conservative lifecycle state.
+    const computeOnlyPosture =
+      durable.posture.availability === 'known' && durable.posture.value === 'compute-only';
     const physicalExecutionLease = compareExecutionLease(
       registration,
       registration.paths.executionLease,
       executionLease,
       durable.ownership.durableLedgerLease,
+      computeOnlyPosture,
     );
     const physicalAccountClaim = compareAccountClaim(
       registration,
@@ -855,6 +861,7 @@ function compareExecutionLease(
   path: string | undefined,
   physical: PhysicalExecutionLeaseV2 | undefined,
   durable: PineliveStatus['ownership']['durableLedgerLease'],
+  computeOnlyPosture: boolean,
 ): DiscoveryEvidence<PhysicalClaimComparison> {
   if (!path) return known('not-applicable');
   if (!physical) return known('absent');
@@ -863,6 +870,26 @@ function compareExecutionLease(
     physical.resource === durable.value.resource &&
     physical.leaseId === durable.value.leaseId &&
     physical.ownerId === durable.value.ownerId &&
+    physicalProcessMatchesRegistration(physical, registration)
+  )
+    return known('same-owner');
+  // A compute-only run holds a physical state lock but journals no durable lease
+  // row: the posture cannot submit broker effects, so ownership is never recorded as
+  // execution authority. Reading that designed absence as an ownership mismatch made
+  // every healthy compute-only run report `lifecycle: unknown`, because a missing
+  // durable row can never satisfy the same-owner comparison above.
+  //
+  // The relaxation is narrow. It requires the DURABLE ledger to prove the posture
+  // (the registry's self-report alone is not sufficient), requires the registration
+  // to agree, requires that no durable lease row exists at all so a row that
+  // genuinely disagrees is never overridden, and still requires exact
+  // pid/boot-identity ownership of the physical lock. It also cannot authorize
+  // anything: compute-only eligibility is durably `disabled-by-posture`, and this
+  // value feeds lifecycle presentation only, never execution or recovery.
+  if (
+    computeOnlyPosture &&
+    registration.posture === 'compute-only' &&
+    durable.availability !== 'known' &&
     physicalProcessMatchesRegistration(physical, registration)
   )
     return known('same-owner');
@@ -1135,7 +1162,11 @@ function processIdentity(value: unknown): BootBoundProcessIdentity {
     throw invalidPhysical('physical process identity must be an object');
   const record = value as Record<string, unknown>;
   exactKeys(record, ['kind', 'value', 'bootIdentityHash'], 'physical process identity');
-  if (record.kind !== 'darwin-start-time' && record.kind !== 'linux-start-ticks')
+  if (
+    record.kind !== 'darwin-boot-session' &&
+    record.kind !== 'darwin-start-time' &&
+    record.kind !== 'linux-start-ticks'
+  )
     throw invalidPhysical('physical process identity kind is invalid');
   const identityValue = boundedString(
     record.value,

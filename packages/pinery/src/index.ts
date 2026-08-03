@@ -211,6 +211,12 @@ export {
 } from './adapters/static.js';
 
 export {
+  BinanceLiveProvider,
+  decodeKlineMessage,
+  type BinanceLiveProviderOptions,
+} from './adapters/binance-live.js';
+
+export {
   ReplayProvider,
   type ReplayProviderOptions,
   type ReplayBarUpdateTrace,

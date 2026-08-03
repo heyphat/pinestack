@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { type MarketDataProvider, type ResolvedDataInstrument } from '@heyphat/pinery';
 import { createNodeMarketDataProvider } from '@heyphat/pinery/node';
@@ -14,6 +14,7 @@ import {
   type PreparedMirroredIntrabarRun,
 } from './core/intrabar-server.js';
 import type { NormalizedRunConfig } from './core/config.js';
+import type { IntrabarEvaluation } from './core/intrabar-runner.js';
 import type { PreparedIntrabarAuthorityEnvelope } from './core/intrabar-authority.js';
 import type { Broker } from './core/broker.js';
 import type { ExecutionLease, ExecutionLeaseSnapshot } from './core/lease.js';
@@ -103,6 +104,12 @@ export interface CliHeartbeatService {
   stop(): Promise<void>;
 }
 
+/** Append-only sink for `run --log-file`. Failures degrade to warnings, never errors. */
+export interface CliRunLogFile {
+  write(line: string): void;
+  close(): Promise<void>;
+}
+
 export interface CliRunRegistry {
   writeActive(record: ActiveRunRegistrationV1): Promise<void>;
   updateActive(
@@ -160,6 +167,8 @@ export interface CliDependencies {
   readonly readTigerDataCredentials: () => Readonly<TigerTradingCredentials>;
   readonly readTigerTradingCredentials: () => Readonly<TigerTradingCredentials>;
   readonly log: (message: string) => void;
+  /** Open the append-only sink behind `run --log-file`. */
+  readonly openRunLogFile: (path: string) => CliRunLogFile;
   readonly addSignalHandler: (signal: CliSignal, handler: () => void) => void;
   readonly removeSignalHandler: (signal: CliSignal, handler: () => void) => void;
 }
@@ -228,6 +237,15 @@ const defaultCliDependencies: CliDependencies = {
   readTigerDataCredentials: tigerDataCredentialsFromEnvironment,
   readTigerTradingCredentials: tigerTradingCredentialsFromEnvironment,
   log: (message) => console.log(message),
+  openRunLogFile: (path) => {
+    // Synchronous open surfaces a bad path immediately; per-line sync writes keep
+    // ordering durable at this volume. Mode 0600 matches the repo's privacy posture.
+    const descriptor = openSync(path, 'a', 0o600);
+    return {
+      write: (line) => void writeSync(descriptor, `${line}\n`),
+      close: async () => closeSync(descriptor),
+    };
+  },
   addSignalHandler: (signal, handler) => process.once(signal, handler),
   removeSignalHandler: (signal, handler) => process.off(signal, handler),
 };
@@ -335,7 +353,7 @@ export async function main(
   const dependencies = { ...defaultCliDependencies, ...overrides };
   const [command, ...rest] = argv;
   if (!command || command === '--help' || command === '-h' || command === 'help') {
-    dependencies.log('pinelive run --config <pinelive.json>');
+    dependencies.log('pinelive run --config <pinelive.json> [--verbose] [--log-file <path>]');
     dependencies.log('pinelive validate --config <pinelive.json>');
     dependencies.log('pinelive status --ledger <path> [--json] [--recent <n>]');
     dependencies.log('pinelive status --all [--json] [--recent <n>]');
@@ -459,12 +477,15 @@ export async function main(
   if (command !== 'run') throw new Error(`unknown command "${command}"`);
 
   const args = parseArgs(rest);
-  assertCommandArgs(args, 'run', ['config'], []);
+  assertCommandArgs(args, 'run', ['config', 'log-file'], ['verbose']);
   const configPath = args.values.get('config');
   if (!configPath)
     throw new Error('run requires --config <path>; direct --data CSV mode moved to pinery config');
   const rawConfig = await dependencies.readConfig(configPath);
-  await runConfig(rawConfig, configPath, dependencies);
+  await runConfig(rawConfig, configPath, dependencies, {
+    verbose: args.flags.has('verbose'),
+    ...(args.values.get('log-file') ? { logFilePath: args.values.get('log-file')! } : {}),
+  });
 }
 
 async function validateConfig(
@@ -526,6 +547,7 @@ async function beginRunRegistration(
   config: NormalizedRunConfig,
   configPath: string,
   dependencies: CliDependencies,
+  logFilePath?: string,
 ): Promise<CliRunRegistrationSession | undefined> {
   try {
     const registry = dependencies.createRunRegistry();
@@ -566,6 +588,7 @@ async function beginRunRegistration(
         ledger: dependencies.resolveRunRegistrationPath(runtimePaths.ledgerPath, cwd),
         executionLease: dependencies.resolveRunRegistrationPath(runtimePaths.leasePath, cwd),
         config: dependencies.resolveRunRegistrationPath(configPath, cwd),
+        ...(logFilePath ? { log: dependencies.resolveRunRegistrationPath(logFilePath, cwd) } : {}),
       },
       display: {
         strategyId: config.strategy,
@@ -780,54 +803,143 @@ function monotonicRegistrationTime(current: ActiveRunRegistrationV1, now: Date):
   return new Date(timestamp).toISOString();
 }
 
+interface CliRunOptions {
+  readonly verbose?: boolean;
+  readonly logFilePath?: string;
+}
+
+interface CliRunLog {
+  /** Timestamped, visibly escaped operational line to the console and the log file. */
+  readonly log: (message: string) => void;
+  /** Untimestamped line for machine-readable output (the final result JSON). */
+  readonly emitRaw: (message: string) => void;
+  /** Set only when the log file actually opened; registered as advisory metadata. */
+  readonly logFilePath?: string;
+  close(): Promise<void>;
+}
+
+/**
+ * Operational logging is observability, never authority: an unopenable or failing
+ * log file degrades to a warning and the run continues on the console alone.
+ */
+function createRunLog(dependencies: CliDependencies, logFilePath?: string): CliRunLog {
+  let file: CliRunLogFile | undefined;
+  if (logFilePath !== undefined) {
+    try {
+      file = dependencies.openRunLogFile(logFilePath);
+    } catch {
+      dependencies.log('pinelive log warning: log-file-open-failed');
+    }
+  }
+  const writeToFile = (line: string): void => {
+    if (!file) return;
+    try {
+      file.write(line);
+    } catch {
+      // Stop retrying after the first failure; the console remains authoritative.
+      file = undefined;
+      dependencies.log('pinelive log warning: log-file-write-failed');
+    }
+  };
+  const emitRaw = (message: string): void => {
+    dependencies.log(message);
+    writeToFile(message);
+  };
+  const opened = file !== undefined;
+  return {
+    log: (message) => emitRaw(`${dependencies.now().toISOString()} ${escapeTerminalText(message)}`),
+    emitRaw,
+    ...(opened && logFilePath !== undefined ? { logFilePath } : {}),
+    close: async () => {
+      try {
+        await file?.close();
+      } catch {
+        // Closing the advisory sink must not fail the run.
+      }
+    },
+  };
+}
+
+/** One line per durable evaluation row. Logging must never reach the evaluation path. */
+function verboseEvaluationLogger(runLog: CliRunLog): (evaluation: IntrabarEvaluation) => void {
+  return (evaluation) => {
+    try {
+      runLog.log(
+        `evaluation bar=${evaluation.update.barTime} revision=${evaluation.update.revision}` +
+          ` phase=${evaluation.finalCommit ? 'final' : 'forming'} target=${evaluation.target}` +
+          ` reason=${evaluation.reason}` +
+          (evaluation.executable ? '' : ' executable=false') +
+          (evaluation.alerts.length > 0 ? ` alerts=${evaluation.alerts.length}` : ''),
+      );
+    } catch {
+      // A logging fault must not become a runtime fault.
+    }
+  };
+}
+
 async function runConfig(
   rawConfig: Readonly<Record<string, unknown>>,
   configPath: string,
   dependencies: CliDependencies,
+  options: CliRunOptions = {},
 ): Promise<void> {
   const source = await dependencies.readSource(strategyPath(rawConfig));
   // The branded prepare result is the only normalized value used below. No runtime factory
   // exists before this pure source/config gate completes.
   const prepared = dependencies.prepareIntrabarRun(rawConfig, source);
   const normalized = prepared.config;
-  const registration = await beginRunRegistration(normalized, configPath, dependencies);
-
-  const dataFactory = (): MarketDataProvider =>
-    normalized.data.provider === 'tiger'
-      ? dependencies.createMarketDataProvider(normalized.data, {
-          tigerCredentials: tigerDataCredentialSlice(dependencies.readTigerDataCredentials()),
-        })
-      : dependencies.createMarketDataProvider(normalized.data);
-
-  const controller = new AbortController();
-  const stop = (): void => controller.abort();
-  dependencies.addSignalHandler('SIGINT', stop);
-  dependencies.addSignalHandler('SIGTERM', stop);
-  let storage: CliRuntimeStorage | undefined;
-  let result: IntrabarServerResult | undefined;
-  let primaryError: unknown;
+  const runLog = createRunLog(dependencies, options.logFilePath);
+  // Everything operational inside the run logs with timestamps and the optional
+  // file tee; the original `log` is reserved for the machine-readable result.
+  const runDependencies: CliDependencies = { ...dependencies, log: runLog.log };
   try {
-    storage = await openRuntimeStorage(normalized, dependencies);
-    result = await runWithStorage(
-      prepared,
+    const registration = await beginRunRegistration(
       normalized,
-      dataFactory,
-      storage,
-      controller.signal,
-      dependencies,
-      registration,
+      configPath,
+      runDependencies,
+      runLog.logFilePath,
     );
-  } catch (error) {
-    primaryError = error;
-  } finally {
-    dependencies.removeSignalHandler('SIGINT', stop);
-    dependencies.removeSignalHandler('SIGTERM', stop);
-    await completeRunRegistration(registration, storage, result, primaryError, dependencies);
-  }
 
-  if (primaryError !== undefined) throw primaryError;
-  if (!result || !storage) throw new Error('pinelive runtime stopped without a result');
-  printResult(result, storage.ledgerPath, dependencies.log);
+    const dataFactory = (): MarketDataProvider =>
+      normalized.data.provider === 'tiger'
+        ? dependencies.createMarketDataProvider(normalized.data, {
+            tigerCredentials: tigerDataCredentialSlice(dependencies.readTigerDataCredentials()),
+          })
+        : dependencies.createMarketDataProvider(normalized.data);
+
+    const controller = new AbortController();
+    const stop = (): void => controller.abort();
+    dependencies.addSignalHandler('SIGINT', stop);
+    dependencies.addSignalHandler('SIGTERM', stop);
+    let storage: CliRuntimeStorage | undefined;
+    let result: IntrabarServerResult | undefined;
+    let primaryError: unknown;
+    try {
+      storage = await openRuntimeStorage(normalized, runDependencies);
+      result = await runWithStorage(
+        prepared,
+        normalized,
+        dataFactory,
+        storage,
+        controller.signal,
+        runDependencies,
+        registration,
+        options.verbose ? verboseEvaluationLogger(runLog) : undefined,
+      );
+    } catch (error) {
+      primaryError = error;
+    } finally {
+      dependencies.removeSignalHandler('SIGINT', stop);
+      dependencies.removeSignalHandler('SIGTERM', stop);
+      await completeRunRegistration(registration, storage, result, primaryError, runDependencies);
+    }
+
+    if (primaryError !== undefined) throw primaryError;
+    if (!result || !storage) throw new Error('pinelive runtime stopped without a result');
+    printResult(result, storage.ledgerPath, runLog.emitRaw);
+  } finally {
+    await runLog.close();
+  }
 }
 
 async function runWithStorage(
@@ -838,6 +950,7 @@ async function runWithStorage(
   signal: AbortSignal,
   dependencies: CliDependencies,
   registration?: CliRunRegistrationSession,
+  onEvaluation?: (evaluation: IntrabarEvaluation) => void,
 ): Promise<IntrabarServerResult> {
   const ledger = new CliOwnedLedger(storage.ledger);
   const fileLease = new CliOwnedExecutionLease(storage.fileLease);
@@ -875,6 +988,7 @@ async function runWithStorage(
         alertChannels: buildAlertChannels(normalized.alerts, dependencies),
         signal,
         ...lifecycleCallbacks,
+        ...(onEvaluation ? { onEvaluation } : {}),
         onLog: dependencies.log,
       });
     } else {
@@ -900,6 +1014,7 @@ async function runWithStorage(
         lease,
         signal,
         ...lifecycleCallbacks,
+        ...(onEvaluation ? { onEvaluation } : {}),
         onLog: dependencies.log,
         ...(execution.broker.id === 'tiger'
           ? {

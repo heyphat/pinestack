@@ -1,0 +1,38 @@
+//@version=6
+// For the every-update cadence (05-every-update-lower-bars.json).
+//
+// `calc_on_every_tick=true` is what Pinelive's config gate requires before it
+// will accept `live.cadence: "every-update"`. Be aware of what that flag does
+// and does not do:
+//
+//   - In piner it is INERT METADATA. The realtime driver executes the script on
+//     every update it is handed, regardless of this value. The cadence is
+//     decided entirely by what Pinelive feeds the engine.
+//   - So this flag is a consent gate: you are asserting the script tolerates
+//     being re-evaluated several times per bar, with piner rolling its broker
+//     state back to the last committed bar before each revision.
+//
+// A script under every-update must therefore not assume it runs once per bar.
+// It also may not use request.security at all — Pinelive rejects every security
+// dependency for this cadence.
+strategy("Intrabar SMA cross (every-update)",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 50,
+     calc_on_every_tick = true,
+     process_orders_on_close = true)
+
+fastLength = input.int(10, "fast", minval = 1)
+slowLength = input.int(30, "slow", minval = 2)
+
+fast = ta.sma(close, fastLength)
+slow = ta.sma(close, slowLength)
+
+if ta.crossover(fast, slow)
+    strategy.entry("long", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("long")
+
+plot(fast, "fast", color = color.teal)
+plot(slow, "slow", color = color.orange)

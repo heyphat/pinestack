@@ -96,6 +96,7 @@ function drawCharts(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'CHARTS',
     focused: ctx.focus === 'charts',
+    key: ctx.paneKey('charts'),
     legend,
   });
   if (inner.h <= 0 || inner.w <= 4) return;
@@ -224,6 +225,7 @@ function drawMetrics(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'TEARSHEET',
     focused,
+    key: ctx.paneKey('metrics'),
     legend: paged
       ? `${Math.floor(cursor / listRows) + 1}/${Math.ceil(lines.length / listRows)} · j/k`
       : fillModelNote(data?.strategy),
@@ -349,13 +351,20 @@ function drawMonthly(ctx: PageContext, rect: Rect): void {
 
   if (sideBySide) {
     const [left, right] = columns(rect, [Math.floor(rect.w / 2)]) as [Rect, Rect];
+    // Two boxes, one pane: both carry the focus marker and both carry the same
+    // key. Marking only the left one said MONTHLY TRADES was a pane of its own
+    // that no keystroke could reach — when in fact it is already on screen, and
+    // `mo` lands on the pane that owns both halves.
     const leftInner = drawPane(screen, left, {
       title: 'MONTHLY RETURNS %',
       focused,
+      key: ctx.paneKey('monthly'),
       legend: span,
     });
     const rightInner = drawPane(screen, right, {
       title: 'MONTHLY TRADES',
+      focused,
+      key: ctx.paneKey('monthly'),
       legend: 'win / loss · even in year',
     });
     if (returnsGrid !== '')
@@ -370,6 +379,7 @@ function drawMonthly(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: showingReturns ? 'MONTHLY RETURNS %' : 'MONTHLY TRADES',
     focused,
+    key: ctx.paneKey('monthly'),
     // The legend names the key and the grid it reveals, so the other half of
     // the tearsheet is discoverable rather than merely absent.
     legend: `${showingReturns ? (span ?? '') : 'win / loss · even in year'} · j/k → ${

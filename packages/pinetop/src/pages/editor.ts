@@ -71,6 +71,7 @@ function drawFiles(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'FILES',
     focused: ctx.focus === 'files',
+    key: ctx.paneKey('files'),
     legend: list.length > 0 ? `${list.length} .pine` : undefined,
   });
   if (inner.h <= 0) return;
@@ -173,6 +174,7 @@ function drawBuffer(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: buffer == null ? 'EDITOR' : truncate(scriptLabel(buffer.path).toUpperCase(), 28),
     focused,
+    key: ctx.paneKey('editor'),
     legend,
   });
   if (inner.h <= 0) return;
@@ -370,6 +372,8 @@ export const editorPage: Page = {
    * the exceptions the vim layer refuses to take, so the rest of the app is
    * always one keystroke away.
    */
+  claimsKeyboard: (state) => state.panes.editor.focus === 'editor',
+
   onKey: (state, key) => {
     if (state.panes.editor.focus !== 'editor') return false;
     const outcome = handleKey(state.editor, key);

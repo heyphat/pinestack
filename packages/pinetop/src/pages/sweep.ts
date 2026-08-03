@@ -83,6 +83,7 @@ function drawRanked(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'RANKED',
     focused: ctx.focus === 'ranked',
+    key: ctx.paneKey('ranked'),
     legend: legendParts.length > 0 ? legendParts.join(' · ') : undefined,
   });
   if (inner.h <= 1) return;
@@ -180,6 +181,7 @@ function drawHeatmap(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'SURFACE',
     focused: ctx.focus === 'heatmap',
+    key: ctx.paneKey('heatmap'),
     legend: map == null ? undefined : heatmapLegend(map, top),
   });
   if (inner.h <= 0) return;
@@ -311,7 +313,9 @@ export const sweepPage: Page = {
 
     drawStrategiesPane(ctx, stratRect, { command: 'sweep' });
     drawAxisPane(ctx, inputsRect, 'sweep');
-    drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'WF w', 'ASK a'] });
+    // `WF w` was here until the walkforward hand-off moved into the palette
+    // (§4.2.i): the chips name real keys, so it names the palette instead.
+    drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'ASK a', ': WF'] });
     drawHistoryPane(ctx, histRect, 'sweep');
     drawRanked(ctx, rankedCol);
     if (heatH > 0) drawHeatmap(ctx, surfaceRect);

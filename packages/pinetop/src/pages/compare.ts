@@ -128,6 +128,7 @@ function drawMetrics(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'A / B',
     focused: ctx.focus === 'metrics',
+    key: ctx.paneKey('metrics'),
     legend: data?.symbol != null ? `${data.symbol} @ ${data.timeframe ?? ''}` : undefined,
   });
   if (inner.h <= 1) return;
@@ -206,6 +207,7 @@ function drawOverlay(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'EQUITY OVERLAY',
     focused: ctx.focus === 'overlay',
+    key: ctx.paneKey('overlay'),
     legend: data == null ? undefined : 'normalized · A solid / B dotted',
   });
   if (inner.h <= 0) return;

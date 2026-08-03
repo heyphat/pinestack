@@ -75,6 +75,7 @@ export function drawStrategiesPane(
   const inner = drawPane(screen, rect, {
     title: 'STRATEGIES',
     focused,
+    key: ctx.paneKey(paneId),
     legend: slots === 2 ? 'A vs B' : list.length > interior ? String(list.length) : undefined,
   });
   if (inner.h <= 0) return;

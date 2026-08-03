@@ -19,7 +19,12 @@ export type Action =
   | { kind: 'last' }
   | { kind: 'confirm' }
   | { kind: 'run-dialog' }
-  | { kind: 'sweep-dialog' }
+  /**
+   * The sweep → walkforward hand-off. No longer a key: a page is reached by its
+   * ordinal and nothing else (§4.2.i), and this was never really "go to page 4" —
+   * it carries the sweep's axes over. It lives in the palette, where an action
+   * with an effect on the config belongs.
+   */
   | { kind: 'walkforward' }
   | { kind: 'edit-external' }
   | { kind: 'filter' }
@@ -125,20 +130,6 @@ export const BINDINGS: Binding[] = [
     group: 'act',
   },
   {
-    keys: ['s'],
-    display: 's',
-    description: 'Sweep dialog',
-    action: { kind: 'sweep-dialog' },
-    group: 'act',
-  },
-  {
-    keys: ['w'],
-    display: 'w',
-    description: 'Walkforward page',
-    action: { kind: 'walkforward' },
-    group: 'act',
-  },
-  {
     keys: ['e'],
     display: 'e',
     // Global rather than EDITOR-only: from a report page this is the whole loop —
@@ -205,6 +196,146 @@ export const BINDINGS: Binding[] = [
     group: 'overlay',
   },
 ];
+
+// ————————————————————————————————————————————————————————— pane accelerators
+
+/**
+ * Every key the app itself claims (§4.2.h).
+ *
+ * Read off the table above rather than listed again beside it, for the same
+ * reason `?` is generated: binding a new global key must *move* the pane
+ * accelerators, not silently shadow one of them.
+ */
+export const RESERVED_KEYS: ReadonlySet<string> = new Set(
+  BINDINGS.flatMap((binding) => binding.keys),
+);
+
+/** Letters only, lowercased — the name an accelerator is cut from. */
+function acceleratorName(paneId: string): string {
+  return paneId.toLowerCase().replace(/[^a-z]/g, '');
+}
+
+/**
+ * The pane accelerators for one page (§4.2.h).
+ *
+ * `tab` walking the ring is fine for two panes and tedious for six, so every pane
+ * also answers to a key of its own. The keys are *derived* rather than assigned:
+ * a page that gains a pane gets a working accelerator with no table to update,
+ * and two panes can never be given the same one.
+ *
+ * Three rules, in order:
+ *
+ *  - **The first letter of the pane's name**, and one letter more for as long as
+ *    two panes on the page would answer to the same key — `config` and `charts`
+ *    become `co` and `ch`, and a third `c…` pane would push all three to three
+ *    letters. Nothing outside this page is consulted: the ring is per page, so the
+ *    keys are too (STRATEGIES is `s` on BACKTEST and `st` on PORTFOLIO, where
+ *    SLEEVES and SUMMARY want the same letter).
+ *
+ *  - **Shifted when the app already claims that letter**, so the global keymap
+ *    always keeps the bare key: RANKED is `R` because `r` opens the run dialog,
+ *    EDITOR's buffer pane is `E` because `e` hands off to `$EDITOR`. The whole
+ *    sequence shifts, not just its first letter, so it is typed with shift held
+ *    down once.
+ *
+ *  - **No accelerator at all** when both cases are claimed, or when two names are
+ *    indistinguishable however far they are cut. `tab` still reaches those panes:
+ *    a key that reaches two panes, or that takes `r` away from running, is worse
+ *    than a pane that has no key.
+ */
+export function paneAccelerators(
+  panes: readonly string[],
+  reserved: ReadonlySet<string> = RESERVED_KEYS,
+): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const paneId of panes) {
+    const name = acceleratorName(paneId);
+    if (name !== '') names.set(paneId, name);
+  }
+
+  // Grow every colliding pane's prefix a letter at a time until the page's keys
+  // are distinct, or the names run out of letters to distinguish them by.
+  const lengths = new Map<string, number>();
+  for (const paneId of names.keys()) lengths.set(paneId, 1);
+  for (;;) {
+    const claimed = new Map<string, string[]>();
+    for (const [paneId, name] of names) {
+      const prefix = name.slice(0, lengths.get(paneId)!);
+      const holders = claimed.get(prefix);
+      if (holders == null) claimed.set(prefix, [paneId]);
+      else holders.push(paneId);
+    }
+    let grew = false;
+    for (const holders of claimed.values()) {
+      if (holders.length < 2) continue;
+      for (const paneId of holders) {
+        const length = lengths.get(paneId)!;
+        if (length >= names.get(paneId)!.length) continue;
+        lengths.set(paneId, length + 1);
+        grew = true;
+      }
+    }
+    if (!grew) break;
+  }
+
+  const keys = new Map<string, string>();
+  for (const [paneId, name] of names) {
+    const prefix = name.slice(0, lengths.get(paneId)!);
+    const seq = reserved.has(prefix[0]!) ? prefix.toUpperCase() : prefix;
+    // Only `g`/`G` are both taken today; a pane named for that letter goes
+    // without rather than taking `G` off "last row".
+    if (reserved.has(seq[0]!)) continue;
+    keys.set(paneId, seq);
+  }
+
+  // Two panes that could not be told apart, and any key that is a prefix of a
+  // longer one (the shorter fires first, so the longer would be unreachable).
+  const sequences = [...keys.values()];
+  for (const [paneId, seq] of [...keys]) {
+    const ambiguous = sequences.filter((other) => other === seq).length > 1;
+    const shadowed = sequences.some((other) => other !== seq && seq.startsWith(other));
+    if (ambiguous || shadowed) keys.delete(paneId);
+  }
+  return keys;
+}
+
+export type SequenceMatch = 'exact' | 'partial' | 'none';
+
+/**
+ * Compare what has been typed against one accelerator.
+ *
+ * The first keystroke is case-sensitive, and that is the whole of how `S` reaches
+ * STRATEGIES without taking `s` from the sweep dialog. The rest is not: with
+ * shift already down for the `S` of `SL`, releasing it before the `L` is not a
+ * different intention.
+ */
+export function matchSequence(seq: string, typed: string): SequenceMatch {
+  if (typed === '') return 'partial';
+  if (typed.length > seq.length) return 'none';
+  if (typed[0] !== seq[0]) return 'none';
+  if (seq.slice(1, typed.length).toLowerCase() !== typed.slice(1).toLowerCase()) return 'none';
+  return typed.length === seq.length ? 'exact' : 'partial';
+}
+
+/** The pane a completed sequence focuses, if it is one. */
+export function paneForSequence(
+  keys: ReadonlyMap<string, string>,
+  typed: string,
+): string | undefined {
+  for (const [paneId, seq] of keys) {
+    if (matchSequence(seq, typed) === 'exact') return paneId;
+  }
+  return undefined;
+}
+
+/** The panes a half-typed sequence could still reach, in ring order. */
+export function panesForPrefix(keys: ReadonlyMap<string, string>, typed: string): string[] {
+  const out: string[] = [];
+  for (const [paneId, seq] of keys) {
+    if (matchSequence(seq, typed) === 'partial') out.push(paneId);
+  }
+  return out;
+}
 
 /** Resolve a key to its action. Page digits are resolved to their own page. */
 export function resolve(key: string): Action | undefined {

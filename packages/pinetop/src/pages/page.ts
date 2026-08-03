@@ -7,7 +7,7 @@
  * cannot accidentally invent its own chrome.
  */
 
-import type { Rect, Screen } from '../render/screen.js';
+import type { PaneKey, Rect, Screen } from '../render/screen.js';
 import type { AppState } from '../state.js';
 import type { CommandId, PageId } from '../flags/schema.js';
 import type { Key } from '../terminal.js';
@@ -21,6 +21,14 @@ export interface PageContext {
   focus: string;
   /** Selected row within a pane. */
   cursor: (paneId: string) => number;
+  /**
+   * The pane's own key, to hand straight to `drawPane` (§4.2.h).
+   *
+   * Derived from the focus ring by the app, so a pane a page draws but does not
+   * put in the ring gets `undefined` — and therefore no badge, because there is
+   * no key that would focus it.
+   */
+  paneKey: (paneId: string) => PaneKey | undefined;
 }
 
 export interface Page {
@@ -62,6 +70,16 @@ export interface Page {
    * `ctrl-c` at all.
    */
   onKey?: (state: AppState, key: Key) => boolean;
+  /**
+   * True while `onKey` is taking every keystroke, so the app stops advertising
+   * pane accelerators that the page is about to eat (§4.2.h).
+   *
+   * Same page and the same reason as `onKey`: inside the EDITOR buffer `E` is the
+   * WORD-end motion, so a `[E]` badge on the buffer's border would be a key that
+   * does something else. `tab` still leaves, which is the way out the badges on
+   * FILES and INPUTS point back to.
+   */
+  claimsKeyboard?: (state: AppState) => boolean;
   /** This page's hint strip. Defaults to the global `HINTS`. */
   hints?: (state: AppState) => readonly { key: string; label: string }[];
 }

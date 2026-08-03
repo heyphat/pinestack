@@ -21,7 +21,14 @@ import {
 import { readInputTitles } from './flags/pine-inputs.js';
 import { COMMANDS, PAGES, schemaFor, type CommandId, type PageId } from './flags/schema.js';
 import { discoverScripts } from './scripts.js';
-import { resolve, type Action } from './keymap.js';
+import {
+  matchSequence,
+  paneAccelerators,
+  paneForSequence,
+  panesForPrefix,
+  resolve,
+  type Action,
+} from './keymap.js';
 import {
   askHeight,
   drawAsk,
@@ -133,6 +140,8 @@ export class App {
   private disposers: (() => void)[] = [];
   /** `space` was pressed and the next digit picks a page (§4.2.f). */
   private pagePrefix = false;
+  /** Letters typed so far toward a pane accelerator (§4.2.h). */
+  private paneJump = '';
 
   constructor(opts: AppOptions) {
     this.terminal = opts.terminal;
@@ -159,12 +168,21 @@ export class App {
     const body = drawFrame(screen, this.state, page, askRows + errorRows);
 
     const focus = this.focusId();
+    const paneKeys = this.paneKeys();
     page.render({
       state: this.state,
       screen,
       body,
       focus,
       cursor: (paneId) => this.state.panes[this.state.page].cursor[paneId] ?? 0,
+      paneKey: (paneId) => {
+        const seq = paneKeys.get(paneId);
+        if (seq == null) return undefined;
+        return {
+          seq,
+          armed: this.paneJump !== '' && matchSequence(seq, this.paneJump) === 'partial',
+        };
+      },
     });
 
     if (this.state.widthWarning != null) {
@@ -184,7 +202,7 @@ export class App {
 
     switch (this.state.overlay.kind) {
       case 'help':
-        drawHelp(screen, this.state);
+        drawHelp(screen, this.state, paneKeys);
         break;
       case 'palette':
         drawPalette(screen, this.state);
@@ -242,6 +260,17 @@ export class App {
     this.state.panes[this.state.page].focus = panes[next]!;
   }
 
+  /**
+   * This page's pane accelerators (§4.2.h) — nothing while the page owns the
+   * keyboard, because a badge on a pane whose key the EDITOR buffer is about to
+   * eat would be a lie about what the key does.
+   */
+  private paneKeys(): Map<string, string> {
+    const page = this.page;
+    if (page.claimsKeyboard?.(this.state) === true) return new Map();
+    return paneAccelerators(page.panes(this.state));
+  }
+
   private moveCursor(delta: number): void {
     const paneId = this.focusId();
     const count = this.page.rowCount(this.state, paneId);
@@ -293,10 +322,72 @@ export class App {
       this.paint();
       return;
     }
+    // A pane accelerator (§4.2.h). It has to come after the page's own keys, so
+    // the EDITOR buffer keeps every letter it needs. Whether it comes before or
+    // after `resolve` makes no difference: the accelerators are derived from the
+    // keys the global keymap has *not* claimed, so neither can shadow the other.
+    if (this.onPaneKey(key)) {
+      this.paint();
+      return;
+    }
 
     const action = resolve(key.name);
     if (action != null) this.dispatch(action);
     this.paint();
+  }
+
+  /**
+   * A pane accelerator, or the first letter of one (§4.2.h).
+   *
+   * Returns true when the key was spent here — either focusing a pane or arming a
+   * two-letter sequence. A key that can neither complete nor continue a sequence
+   * is *tried as the start of a new one* before being handed back to the keymap,
+   * so `co` typed on a page with no `co…` pane still reaches `c…`, and the ordinary
+   * meaning of a key is never lost to a stale prefix.
+   */
+  private onPaneKey(key: Key): boolean {
+    const state = this.state;
+    const armed = this.paneJump;
+    const keys = this.paneKeys();
+
+    if (armed !== '' && (key.name === 'escape' || keys.size === 0)) {
+      this.paneJump = '';
+      state.status = 'pane jump cancelled';
+      // `esc` was spent on the jump; anything else falls through to mean what it
+      // normally means, exactly as an abandoned `space` prefix does.
+      return key.name === 'escape';
+    }
+    if (keys.size === 0) return false;
+    if (!/^[A-Za-z]$/.test(key.name)) {
+      if (armed === '') return false;
+      this.paneJump = '';
+      state.status = 'pane jump cancelled';
+      return false;
+    }
+
+    for (const typed of armed === '' ? [key.name] : [armed + key.name, key.name]) {
+      const paneId = paneForSequence(keys, typed);
+      if (paneId != null) {
+        this.paneJump = '';
+        state.panes[state.page].focus = paneId;
+        state.status = `${paneId.toUpperCase()} focused`;
+        return true;
+      }
+      const candidates = panesForPrefix(keys, typed);
+      if (candidates.length > 0) {
+        this.paneJump = typed;
+        state.status = `pane ${typed}… · ${candidates
+          .map((id) => `${keys.get(id)!} ${id}`)
+          .join(' · ')}`;
+        return true;
+      }
+    }
+
+    if (armed !== '') {
+      this.paneJump = '';
+      state.status = 'pane jump cancelled';
+    }
+    return false;
   }
 
   /**
@@ -336,6 +427,9 @@ export class App {
     switch (action.kind) {
       case 'page':
         state.page = action.page;
+        // Pane accelerators are per page (§4.2.h), so a half-typed one does not
+        // travel to a page where its letters mean something else.
+        this.paneJump = '';
         // Arriving at EDITOR with nothing open is a blank screen beside a project
         // full of scripts; open the loaded one (see `ensureEditorFile`).
         if (action.page === 'editor') ensureEditorFile(state);
@@ -388,10 +482,6 @@ export class App {
         this.openRunDialog(this.page.command);
         break;
       }
-      case 'sweep-dialog':
-        state.page = 'sweep';
-        this.openRunDialog('sweep');
-        break;
       case 'walkforward':
         this.handoffToWalkforward();
         break;
@@ -828,13 +918,21 @@ export class App {
   }
 
   /**
-   * `w` — the sweep → walkforward edge (§2, §3 G3). A swept winner is exactly
-   * what walkforward exists to distrust, so this carries the axes over rather
-   * than making the user retype the grid.
+   * The sweep → walkforward edge (§2, §3 G3). A swept winner is exactly what
+   * walkforward exists to distrust, so this carries the axes over rather than
+   * making the user retype the grid.
+   *
+   * Reached from the palette rather than from `w`: a letter that switched page was
+   * the one exception to "pages are ordinals" (§4.2.i), and this was never only a
+   * page switch — it writes walkforward's config, which is worth asking for by
+   * name. From anywhere but SWEEP there is no grid to carry, and it says so
+   * instead of pretending it moved something.
    */
   private handoffToWalkforward(): void {
     const state = this.state;
-    if (state.page === 'sweep') {
+    if (state.page !== 'sweep') {
+      state.status = 'no sweep grid to carry — build one on SWEEP first';
+    } else {
       const sweepModel = state.flags.sweep;
       const wf = state.flags.walkforward;
       wf.scripts = [...sweepModel.scripts];

@@ -68,22 +68,32 @@ function groupHeight(group: string): number {
  * reads as complete. So: one column when the terminal is tall enough, two when it
  * is not, and the height comes from what there is to show.
  */
-export function drawHelp(screen: Screen, state: AppState): void {
+export function drawHelp(
+  screen: Screen,
+  state: AppState,
+  paneKeys: ReadonlyMap<string, string> = new Map(),
+): void {
   // On EDITOR the buffer's own bindings are the ones you need, and there are more
   // of them than the app's — so that page gets a two-column box wide enough to
   // hold both keyboards at once rather than a truncated version of either.
   if (state.page === 'editor') {
-    drawEditorHelp(screen, state);
+    drawEditorHelp(screen, state, paneKeys);
     return;
   }
 
   const tall = GROUPS.reduce((sum, group) => sum + groupHeight(group), 0);
   const columnGroups: string[][] =
     tall + 3 <= screen.rows - 4 ? [[...GROUPS]] : [GROUPS.slice(0, 2), GROUPS.slice(2)];
-  const height =
-    Math.max(...columnGroups.map((c) => c.reduce((sum, g) => sum + groupHeight(g), 0))) + 3;
+  const columnHeight = Math.max(
+    ...columnGroups.map((c) => c.reduce((sum, g) => sum + groupHeight(g), 0)),
+  );
+  const height = columnHeight + 3 + (paneKeys.size > 0 ? 1 : 0);
 
-  const rect = centred(screen, columnGroups.length === 1 ? 76 : 104, height);
+  // The pane row is one long line, so the one-column box widens to hold a
+  // six-pane page rather than eliding half of it (the `…` still says when a
+  // narrow terminal clips it).
+  const width = columnGroups.length > 1 ? 104 : paneKeys.size > 0 ? 86 : 76;
+  const rect = centred(screen, width, height);
   clear(screen, rect);
   // The legend answers "what am I running" — both halves of it, since every
   // number on screen came out of that pinerun, so a stale one explains a stale
@@ -98,17 +108,22 @@ export function drawHelp(screen: Screen, state: AppState): void {
   const inner = drawPane(screen, rect, { title: 'KEYS', focused: true, legend });
   if (inner.h <= 1) return;
 
+  // The bindings keep every row they need; the pane line gets what is left over
+  // (see below), which at 80×24 is nothing.
+  const paneRow = paneKeys.size > 0 && inner.h >= columnHeight + 2 ? 1 : 0;
+  const bodyBottom = inner.y + inner.h - 1 - paneRow;
+
   const columnW = Math.floor(inner.w / columnGroups.length);
   for (let column = 0; column < columnGroups.length; column++) {
     const x = inner.x + column * columnW;
     let y = inner.y;
     for (const group of columnGroups[column]!) {
-      if (y >= inner.y + inner.h - 1) break;
+      if (y >= bodyBottom) break;
       screen.text(x, y, GROUP_TITLES[group]!, STYLE.title, inner);
       y += 1;
       for (const binding of BINDINGS) {
         if (binding.group !== group) continue;
-        if (y >= inner.y + inner.h - 1) break;
+        if (y >= bodyBottom) break;
         screen.text(x + 2, y, binding.display.padEnd(12), STYLE.accent, inner);
         screen.text(
           x + 15,
@@ -123,9 +138,44 @@ export function drawHelp(screen: Screen, state: AppState): void {
     }
   }
 
+  // This page's pane keys, on the row above the footnote, and only when the box
+  // has one to spare: they are drawn on the panes themselves, so `?` dropping them
+  // at 24 rows costs nothing — while a *binding* pushed off the box would cost the
+  // overlay its one claim (§7 P0) to be the real keymap.
+  if (paneRow > 0) drawPaneKeys(screen, inner, inner.y + inner.h - 2, paneKeys);
+
   const note =
     '⌘K is listed in the design as the palette key; a terminal cannot see it — ctrl-p is the binding.';
   screen.text(inner.x, inner.y + inner.h - 1, truncate(note, inner.w), STYLE.muted, inner);
+}
+
+/**
+ * `PANES  S strategies · c config · ch charts …` — one line, generated from the
+ * accelerators the app actually resolved, so it cannot advertise a key that a
+ * collision moved or that the page never got (§4.2.h).
+ */
+function drawPaneKeys(
+  screen: Screen,
+  inner: Rect,
+  y: number,
+  paneKeys: ReadonlyMap<string, string>,
+): void {
+  if (paneKeys.size === 0) return;
+  const label = 'PANES';
+  screen.text(inner.x, y, label, STYLE.title, inner);
+  let x = inner.x + label.length + 2;
+  for (const [paneId, seq] of paneKeys) {
+    const width = displayWidth(`${seq} ${paneId}`);
+    // A pane that will not fit is said to be missing rather than dropped in
+    // silence: the badges on the panes themselves are the complete list.
+    if (x + width > inner.x + inner.w) {
+      screen.text(inner.x + inner.w - 1, y, '…', STYLE.muted, inner);
+      return;
+    }
+    screen.text(x, y, seq, STYLE.accent, inner);
+    screen.text(x + seq.length + 1, y, paneId, STYLE.muted, inner);
+    x += width + 2;
+  }
 }
 
 /**
@@ -136,8 +186,16 @@ export function drawHelp(screen: Screen, state: AppState): void {
  * back to). Generated from `EDITOR_KEYS` and `BINDINGS`, so neither column can
  * drift from what the keys actually do.
  */
-function drawEditorHelp(screen: Screen, state: AppState): void {
-  const rect = centred(screen, 116, 34);
+function drawEditorHelp(
+  screen: Screen,
+  state: AppState,
+  paneKeys: ReadonlyMap<string, string>,
+): void {
+  // Sized from the two lists plus the footer, and one more row for the pane keys
+  // when the page has any — a fixed height silently dropped the tail of whichever
+  // keyboard grew, which is the failure `?` exists to not have.
+  const contentH = Math.max(EDITOR_KEYS.length, BINDINGS.length) + 1;
+  const rect = centred(screen, 116, contentH + 3 + (paneKeys.size > 0 ? 1 : 0));
   clear(screen, rect);
   const buffer = state.editor.buffer;
   const inner = drawPane(screen, rect, {
@@ -150,11 +208,13 @@ function drawEditorHelp(screen: Screen, state: AppState): void {
 
   const leftW = Math.min(62, Math.max(30, inner.w - 48));
   const keyW = 10;
+  const paneRow = paneKeys.size > 0 && inner.h >= contentH + 2 ? 1 : 0;
+  const bodyBottom = inner.y + inner.h - 1 - paneRow;
 
   screen.text(inner.x, inner.y, 'IN THE BUFFER', STYLE.title, inner);
   let y = inner.y + 1;
   for (const key of EDITOR_KEYS) {
-    if (y >= inner.y + inner.h - 1) break;
+    if (y >= bodyBottom) break;
     screen.text(inner.x + 1, y, key.display.padEnd(keyW), STYLE.accent, inner);
     screen.text(
       inner.x + 1 + keyW + 1,
@@ -170,7 +230,7 @@ function drawEditorHelp(screen: Screen, state: AppState): void {
   screen.text(rightX, inner.y, 'ELSEWHERE IN PINETOP', STYLE.title, inner);
   let ry = inner.y + 1;
   for (const binding of BINDINGS) {
-    if (ry >= inner.y + inner.h - 1) break;
+    if (ry >= bodyBottom) break;
     screen.text(rightX + 1, ry, binding.display.padEnd(11), STYLE.accent, inner);
     screen.text(
       rightX + 13,
@@ -181,6 +241,8 @@ function drawEditorHelp(screen: Screen, state: AppState): void {
     );
     ry += 1;
   }
+
+  if (paneRow > 0) drawPaneKeys(screen, inner, inner.y + inner.h - 2, paneKeys);
 
   screen.text(
     inner.x,
@@ -282,6 +344,16 @@ export function paletteItems(): PaletteItem[] {
         state.ask.open = true;
         return undefined;
       },
+    },
+    {
+      // This used to be `w`. Pages are reached by their ordinal now (§4.2.i), and
+      // this was never merely a page switch: it copies the sweep's axes into
+      // walkforward, which is an edit, and an edit belongs somewhere it has to be
+      // asked for by name.
+      label: 'carry the sweep grid into walkforward',
+      hint: 'copy the axes, symbol and span, then open WALKFORWARD',
+      run: () => undefined,
+      action: { kind: 'walkforward' },
     },
     {
       label: 'revert pending edits',

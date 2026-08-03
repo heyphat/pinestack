@@ -145,6 +145,7 @@ export function drawConfigPane(ctx: PageContext, rect: Rect, opts: ConfigPaneOpt
   const inner = drawPane(screen, rect, {
     title: opts.title ?? `${command.toUpperCase()} CONFIG`,
     focused: ctx.focus === paneId,
+    key: ctx.paneKey(paneId),
     legend,
   });
   if (inner.h <= 0) return;

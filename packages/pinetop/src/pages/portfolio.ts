@@ -67,6 +67,7 @@ function drawSleeves(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'SLEEVES',
     focused: ctx.focus === 'sleeves',
+    key: ctx.paneKey('sleeves'),
     legend: legend.length > 0 ? legend.join(' · ') : undefined,
   });
   if (inner.h <= 1) return;
@@ -157,6 +158,7 @@ function drawSummary(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'PORTFOLIO',
     focused: ctx.focus === 'summary',
+    key: ctx.paneKey('summary'),
   });
   if (inner.h <= 0) return;
 

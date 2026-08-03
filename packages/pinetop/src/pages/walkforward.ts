@@ -99,6 +99,7 @@ function drawWindows(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'WINDOWS',
     focused: ctx.focus === 'windows',
+    key: ctx.paneKey('windows'),
     legend: legend.length > 0 ? legend.join(' · ') : undefined,
   });
   if (inner.h <= 1) return;
@@ -203,6 +204,7 @@ function drawVerdict(ctx: PageContext, rect: Rect): void {
   const inner = drawPane(screen, rect, {
     title: 'VERDICT',
     focused: ctx.focus === 'verdict',
+    key: ctx.paneKey('verdict'),
   });
   if (inner.h <= 0) return;
 

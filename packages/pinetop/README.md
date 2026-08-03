@@ -156,11 +156,12 @@ loads the selected script into that page's command. `compare` takes two, so it
 marks them `A` and `B`, and `↵` fills the first free slot before it starts
 replacing A. LOGS has no picker: it has no command of its own.
 
-The workflow between them is navigation, not documentation: `w` on SWEEP carries
-the grid into WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed
-inputs, `↵` on a scanned symbol or a portfolio sleeve deep-dives it. EDITOR is
-page 1 because the source is where the workflow starts — every other page is
-downstream of the file it edits.
+The workflow between them is navigation, not documentation: `:` then **carry the
+sweep grid into walkforward** takes SWEEP's axes, symbol and span over to
+WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed inputs, `↵` on
+a scanned symbol or a portfolio sleeve deep-dives it. EDITOR is page 1 because the
+source is where the workflow starts — every other page is downstream of the file
+it edits.
 
 Below about 105 columns there is no room for eight titles beside the run status,
 so the tab bar names only the page you are on and shows the rest as bare
@@ -170,16 +171,15 @@ ordinals. `:` and `?` list them all.
 
 | Key                  | Action                                                                 |
 | -------------------- | ---------------------------------------------------------------------- |
-| `1`–`8`              | Switch page                                                            |
+| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter      |
 | `space` `1`–`8`      | Switch page — also works inside the editor buffer                      |
 | `tab` / `shift-tab`  | Next / previous pane in the focus ring                                 |
+| the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS          |
 | `j` / `k`, `↓` / `↑` | Move selection                                                         |
 | `g` / `G`            | First / last row                                                       |
 | `↵`                  | Edit the focused config flag · load selection · apply pending proposal |
 | `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)           |
 | `e`                  | Edit this page's script in `$EDITOR`, then reload it                   |
-| `s`                  | Sweep dialog                                                           |
-| `w`                  | Walkforward page                                                       |
 | `/`                  | Filter fills                                                           |
 | `.`                  | Show / hide the advanced flags                                         |
 | `ctrl-u`             | Clear the field being edited                                           |
@@ -194,8 +194,35 @@ ordinals. `:` and `?` list them all.
 bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
 `ctrl-p` is the binding.)
 
+**No letter switches page.** `s` used to open SWEEP and `w` WALKFORWARD, which
+left the keymap with a digit for six pages, a letter for two, and nothing for
+BACKTEST. Both are gone: `3` then `r` is what `s` was, and the sweep →
+walkforward hand-off — which copied config, not just focus — moved to the palette
+as **carry the sweep grid into walkforward**. The letters went to the panes.
+
+### Pane keys
+
+Six panes means five `tab` presses to reach the last one, so every pane also has
+a key, printed on its own border and derived from its name:
+
+- the **first letter** — `[s]` STRATEGIES, `[h]` HISTORY, `[i]` INPUTS, `[v]`
+  VERDICT, `[u]` UNIVERSE;
+- **one letter more** when two panes on the page want the same one — BACKTEST's
+  CONFIG and CHARTS are `[co]` and `[ch]`, LOGS' LEDGER and ENGINE LOG are `[le]`
+  and `[lo]`, PORTFOLIO's three s-panes are `[st]` `[sl]` `[su]`. The first letter
+  waits for the second; `esc` abandons it;
+- **shifted** when the app already uses that letter, so nothing is taken from the
+  bindings above: RANKED is `[R]` because `r` runs, and EDITOR's buffer is `[E]`
+  because `e` hands off to `$EDITOR`. Shift is held once for the whole key.
+
+The keys are per page and computed from the focus ring, so a page that gains a
+pane gets a working key and cannot collide with an existing one. The pane you are
+_in_ hides its key — those columns go to its legend — and `?` lists the whole set
+for the page you are on.
+
 On EDITOR, while the buffer has focus, none of the above applies — the buffer
-owns the keyboard. `?` there shows both keyboards side by side.
+owns the keyboard, pane keys included, and the badges disappear to say so. `?`
+there shows both keyboards side by side.
 
 ## The editor
 

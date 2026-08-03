@@ -214,12 +214,27 @@ export const BORDER = {
   v: '│',
 } as const;
 
+/** A pane's own key, as drawn on its border (§4.2.h). */
+export interface PaneKey {
+  /** The keystrokes that focus this pane — `S`, `h`, `co`. */
+  seq: string;
+  /** A jump is half-typed and this pane is still one of its candidates. */
+  armed?: boolean;
+}
+
 export interface PaneOptions {
   title: string;
   /** Right-hand status legend on the top border. Dropped when it will not fit. */
   legend?: string;
   /** Focused panes get an accent border and a ◆ before the title (§4.2.c). */
   focused?: boolean;
+  /**
+   * The pane's accelerator, drawn next to its title.
+   *
+   * The key has to be *on the pane* it focuses: a keymap the user has to open `?`
+   * to read is a keymap they will keep pressing `tab` instead of (§4.2.h).
+   */
+  key?: PaneKey;
 }
 
 /**
@@ -250,11 +265,30 @@ export function drawPane(screen: Screen, rect: Rect, opts: PaneOptions): Rect {
     screen.text(x + 1, y, truncate(title, w - 2), opts.focused ? STYLE.accentBold : STYLE.title);
   }
 
+  // The key to the pane you are already in is not a key you need, so the focused
+  // pane keeps those four columns for its legend — which is where `1/2 · j/k` and
+  // `2 axes · 12 combos` live, and those are about the pane you are reading. Every
+  // pane you might want to *go to* carries its badge, and a half-typed jump lights
+  // up all of its candidates, focused or not (§4.2.h).
+  const badge =
+    opts.key == null || (opts.focused === true && opts.key.armed !== true)
+      ? ''
+      : `[${opts.key.seq}] `;
+  const badgeW = titleW + displayWidth(badge) <= w - 2 ? displayWidth(badge) : 0;
+  if (badgeW > 0) {
+    screen.text(
+      x + 1 + titleW,
+      y,
+      badge,
+      opts.key?.armed === true ? STYLE.accentBold : STYLE.accent,
+    );
+  }
+
   if (opts.legend) {
     const legend = ` ${opts.legend} `;
     const legendW = displayWidth(legend);
     // Only when it clears the title with a border segment left between them.
-    if (titleW + legendW + 3 <= w) {
+    if (titleW + badgeW + legendW + 3 <= w) {
       screen.text(x + w - 1 - legendW, y, legend, STYLE.muted);
     }
   }

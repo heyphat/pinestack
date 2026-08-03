@@ -184,6 +184,53 @@ immediately to the right of its own ordinal, so which tab it belongs to is unamb
 is marked two ways: accent border and a `◆` before its title. `j`/`k` moves selection
 within the focused pane.
 
+**Decision 4.2.h — Every pane also has a key of its own, derived from its name.** `tab`
+is fine for two panes and tedious for six: reaching HISTORY on BACKTEST is five presses,
+and the count changes when a page gains a pane. So each pane answers to a key drawn on its
+border — `[h]` on HISTORY, `[ch]` on CHARTS — and the keys are *derived* rather than
+assigned, from the pane's name in the focus ring:
+
+- the **first letter** of the name, plus one letter more for as long as two panes on the
+  page would answer to the same key (`config` and `charts` → `co` and `ch`);
+- **shifted** when the app already claims that letter, so the global keymap never loses a
+  bare key: RANKED is `R` because `r` opens the run dialog, and EDITOR's buffer pane is `E`
+  because `e` hands off to `$EDITOR`. The whole sequence shifts, so it is typed with shift
+  held once;
+- **no key at all** when both cases are claimed, or when two names cannot be told apart
+  however far they are cut. `tab` still reaches those panes: a key that reaches two panes,
+  or that takes `r` away from running, is worse than a pane with no key.
+
+Three properties follow, and each is the reason for a rule above. The keys are **per page**,
+because the ring is (STRATEGIES is `s` on BACKTEST and `st` on PORTFOLIO, where SLEEVES and
+SUMMARY want the same letter). They **cannot shadow a binding**, because `RESERVED_KEYS` is
+read off the bindings table — adding a global key *moves* a pane's key rather than quietly
+outranking it. And a page that **gains a pane** gets a working key with no table to update,
+which is the only version of this that survives §7's later phases.
+
+The badge is on the pane and not only in `?`, because a key you have to open an overlay to
+read is a key you will keep pressing `tab` instead of. It is omitted on the *focused* pane —
+those four columns go to that pane's legend, which is where `1/2 · j/k` and
+`2 axes · 12 combos` live, and the key to the pane you are already in is not one you need.
+While a two-letter key is half-typed, every pane it could still reach shows its badge,
+focused or not. Where a pane's headline differs from its name in the ring (TEARSHEET for
+`metrics`), the badge on the border is the authority.
+
+**Decision 4.2.i — A page is reached by its ordinal, and by nothing else.** `s` used to open
+SWEEP with its run dialog and `w` used to open WALKFORWARD, which made the keymap answer
+"how do I change page?" three different ways — a digit for six of the eight pages, a letter
+for two of them, and no letter for BACKTEST, the page you return to most. Both letters are
+gone: `3` then `r` is what `s` was, in the two keystrokes the other five command pages
+already cost. The letters they freed go to the panes (§4.2.h), which is the better trade —
+STRATEGIES is on all six command pages and is where a session starts, while `s` saved one
+keystroke on one of them.
+
+`w` was not only a page switch: from SWEEP it carried the grid — axes, symbol, span, rank —
+into walkforward's config, and dropping the key must not drop the hand-off (§3 G3). It moved
+to the command palette as **carry the sweep grid into walkforward**, which is where an action
+that *writes config* is easier to defend than on a bare letter: it is asked for by name, and
+§4.6's rule that nothing changes without an explicit keypress reads more honestly when the
+keypress spells out what it does.
+
 #### Keybindings (normative)
 
 | Key | Action |
@@ -191,13 +238,12 @@ within the focused pane.
 | `1`–`8` | Switch page |
 | `space` `1`–`8` | Switch page; the only form that works inside the EDITOR buffer (§4.2.f) |
 | `tab` / `shift-tab` | Next / previous pane in the focus ring |
+| the key on a pane's border | Focus that pane directly; derived per page, `esc` abandons a half-typed one (§4.2.h) |
 | `j` / `k`, `↓` / `↑` | Move selection |
 | `g` / `G` | First / last row |
 | `↵` | Load selection / confirm dialog / apply pending AI proposal |
 | `r` | Run dialog for the current page's command |
 | `e` | Edit the current page's script in `$EDITOR`, then reload it (§4.8.g) |
-| `s` | Sweep dialog |
-| `w` | Walkforward page |
 | `/` | Filter fills |
 | `a` | Ask (AI prompt drawer) |
 | `:` or `⌘K` / `ctrl-p` | Command palette |
@@ -207,7 +253,9 @@ within the focused pane.
 
 On EDITOR, while the buffer has focus, these bindings do **not** apply — the buffer owns the
 keyboard (§4.8). `tab` and `ctrl-c` are the two it refuses to take, so the table above is
-always one keystroke away.
+always one keystroke away. The pane badges go with them: the page says so through
+`Page.claimsKeyboard`, rather than advertising an `[E]` that the buffer is about to read as
+the WORD-end motion.
 
 ### 4.3 Rendering contract
 
@@ -594,7 +642,7 @@ anticipate, each because the alternative was a screen that lied:
    and the PR template. Parsing `--help` at runtime was rejected: it would make
    startup depend on the CLI's prose formatting. A machine-readable schema exported
    from `pinerun` would still be strictly better and remains worth doing.
-2. **Editing flags in place vs. a dialog.** ~~Today `r`/`s` open a dialog. Inline editing in
+2. **Editing flags in place vs. a dialog.** ~~Today `r` opens a dialog. Inline editing in
    the config pane is faster but needs a text-input mode and an escape story.~~
    **Resolved (as built): both, over one text-input mode.** `↵` on a config row edits
    it in place; `r` still opens the dialog for building a run from nothing, where

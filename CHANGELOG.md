@@ -11,8 +11,12 @@ libraries to npm remains a possible follow-up.
 
 ## [Unreleased]
 
-pinelive only — nothing in `pinerun`, `pinetop`, or `pinery` changes. The
-breaking pinelive changes below make the next release a **minor** bump.
+pinelive only — nothing in `pinerun`, `pinetop`, or `pinery` changes here. The
+breaking pinelive changes below make whichever release carries them a **minor**
+bump; they are deliberately not part of 0.9.1. The `pinelive` binary is an
+explicit `PINESTACK_BINS` opt-in and its built-in Tiger transport stays blocked
+for armed production, so the work below is on `main` and in the opt-in binary
+without being announced as a release.
 
 ### Added
 
@@ -76,6 +80,53 @@ breaking pinelive changes below make the next release a **minor** bump.
   mutation is refused until the runtime installs an account-claim and
   synchronization guard. Opting out takes an explicit
   `requireExecutionSafety: false`.
+
+## [0.9.1] - 2026-08-03
+
+pinetop only — no change to `pinerun`, `pinery`, or any research output contract.
+Two keybindings are **removed**: `s` and `w` no longer switch page, and the
+letters they held now belong to the panes. `pinelive`'s armed-production work is
+not in this release; it stays under Unreleased above, even though the other three
+packages bump in lockstep with the tag.
+
+### Added
+
+- **Every pane has a key of its own, printed on its border.** `tab` still walks
+  the focus ring, but reaching the sixth pane no longer costs five presses:
+  STRATEGIES is `[s]`, HISTORY `[h]`, CHARTS `[ch]`. The keys are derived per page
+  from the pane's name — the first letter, one letter more when two panes on the
+  page want the same one (`[co]` CONFIG vs `[ch]` CHARTS, `[le]` LEDGER vs `[lo]`
+  ENGINE LOG, `[st]` `[sl]` `[su]` on PORTFOLIO), and shifted when the app already
+  claims that letter, so `r` still opens the run dialog (RANKED is `[R]`) and `e`
+  still hands off to `$EDITOR` (the buffer pane is `[E]`). A half-typed key lights
+  up the panes it could still reach and `esc` abandons it; the focused pane hides
+  its badge so the columns go to its legend; `?` lists the set for the page you are
+  on. Inside the EDITOR buffer the badges disappear, because there the buffer owns
+  the keyboard. Nothing is hand-assigned, so a new pane gets a working key and
+  cannot collide with an existing one (§4.2.h).
+
+### Changed
+
+- **No letter switches page any more — a page is its ordinal (§4.2.i).** `s` (open
+  SWEEP with its run dialog) and `w` (open WALKFORWARD) are **removed**. They were
+  the only letters that changed page, which left the keymap answering the same
+  question two ways and BACKTEST — the page you come back to most — with no letter
+  at all. `3` then `r` is what `s` was, in the two keystrokes every other command
+  page already costs, and the freed letters go to the pane keys above. `w` also
+  carried the sweep grid into walkforward, which is an edit rather than a
+  navigation, so it moved to the command palette as **carry the sweep grid into
+  walkforward** (`:` or `ctrl-p`); SWEEP's config pane now points at the palette
+  instead of advertising `WF w`. `?` is generated from the keymap table, so the
+  overlay dropped both rows with them.
+
+### Fixed
+
+- **BACKTEST's MONTHLY TRADES no longer reads as a pane you cannot reach.** On a
+  terminal wide enough for both 99-column grids the strip draws two boxes for one
+  pane, and only the left one carried the focus marker — so the trades grid looked
+  like a pane no key could land on. Both halves now show the same pane key and both
+  mark focus. (Narrower than that, the strip still shows one grid with `j`/`k`
+  swapping which, as its legend says.)
 
 ## [0.9.0] - 2026-08-01
 
@@ -584,7 +635,8 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
-[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.0...HEAD
+[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/heyphat/pinestack/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/heyphat/pinestack/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/heyphat/pinestack/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/heyphat/pinestack/compare/v0.6.1...v0.7.0

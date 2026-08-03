@@ -124,11 +124,14 @@ Tiger broker transport stays blocked for armed production.
   keep the `every-update` configuration, source policy, reconnect metadata,
   prepared authority, and recovery identity, but Pinelive does not invoke
   provider `liveBars()`. Native sources currently admit authoritative chart
-  finals. A `lower-bars` source polls closed child history, emits a forming chart
-  revision for each newly closed child, and commits only a separately polled
-  chart final that exactly matches the child aggregation. The Pinery protocol
-  and streaming provider implementations remain unchanged for a later switch
-  back.
+  finals. A `lower-bars` source requires provider-attested UTC-24×7 history
+  alignment and a polling interval of at least 250 ms, requests oldest
+  unprocessed child slots in forward-bounded pages capped at the smaller of
+  1,000 and the provider's advertised per-acquisition limit, emits a forming
+  chart revision for each newly closed child, and commits only a separately
+  polled chart final that exactly matches the child aggregation. The Pinery
+  protocol and streaming provider implementations remain unchanged for a later
+  switch back.
 
 ### Fixed
 

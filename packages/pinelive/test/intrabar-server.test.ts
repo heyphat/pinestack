@@ -101,7 +101,7 @@ function lowerPollingConfig() {
     live: {
       cadence: 'every-update',
       source: { kind: 'lower-bars', timeframe: '1m' },
-      throttleMs: 0,
+      throttleMs: 250,
     },
     execution: { kind: 'compute-only' },
   } as const;
@@ -313,6 +313,7 @@ function lowerPollingProvider(childCount = 5): MarketDataProvider {
     id: replay.id,
     history: replay.history.bind(replay),
     resolve: replay.resolve.bind(replay),
+    resolveHistorySource: replay.resolveHistorySource!.bind(replay),
     async historyResolved(_instrument, timeframe, range = {}) {
       if (timeframe === '5m' && range.from === undefined) return warmup;
       if (timeframe === '5m' && range.from === 600 && range.to === 600) return [final];

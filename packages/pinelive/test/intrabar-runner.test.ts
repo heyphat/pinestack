@@ -143,6 +143,7 @@ test('lower-bars every-update polls child finals into forming chart revisions', 
       id: base.id,
       history: base.history.bind(base),
       resolve: base.resolve.bind(base),
+      resolveHistorySource: base.resolveHistorySource!.bind(base),
       async historyResolved(_instrument, timeframe, range = {}) {
         if (timeframe === '5m' && range.from === undefined) return [bar(0, 9), bar(300, 10)];
         if (timeframe === '5m' && range.from === 600 && range.to === 600) return [finalBar];
@@ -173,7 +174,7 @@ test('lower-bars every-update polls child finals into forming chart revisions', 
       live: {
         cadence: 'every-update',
         source: { kind: 'lower-bars', timeframe: '1m' },
-        throttleMs: 0,
+        throttleMs: 250,
       },
       onEvaluation: (evaluation) => {
         evaluations.push(evaluation);
@@ -197,6 +198,144 @@ test('lower-bars every-update polls child finals into forming chart revisions', 
     expect(evaluations.every((item) => item.update.barTime === 600)).toBe(true);
     expect(evaluations.at(-1)?.bar).toEqual(finalBar);
   }
+});
+
+test('lower-bars runner rejects a sub-250ms poll interval before provider I/O', async () => {
+  const { provider, calls } = untouchedProvider(false);
+  await expect(
+    new IntrabarRunner(provider, {
+      source: everyUpdateSource,
+      symbol: 'X',
+      timeframe: '5m',
+      warmupBars: 1,
+      historical: { mode: 'standard' },
+      live: {
+        cadence: 'every-update',
+        source: { kind: 'lower-bars', timeframe: '1m' },
+        throttleMs: 249,
+      },
+    }).initialize(),
+  ).rejects.toThrow('throttleMs must be at least 250 for lower-bars polling');
+  expect(calls).toEqual({ resolve: 0, history: 0, exact: 0, closed: 0, live: 0 });
+});
+
+test('lower-bars polling requires explicit UTC-24x7 history alignment evidence', async () => {
+  const provider = new ReplayProvider(
+    new StaticProvider(
+      {
+        'X|5m': [bar(0, 9), bar(300, 10), bar(600, 11)],
+        'X|1m': [bar(600), bar(660), bar(720), bar(780), bar(840)],
+      },
+      {
+        alignment: 'unknown',
+        timeframes: ['1m', '5m'],
+        cacheIdentity: 'intrabar-polled-unknown-alignment',
+      },
+    ).setInstrument('X', { minQty: 1, mintick: 0.01 }),
+    { cutoverTime: 600, instrument: { minOrderQty: 1 } },
+  );
+
+  await expect(
+    new IntrabarRunner(provider, {
+      source: everyUpdateSource,
+      symbol: 'X',
+      timeframe: '5m',
+      warmupBars: 2,
+      historical: { mode: 'standard' },
+      live: {
+        cadence: 'every-update',
+        source: { kind: 'lower-bars', timeframe: '1m' },
+        throttleMs: 250,
+      },
+    }).initialize(),
+  ).rejects.toThrow('lower-bars polling requires provider UTC-24x7 history alignment evidence');
+});
+
+test('lower-bars polling honors provider caps while paging more than 1000 children forward', async () => {
+  const chartOpen = 2 * 86_400;
+  const children = Array.from({ length: 1_440 }, (_, index) => bar(chartOpen + index * 60, 11, 10));
+  const finalBar = { ...bar(chartOpen, 11, 10), volume: children.length };
+  const base = new ReplayProvider(
+    new StaticProvider(
+      {
+        'X|1d': [bar(0, 9), bar(86_400, 10), finalBar],
+        'X|1m': children,
+      },
+      {
+        alignment: 'utc-24x7',
+        timeframes: ['1m', '1d'],
+        cacheIdentity: 'intrabar-polled-forward-pages',
+      },
+    ).setInstrument('X', { minQty: 1, mintick: 0.01 }),
+    { cutoverTime: chartOpen, instrument: { minOrderQty: 1 } },
+  );
+  const childRanges: Array<{ from?: number; to?: number; limit?: number }> = [];
+  const provider: MarketDataProvider = {
+    id: base.id,
+    history: base.history.bind(base),
+    resolve: base.resolve.bind(base),
+    async resolveHistorySource(symbol: string): Promise<ResolvedHistorySource> {
+      const source = await base.resolveHistorySource!(symbol);
+      return {
+        ...source,
+        capabilities: { ...source.capabilities, maxBarsPerAcquisition: 400 },
+      };
+    },
+    async historyResolved(_instrument, timeframe, range = {}) {
+      if (timeframe === '1d' && range.from === undefined) return [bar(0, 9), bar(86_400, 10)];
+      if (timeframe === '1d' && range.from === chartOpen && range.to === chartOpen) {
+        return [finalBar];
+      }
+      if (timeframe !== '1m') return [];
+      childRanges.push({ from: range.from, to: range.to, limit: range.limit });
+      const inRange = children.filter(
+        (item) =>
+          item.time >= (range.from ?? Number.MIN_SAFE_INTEGER) &&
+          item.time <= (range.to ?? Number.MAX_SAFE_INTEGER),
+      );
+      const limit = range.limit ?? inRange.length;
+      return inRange.slice(-limit);
+    },
+    async *closedBars() {
+      throw new Error('lower-bars polling must not call closedBars');
+    },
+    async *liveBars() {
+      throw new Error('lower-bars polling must not call liveBars');
+    },
+    disconnect: base.disconnect.bind(base),
+  };
+  const evaluations: Array<[number, boolean]> = [];
+  let runner: IntrabarRunner;
+  runner = new IntrabarRunner(provider, {
+    source: everyUpdateSource,
+    symbol: 'X',
+    timeframe: '1d',
+    warmupBars: 2,
+    historical: { mode: 'standard' },
+    live: {
+      cadence: 'every-update',
+      source: { kind: 'lower-bars', timeframe: '1m' },
+      throttleMs: 250,
+    },
+    onEvaluation: (evaluation) => {
+      evaluations.push([evaluation.update.revision, evaluation.finalCommit]);
+      if (evaluation.finalCommit) runner.cancel();
+    },
+  });
+
+  await expect(runner.start()).rejects.toThrow('cancelled');
+  expect(childRanges).toEqual([
+    { from: chartOpen, to: chartOpen + 399 * 60, limit: 400 },
+    { from: chartOpen + 400 * 60, to: chartOpen + 799 * 60, limit: 400 },
+    { from: chartOpen + 800 * 60, to: chartOpen + 1_199 * 60, limit: 400 },
+    { from: chartOpen + 1_200 * 60, to: chartOpen + 1_439 * 60, limit: 240 },
+  ]);
+  expect(evaluations).toHaveLength(1_441);
+  expect(evaluations[0]).toEqual([1, false]);
+  expect(evaluations[999]).toEqual([1_000, false]);
+  expect(evaluations[1_000]).toEqual([1_001, false]);
+  expect(evaluations.at(-2)).toEqual([1_440, false]);
+  expect(evaluations.at(-1)).toEqual([1_441, true]);
 });
 
 test('bar-close and every-update polling produce equivalent final targets', async () => {

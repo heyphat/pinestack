@@ -45,6 +45,7 @@ import {
   type PreparedIntrabarAuthorityEnvelope,
   type PreparedSecurityAuthority,
 } from './intrabar-authority.js';
+import { MIN_LOWER_BARS_POLL_INTERVAL_MS } from './config.js';
 import {
   IntrabarState,
   type AcceptedIntrabarUpdate,
@@ -52,6 +53,8 @@ import {
   type IntrabarUpdateIdentity,
 } from './intrabar-state.js';
 import { toPinerBar } from './time.js';
+
+const MAX_LOWER_BARS_POLL_PAGE = 1_000;
 
 export type IntrabarBackend = 'js' | 'interp';
 
@@ -262,6 +265,7 @@ export class IntrabarRunner {
   private committedAlertCount = 0;
   private resumeAfter?: number;
   private startupDiscontinuity = false;
+  private lowerBarsPollPageLimit = MAX_LOWER_BARS_POLL_PAGE;
 
   constructor(
     private readonly data: MarketDataProvider,
@@ -327,12 +331,30 @@ export class IntrabarRunner {
     this.validateHistory(history, normalized.warmupBars, normalized.timeframeSeconds);
     const chartBars = history.map((bar) => ({ ...bar }));
 
-    let exactSource: ResolvedHistorySource | undefined;
-    if (normalized.historical.mode === 'bar-magnifier') {
-      exactSource = await resolveHistorySource(this.data, resolved.venueSymbol);
+    const needsLowerBarsPollingSource =
+      normalized.live.cadence === 'every-update' && normalized.live.source.kind === 'lower-bars';
+    let resolvedHistorySource: ResolvedHistorySource | undefined;
+    if (normalized.historical.mode === 'bar-magnifier' || needsLowerBarsPollingSource) {
+      resolvedHistorySource = await resolveHistorySource(this.data, resolved.venueSymbol);
       this.ensureActive();
-      this.assertExactSourceIdentity(resolved, exactSource);
+      this.assertExactSourceIdentity(resolved, resolvedHistorySource);
     }
+    if (
+      needsLowerBarsPollingSource &&
+      resolvedHistorySource?.capabilities.alignment !== 'utc-24x7'
+    ) {
+      throw new IntrabarRunnerError(
+        'lower-bars polling requires provider UTC-24x7 history alignment evidence',
+      );
+    }
+    const lowerBarsPollPageLimit = needsLowerBarsPollingSource
+      ? Math.min(
+          MAX_LOWER_BARS_POLL_PAGE,
+          resolvedHistorySource?.capabilities.maxBarsPerAcquisition ?? MAX_LOWER_BARS_POLL_PAGE,
+        )
+      : MAX_LOWER_BARS_POLL_PAGE;
+    const exactSource =
+      normalized.historical.mode === 'bar-magnifier' ? resolvedHistorySource : undefined;
 
     const job: Job = {
       source: normalized.source,
@@ -412,6 +434,7 @@ export class IntrabarRunner {
     this.engine = engine;
     // Warmup-replay alerts are historical data; live collection starts here.
     this.committedAlertCount = engine.outputs.alerts.length;
+    this.lowerBarsPollPageLimit = lowerBarsPollPageLimit;
     this.state = state;
     this.runBinding = binding;
     this.initialized = true;
@@ -465,7 +488,6 @@ export class IntrabarRunner {
   ): Promise<void> {
     const sourceTimeframe = live.source.timeframe;
     const sourceDuration = liveTimeframeSeconds(sourceTimeframe);
-    const ratio = normalized.timeframeSeconds / sourceDuration;
     const aggregator = new ExactChildBarAggregator({
       sourceTimeframe,
       targetTimeframe: normalized.timeframe,
@@ -480,8 +502,6 @@ export class IntrabarRunner {
       lastEventTime = Math.max(Date.now(), lastEventTime + 1);
       return lastEventTime;
     };
-    const pollLimit = Math.min(1_000, Math.max(ratio + 1, live.maxPendingFinals ?? 256));
-
     while (true) {
       this.ensureActive();
 
@@ -520,13 +540,26 @@ export class IntrabarRunner {
         continue;
       }
 
+      const bucket = aggregator.bucketFor(nextChildOpen);
+      const bucketLastOpen = bucket.slots.at(-1)!;
+      const pageEndCandidate = nextChildOpen + sourceDuration * (this.lowerBarsPollPageLimit - 1);
+      if (!Number.isSafeInteger(pageEndCandidate)) {
+        throw new IntrabarRunnerError('lower-bars polling page exceeded safe UNIX seconds');
+      }
+      const pageLastOpen = Math.min(bucketLastOpen, pageEndCandidate);
+      const pageLimit = (pageLastOpen - nextChildOpen) / sourceDuration + 1;
       const children = await this.readPollingHistory(
         sourceTimeframe,
-        { from: nextChildOpen, limit: pollLimit },
+        { from: nextChildOpen, to: pageLastOpen, limit: pageLimit },
         live,
       );
       this.validatePolledBars(children, sourceTimeframe);
-      const fresh = children.filter((bar) => bar.time >= nextChildOpen);
+      if (children.some((bar) => bar.time < nextChildOpen || bar.time > pageLastOpen)) {
+        throw new IntrabarRunnerError(
+          `polling ${sourceTimeframe} history did not honor the requested child range`,
+        );
+      }
+      const fresh = children;
       if (fresh.length === 0) {
         await this.waitForPolling(live.throttleMs ?? 250);
         continue;
@@ -1274,6 +1307,8 @@ function normalizeLive(
     'live',
   );
   const source = snapshotLiveSourcePolicy(live.source);
+  const throttleMs = live.throttleMs ?? 250;
+  optionalNonnegativeSafeInteger(live.throttleMs, 'throttleMs');
   if (source.kind === 'lower-bars') {
     const sourceSeconds = liveTimeframeSeconds(source.timeframe);
     if (sourceSeconds >= chartSeconds || chartSeconds % sourceSeconds !== 0) {
@@ -1281,8 +1316,12 @@ function normalizeLive(
         `${source.timeframe} is not an exact child timeframe of the chart`,
       );
     }
+    if (throttleMs < MIN_LOWER_BARS_POLL_INTERVAL_MS) {
+      throw new IntrabarRunnerError(
+        `throttleMs must be at least ${MIN_LOWER_BARS_POLL_INTERVAL_MS} for lower-bars polling`,
+      );
+    }
   }
-  optionalNonnegativeSafeInteger(live.throttleMs, 'throttleMs');
   optionalPositiveSafeInteger(live.maxPendingFinals, 'maxPendingFinals');
   optionalNonnegativeSafeInteger(live.reconnectAttempts, 'reconnectAttempts');
   optionalNonnegativeSafeInteger(live.reconnectDelayMs, 'reconnectDelayMs');
@@ -1300,7 +1339,7 @@ function normalizeLive(
   return Object.freeze({
     ...live,
     source,
-    throttleMs: live.throttleMs ?? 250,
+    throttleMs,
     maxPendingFinals: live.maxPendingFinals ?? 256,
     reconnectAttempts: live.reconnectAttempts ?? 8,
     reconnectDelayMs: live.reconnectDelayMs ?? 250,

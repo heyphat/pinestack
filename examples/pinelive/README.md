@@ -35,14 +35,14 @@ fill pass produced_. Which fill pass, and when, is what cases 02 and 03 are abou
 
 ## Cases
 
-| Config                            | Posture        | Timing flag                    | What it isolates                                     |
-| --------------------------------- | -------------- | ------------------------------ | ---------------------------------------------------- |
-| `01-compute-only.json`            | compute-only   | aligned                        | Targets computed, no broker at all                   |
-| `02-paper-default-timing.json`    | paper mirrored | default (`false`)              | One bar of fill latency                              |
-| `03-paper-aligned-timing.json`    | paper mirrored | `process_orders_on_close=true` | The corrected version of 02                          |
-| `04-paper-sub-minimum.json`       | paper mirrored | aligned                        | Silent book divergence                               |
-| `05-every-update-lower-bars.json` | compute-only   | aligned                        | Offline replay exposes no post-cutover child history |
-| `06-binance-realtime-5m-1m.json`  | compute-only   | aligned                        | **Realtime** 5m chart from polled closed 1m bars     |
+| Config                            | Posture        | Timing flag                    | What it isolates                                 |
+| --------------------------------- | -------------- | ------------------------------ | ------------------------------------------------ |
+| `01-compute-only.json`            | compute-only   | aligned                        | Targets computed, no broker at all               |
+| `02-paper-default-timing.json`    | paper mirrored | default (`false`)              | One bar of fill latency                          |
+| `03-paper-aligned-timing.json`    | paper mirrored | `process_orders_on_close=true` | The corrected version of 02                      |
+| `04-paper-sub-minimum.json`       | paper mirrored | aligned                        | Silent book divergence                           |
+| `05-every-update-lower-bars.json` | compute-only   | aligned                        | CSV lacks required UTC-24×7 alignment evidence   |
+| `06-binance-realtime-5m-1m.json`  | compute-only   | aligned                        | **Realtime** 5m chart from polled closed 1m bars |
 
 Cases 01–05 run on the 1h fixtures in `examples/data`, which are shared with the
 rest of the repo's docs and tests. A parallel `5m-*` set runs the same lessons on a
@@ -138,32 +138,35 @@ What it cannot do is tell you the books diverged. piner booked entries, exits an
 P&L on trades that never existed in the account, and nothing in the ledger
 compares the two.
 
-### 05 — the offline intrabar config has no data source
+### 05 — offline CSV is rejected without alignment evidence
 
 ```bash
-bun packages/pinelive/src/cli.ts validate --config examples/pinelive/05-every-update-lower-bars.json  # passes
-bun packages/pinelive/src/cli.ts run      --config examples/pinelive/05-every-update-lower-bars.json  # evaluations: 0
+bun packages/pinelive/src/cli.ts validate --config examples/pinelive/05-every-update-lower-bars.json  # passes pure validation
+bun packages/pinelive/src/cli.ts run      --config examples/pinelive/05-every-update-lower-bars.json  # fails before subscription
 ```
 
-The config validates, the run exits 0, and it performs **zero evaluations**. Not
-an error — just nothing.
+Pure config validation passes because it deliberately constructs no provider.
+At runtime, lower-bars polling requires the resolved history source to attest
+UTC-24×7 alignment. The current Node CSV run config does not expose an alignment
+claim, so this example fails closed with:
 
-This config selects the CSV provider, which becomes a `ReplayProvider`.
-Pinelive's temporary lower-bars transport polls `historyResolved()` rather than
-calling `liveBars()`, but Replay deliberately caps an unbounded history request
-at its configured cutover. It therefore exposes no post-cutover child bars to
-this continuously polling path, so the run has nothing to evaluate and exits
-when the finite replay source is exhausted.
+```text
+lower-bars polling requires provider UTC-24x7 history alignment evidence
+```
 
-This config uses `timeframe: "1h"` with a `5m` child only because the offline
-fixtures carry 1h data. **For a working 5m chart with 1m children, use case 06** —
-Binance serves newly closed 1m history continuously, so Pinelive can rebuild the
-forming 5m chart through polling without invoking the provider's streaming
-`liveBars()` implementation. Case 05 remains a warning that a validated
-lower-bars policy does not create post-cutover data when its provider exposes
-none.
+That gate is intentional. A generic fixed-grid poller cannot distinguish a
+missing child from a legitimate exchange/session closure without authoritative
+session evidence. The checked-in CSV files are finite replay fixtures anyway;
+they cannot supply an unbounded post-cutover history stream to a continuously
+running poller.
 
-A lower-bars polling source does evaluate forming revisions, but
+For a working 5m chart with 1m children, use case 06. Binance attests UTC-24×7
+history and serves newly closed 1m bars continuously, so Pinelive can rebuild
+the forming 5m chart through polling without invoking the provider's streaming
+`liveBars()` implementation. Case 05 remains a startup-gate example rather than
+a zero-evaluation replay.
+
+A valid lower-bars polling source evaluates forming revisions, but
 `every-update` still cannot execute them: mirrored every-update is forced to
 Paper with `mirrorOn: "bar-close"`, so forming decisions are journaled as skipped
 and only the authoritative close can move a position. The cadence also rejects
@@ -348,7 +351,8 @@ The decision id records the whole provenance, e.g.
 append-only, never pruned. At six rows per 5m bar and roughly 1 KB each, that is
 about **1,700 rows and 1.7 MB per day**. `throttleMs` is now the REST polling
 interval: lower values detect each newly closed child sooner but make more
-requests; this example uses 1,000 ms.
+requests. Lower-bars polling enforces a 250 ms minimum; this example uses
+1,000 ms. The provider must also attest UTC-24×7 alignment before polling starts.
 
 A healthy run of either posture reports `lifecycle=running` with no reasons:
 
@@ -423,21 +427,20 @@ bun packages/pinelive/src/cli.ts run --config examples/pinelive/5m-05-intrabar-1
 
 Observed:
 
-| Config                            | evaluations | intents | completions | paper realizedPnl |
-| --------------------------------- | ----------- | ------- | ----------- | ----------------- |
-| `5m-01-compute-only.json`         | 249         | —       | —           | — (no broker)     |
-| `5m-02-paper-default-timing.json` | 249         | 4       | 4           | **20.53**         |
-| `5m-03-paper-aligned-timing.json` | 249         | 4       | 4           | **25.15**         |
-| `5m-04-paper-sub-minimum.json`    | 249         | **0**   | **0**       | **0** (unchanged) |
-| `5m-05-intrabar-1m-children.json` | **0**       | —       | —           | — (no broker)     |
+| Config                            | evaluations                      | intents | completions | paper realizedPnl |
+| --------------------------------- | -------------------------------- | ------- | ----------- | ----------------- |
+| `5m-01-compute-only.json`         | 249                              | —       | —           | — (no broker)     |
+| `5m-02-paper-default-timing.json` | 249                              | 4       | 4           | **20.53**         |
+| `5m-03-paper-aligned-timing.json` | 249                              | 4       | 4           | **25.15**         |
+| `5m-04-paper-sub-minimum.json`    | 249                              | **0**   | **0**       | **0** (unchanged) |
+| `5m-05-intrabar-1m-children.json` | **rejected before subscription** | —       | —           | — (no broker)     |
 
 The timing lesson reproduces on 5m: same four trades, **22% more realized P&L** purely
 from `process_orders_on_close`. `5m-04` again writes zero orders while piner trades all
-the way through. And `5m-05` is the honest version of case 05 — a real 5m
-chart with real 1m fixture files that gets past warmup and then performs **zero
-evaluations**, because Replay's continuously polled history contract deliberately
-exposes no unbounded post-cutover children. For a 5m/1m chart that actually
-evaluates, use case 06.
+the way through. `5m-05` is the 5m/1m counterpart to case 05: pure validation
+passes, but runtime rejects the CSV provider before subscription because its
+resolved history capabilities do not attest UTC-24×7 alignment. For a 5m/1m
+chart that actually evaluates, use case 06.
 
 ### A footgun worth knowing
 

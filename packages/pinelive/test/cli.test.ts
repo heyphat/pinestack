@@ -582,31 +582,25 @@ test('recovered strong authority mismatch rejects before the Paper broker factor
   expect(second.removedSignals).toEqual(['SIGINT', 'SIGTERM']);
 });
 
-test('CLI direct recovery preserves an active bar and inhibits its first post-restart final', async () => {
+test('CLI every-update polling resumes after its authoritative final cursor', async () => {
   const config = computeConfig({
     live: { cadence: 'every-update', source: nativeSource },
   });
   const sharedEvents: LedgerEventV3[] = [];
   const first = createCliHarness(
     config,
-    () =>
-      replayProvider({
-        history: [testBar(0), testBar(60)],
-        rawUpdates: true,
-        updates: [testUpdate(testBar(120, 10.5), 1, false)],
-      }),
+    () => replayProvider({ history: [testBar(0), testBar(60), testBar(120, 11)] }),
     { events: sharedEvents },
   );
   await main(['run', '--config', 'active.json'], first.dependencies);
-  expect(recoverLedger(sharedEvents).activeBars.size).toBe(1);
+  expect(recoverLedger(sharedEvents).activeBars.size).toBe(0);
+  expect(recoverLedger(sharedEvents).lastFinalCursor).toBe(120);
 
   const second = createCliHarness(
     config,
     () =>
       replayProvider({
-        history: [testBar(0), testBar(60)],
-        rawUpdates: true,
-        updates: [testUpdate(testBar(120, 11), 2, true), testUpdate(testBar(180, 11), 1, true)],
+        history: [testBar(0), testBar(60), testBar(120, 11), testBar(180, 11)],
       }),
     { events: sharedEvents },
   );
@@ -615,11 +609,9 @@ test('CLI direct recovery preserves an active bar and inhibits its first post-re
   expect(
     sharedEvents.some(
       (event) =>
-        event.recordType === 'evaluation.skipped' &&
-        event.reason === 'startup-discontinuity' &&
-        event.barTime === 120,
+        event.recordType === 'evaluation.skipped' && event.reason === 'startup-discontinuity',
     ),
-  ).toBe(true);
+  ).toBe(false);
   expect(recoverLedger(sharedEvents).lastFinalCursor).toBe(180);
 });
 
@@ -1387,4 +1379,49 @@ test('a failing log-file write warns once and the console remains authoritative'
   expect(harness.logs.join('\n')).not.toContain('sensitive detail');
   expect(harness.logs.some((line) => line.includes(' evaluation bar='))).toBe(true);
   expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+});
+
+test('a final log-file write failure warns before JSON and still closes the sink', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  let closed = 0;
+
+  await main(['run', '--config', 'final-write-failure.json', '--log-file', 'final.log'], {
+    ...harness.dependencies,
+    openRunLogFile: () => ({
+      write: (line) => {
+        if (line.startsWith('{')) throw new Error('ENOSPC final write detail');
+      },
+      close: async () => void closed++,
+    }),
+  });
+
+  expect(closed).toBe(1);
+  const warningIndex = harness.logs.indexOf('pinelive log warning: log-file-write-failed');
+  expect(warningIndex).toBeGreaterThanOrEqual(0);
+  expect(warningIndex).toBeLessThan(harness.logs.length - 1);
+  expect(harness.logs.at(-1)!.startsWith('{')).toBe(true);
+  expect(JSON.parse(harness.logs.at(-1)!)).toMatchObject({ mode: 'compute-only' });
+  expect(harness.logs.join('\n')).not.toContain('final write detail');
+});
+
+test('run --log-file tightens an existing file to mode 0600', async () => {
+  const { chmod, mkdtemp, rm, stat, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'pinelive-log-mode-'));
+  const logPath = join(directory, 'existing.log');
+  try {
+    await writeFile(logPath, 'existing\n', { mode: 0o644 });
+    await chmod(logPath, 0o644);
+    const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+    await main(['run', '--config', 'mode.json', '--log-file', logPath], harness.dependencies);
+
+    if (process.platform !== 'win32') {
+      expect((await stat(logPath)).mode & 0o777).toBe(0o600);
+    }
+    expect(harness.logs.at(-1)!.startsWith('{')).toBe(true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

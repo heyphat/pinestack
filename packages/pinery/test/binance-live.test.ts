@@ -513,3 +513,122 @@ describe('BinanceLiveProvider closedBars', () => {
     expect(bars[1]).toMatchObject({ close: 103, high: 104 });
   });
 });
+
+test('fails closed when reconnect recovery exceeds the bounded contiguous prefix', async () => {
+  const missed: Bar[] = Array.from({ length: 1_001 }, (_, index) => ({
+    time: T0 + (index + 1) * 300,
+    open: 100 + index,
+    high: 101 + index,
+    low: 99 + index,
+    close: 100.5 + index,
+    volume: 1,
+  }));
+  const { fetchImpl } = restStub({ '5m': missed });
+  const { openStream } = scriptedStream([
+    [kline({ open: T0, o: 100, h: 101, l: 99, c: 100, v: 1, closed: true, interval: '5m' })],
+    [],
+  ]);
+  const provider = new BinanceLiveProvider({
+    fetchImpl,
+    openStream,
+    sleep: async () => undefined,
+  });
+  const instrument = await provider.resolve(SYMBOL);
+
+  let caught: unknown;
+  try {
+    await collect(
+      provider.liveBars(instrument, '5m', {
+        source: { kind: 'native' },
+        throttleMs: 0,
+      }),
+      2,
+    );
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toMatchObject({
+    name: 'MarketDataError',
+    code: 'live-discontinuity',
+    retryable: false,
+  });
+  expect((caught as Error).message).toContain('not a contiguous bounded 5m prefix');
+});
+
+test('first live open detects a recovery gap hidden by a low history cap', async () => {
+  const currentBucket = Math.floor(Date.now() / 1_000 / 300) * 300;
+  const beforeGap = currentBucket - 600;
+  const missed: Bar = {
+    time: beforeGap + 300,
+    open: 100,
+    high: 102,
+    low: 99,
+    close: 101,
+    volume: 1,
+  };
+  const forming: Bar = {
+    time: currentBucket,
+    open: 101,
+    high: 103,
+    low: 100,
+    close: 102,
+    volume: 1,
+  };
+  const { fetchImpl } = restStub({ '5m': [missed, forming] });
+  const { openStream } = scriptedStream([
+    [
+      kline({
+        open: beforeGap,
+        o: 99,
+        h: 101,
+        l: 98,
+        c: 100,
+        v: 1,
+        closed: true,
+        interval: '5m',
+      }),
+    ],
+    [
+      kline({
+        open: currentBucket,
+        o: 101,
+        h: 103,
+        l: 100,
+        c: 102,
+        v: 1,
+        closed: false,
+        interval: '5m',
+      }),
+    ],
+  ]);
+  const provider = new BinanceLiveProvider({
+    fetchImpl,
+    openStream,
+    maxBars: 1,
+    sleep: async () => undefined,
+  });
+  const instrument = await provider.resolve(SYMBOL);
+
+  let caught: unknown;
+  try {
+    await collect(
+      provider.liveBars(instrument, '5m', {
+        source: { kind: 'native' },
+        throttleMs: 0,
+      }),
+      2,
+    );
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toMatchObject({
+    name: 'MarketDataError',
+    code: 'live-discontinuity',
+    retryable: false,
+  });
+  expect((caught as Error).message).toContain(
+    'first live 5m open after recovery is not contiguous',
+  );
+});

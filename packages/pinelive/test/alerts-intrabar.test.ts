@@ -13,8 +13,8 @@ import { ReplayProvider, StaticProvider, type Bar, type BarUpdate } from '@heyph
 
 const native = Object.freeze({ kind: 'native' as const });
 
-// Every-update compute-only run: forming revisions evaluate (and emit forming
-// alerts piner will roll back); only the fresh authoritative final dispatches.
+// Every-update remains a configuration/authority mode, but Pinelive currently
+// consumes only authoritative closed-bar polling and ignores forming liveBars traces.
 const source = `//@version=6
 strategy("alerting", calc_on_every_tick=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)
 if close > open
@@ -87,7 +87,7 @@ function alertEvents(events: readonly LedgerEventV3[]) {
   );
 }
 
-test('dispatches only the fresh authoritative final; forming alerts stay provisional', async () => {
+test('every-update polling dispatches the authoritative final and ignores forming traces', async () => {
   const prepared = prepareIntrabarRun(config(), source);
   const ledger = new MemoryLedger();
   const { channel, sent } = capture('ops');
@@ -96,7 +96,7 @@ test('dispatches only the fresh authoritative final; forming alerts stay provisi
   const result = await runIntrabarServer({
     prepared,
     dataFactory: () =>
-      // Two forming revisions with close > open (both would alert), then the final.
+      // Pinelive must ignore these liveBars revisions and poll the static final.
       replayFixture([
         update(bar(7_200, 10.5), 1, false),
         update(bar(7_200, 10.8), 2, false),
@@ -108,12 +108,13 @@ test('dispatches only the fresh authoritative final; forming alerts stay provisi
   });
   expect(result.mode).toBe('compute-only');
 
-  // The forming evaluations carried their provisional alerts on the evaluation…
-  const forming = evaluations.filter((evaluation) => !evaluation.finalCommit);
-  expect(forming).toHaveLength(2);
-  expect(forming.every((evaluation) => evaluation.alerts.includes('bull final'))).toBe(true);
+  expect(evaluations).toHaveLength(1);
+  expect(evaluations[0]).toMatchObject({
+    update: { kind: 'closed-bar', barTime: 7_200, isClose: true },
+    finalCommit: true,
+  });
 
-  // …but only the authoritative final delivered and journaled.
+  // Only the authoritative polled final delivered and journaled.
   expect(sent.map((alert) => [alert.barTime, alert.message, alert.ordinal])).toEqual([
     [7_200, 'bull final', 1],
   ]);

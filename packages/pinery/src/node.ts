@@ -39,6 +39,10 @@ export {
   resolveTigerProfilePath,
   type OfficialTigerMarketDataOptions,
   type OfficialTigerQuoteClient,
+  type OfficialTigerPushCallbacks,
+  type OfficialTigerPushClient,
+  type OfficialTigerPushClientFactory,
+  type OfficialTigerPushKline,
 } from './adapters/tiger-official.js';
 
 export interface DiskCacheOptions {

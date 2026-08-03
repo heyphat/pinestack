@@ -370,7 +370,7 @@ function assertTigerTransport(value: unknown): void {
   const transport = value as Record<string, unknown>;
   if (typeof transport.resolveFuture !== 'function' || typeof transport.bars !== 'function')
     throw new Error('pinery: Tiger transport must implement resolveFuture() and bars()');
-  for (const lifecycle of ['connect', 'disconnect'] as const) {
+  for (const lifecycle of ['connect', 'disconnect', 'openKlineStream'] as const) {
     if (transport[lifecycle] != null && typeof transport[lifecycle] !== 'function')
       throw new Error(`pinery: Tiger transport ${lifecycle} must be a function`);
   }

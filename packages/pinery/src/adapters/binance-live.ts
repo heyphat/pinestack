@@ -366,6 +366,7 @@ export class BinanceLiveProvider implements MarketDataProvider {
     };
 
     let cursor = options.after;
+    let continuityCursor: number | undefined;
     let attempt = 0;
     let connected = false;
     while (!this.stopped && !options.signal?.aborted) {
@@ -385,6 +386,10 @@ export class BinanceLiveProvider implements MarketDataProvider {
               recovered: true,
             });
           }
+          // A configured history cap can return only the forming tail, which the
+          // history provider correctly drops. Keep the cursor until the first
+          // adjacent live open proves that an empty/partial catch-up hid no final.
+          continuityCursor = cursor;
         }
 
         for await (const message of this.open(url, options.signal)) {
@@ -393,6 +398,24 @@ export class BinanceLiveProvider implements MarketDataProvider {
           connected = true;
           const kline = decodeKlineMessage(message);
           if (!kline || kline.interval !== streamTimeframe) continue;
+          if (continuityCursor != null) {
+            const expectedNextOpen = continuityCursor + duration;
+            if (kline.openTime > expectedNextOpen) {
+              throw new MarketDataError(
+                'live-discontinuity',
+                `binance: first live ${streamTimeframe} open after recovery is not contiguous`,
+                {
+                  retryable: false,
+                  details: {
+                    recoveryCursor: continuityCursor,
+                    expectedNextOpen,
+                    actualOpen: kline.openTime,
+                  },
+                },
+              );
+            }
+            if (kline.openTime === expectedNextOpen) continuityCursor = undefined;
+          }
           if (kline.closed) cursor = kline.openTime;
           yield Object.freeze({
             bar: Object.freeze({
@@ -466,7 +489,11 @@ export class BinanceLiveProvider implements MarketDataProvider {
       );
   }
 
-  /** Bars strictly newer than `after` that closed while the socket was down. */
+  /**
+   * Bars strictly newer than `after`, in a complete contiguous prefix. Binance
+   * history is newest-first, so a capped query can omit the oldest part of a long
+   * outage. Reject that condition instead of resuming from discontinuous state.
+   */
   private async recoverClosedBars(
     instrument: ResolvedDataInstrument,
     timeframe: string,
@@ -475,12 +502,33 @@ export class BinanceLiveProvider implements MarketDataProvider {
     const duration = liveTimeframeSeconds(timeframe);
     const bars = await this.history_.history(instrument.strategySymbol, timeframe, {
       from: after + duration,
-      limit: MAX_RECOVERY_BARS,
+      // Headroom exposes a forming tail and lets us distinguish exactly-at-cap
+      // recovery from a gap that exceeds the bounded catch-up policy.
+      limit: MAX_RECOVERY_BARS + UNCLOSED_BAR_HEADROOM,
     });
-    return bars
+    const recovered = bars
       .filter((bar) => bar.time > after)
-      .sort((left, right) => left.time - right.time)
-      .slice(0, MAX_RECOVERY_BARS);
+      .sort((left, right) => left.time - right.time);
+    const firstUnexpected = recovered.find(
+      (bar, index) => bar.time !== after + duration * (index + 1),
+    );
+    if (firstUnexpected || recovered.length > MAX_RECOVERY_BARS) {
+      throw new MarketDataError(
+        'live-discontinuity',
+        `binance: reconnect recovery after ${after} is not a contiguous bounded ${timeframe} prefix`,
+        {
+          retryable: false,
+          details: {
+            after,
+            timeframe,
+            maxRecoveryBars: MAX_RECOVERY_BARS,
+            recoveredBars: recovered.length,
+            ...(firstUnexpected ? { firstUnexpectedTime: firstUnexpected.time } : {}),
+          },
+        },
+      );
+    }
+    return recovered;
   }
 
   private open(url: string, signal?: AbortSignal): AsyncIterable<unknown> {

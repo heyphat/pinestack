@@ -376,6 +376,23 @@ test('provider config rejects unknown, inapplicable, and incomplete Tiger fields
       },
     }),
   ).toThrow('connect');
+  expect(() =>
+    assertProviderConfig({
+      provider: 'tiger',
+      assetClass: 'futures',
+      transport: {
+        resolveFuture: async () => ({
+          root: 'MGC',
+          contract: 'MGCZ24',
+          mintick: 0.1,
+          qtyStep: 1,
+          minOrderQty: 1,
+        }),
+        bars: async () => ({ bars: [], finality: [] }),
+        openKlineStream: true,
+      },
+    }),
+  ).toThrow('openKlineStream');
 });
 
 test('TigerProvider does not start contract resolution after cancellation during connect', async () => {

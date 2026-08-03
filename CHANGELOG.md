@@ -13,11 +13,11 @@ libraries to npm remains a possible follow-up.
 
 The Pinelive production-safety changes below are breaking, which is why this is
 a **minor** bump; they are deliberately not part of 0.9.1. The release also adds
-local Pinelive run discovery, aggregate read-only status, and Pinetop's
-read-only ordinal-9 LIVE page. No change to `pinerun` or `pinery` behavior, or
-to any research output contract. The `pinelive` binary remains an explicit
-`PINESTACK_BINS` opt-in and its built-in Tiger transport stays blocked for armed
-production.
+local Pinelive run discovery, aggregate read-only status, Pinetop's read-only
+ordinal-9 LIVE page, and official Tiger futures K-line streaming in `pinery`.
+There is no change to `pinerun` behavior or any research output contract. The
+`pinelive` binary remains an explicit `PINESTACK_BINS` opt-in, and its built-in
+Tiger broker transport stays blocked for armed production.
 
 ### Added
 
@@ -104,6 +104,44 @@ production.
   production execution because the SDK cannot prove complete open-order
   inventory, authoritative exact absence, or snapshot/account-stream gap
   closure.
+
+- **Official Tiger futures K-line streaming in `pinery`.**
+  `TigerProvider.liveBars()` now has a transport-neutral `openKlineStream`
+  capability backed in Node by the official SDK's dedicated
+  `PushClient.subscribeKline([contract])` path. Because Tiger's push payload has
+  no timeframe selector or explicit finality flag, the provider supports native
+  `1m` only, emits forming revisions, infers finals on rollover, and rejects
+  larger native bars and `lower-bars` aggregation. Bounded reconnects and REST
+  recovery cover disconnects and no-trade gaps. The official adapter disables
+  SDK auto-reconnect, requires verified TLS, bounds and coalesces its queue,
+  preserves timestamp order, makes pending connects cancellable, and retains
+  authentication/entitlement failure classification. Browser-safe entry points
+  remain SDK-free.
+
+### Changed
+
+- **Pinelive `every-update` temporarily uses provider-neutral polling.** Runs
+  keep the `every-update` configuration, source policy, reconnect metadata,
+  prepared authority, and recovery identity, but Pinelive does not invoke
+  provider `liveBars()`. Native sources currently admit authoritative chart
+  finals. A `lower-bars` source polls closed child history, emits a forming chart
+  revision for each newly closed child, and commits only a separately polled
+  chart final that exactly matches the child aggregation. The Pinery protocol
+  and streaming provider implementations remain unchanged for a later switch
+  back.
+
+### Fixed
+
+- **Binance reconnect recovery no longer silently crosses long or incomplete
+  outages.** Recovery now verifies a contiguous bounded prefix after the last
+  final and rejects noncontiguous or over-1,000-bar catch-up with a terminal
+  `live-discontinuity` instead of resuming from a newer truncated window. The
+  first live open is also checked when a capped history response contained only
+  a forming tail.
+- **Pinelive log files preserve privacy, cleanup, and terminal JSON ordering.**
+  `--log-file` now tightens existing files to mode `0600`, retains a failed sink
+  until its descriptor can be closed, and emits final-write warnings before the
+  raw result so machine-readable JSON remains the terminal console line.
 
 ### Changed (breaking)
 

@@ -90,6 +90,23 @@ function computeConfig() {
   } as const;
 }
 
+function lowerPollingConfig() {
+  return {
+    configVersion: 3,
+    strategy: 'server-lower-bars.pine',
+    symbol: 'X',
+    timeframe: '5m',
+    warmupBars: 2,
+    data: dataConfig,
+    live: {
+      cadence: 'every-update',
+      source: { kind: 'lower-bars', timeframe: '1m' },
+      throttleMs: 0,
+    },
+    execution: { kind: 'compute-only' },
+  } as const;
+}
+
 function mirroredConfig(everyUpdate = false) {
   return {
     configVersion: 3,
@@ -253,15 +270,64 @@ function provider(
     history: replay.history.bind(replay),
     resolve: replay.resolve.bind(replay),
     historyResolved: replay.historyResolved.bind(replay),
-    async *closedBars() {},
+    async *closedBars(_instrument, _timeframe, streamOptions) {
+      options.trace?.push('provider:poll');
+      for (const item of updates) {
+        if (!item.isClose || item.bar.time <= (streamOptions.after ?? -Infinity)) continue;
+        yield item.bar;
+      }
+    },
     async *liveBars() {
-      options.trace?.push('provider:subscribe');
+      options.trace?.push('provider:stream');
       for (const item of updates) yield item;
     },
     async disconnect() {
       options.trace?.push('provider:disconnect');
       if (options.disconnectError) throw options.disconnectError;
     },
+  };
+}
+
+function lowerPollingProvider(childCount = 5): MarketDataProvider {
+  const warmup = [bar(0, 9), bar(300, 10)];
+  const children = [
+    bar(600, 10.2, 10),
+    bar(660, 10.4, 10.2),
+    bar(720, 10.6, 10.4),
+    bar(780, 10.8, 10.6),
+    bar(840, 11, 10.8),
+  ];
+  const final = { ...bar(600, 11, 10), volume: 5 };
+  const replay = new ReplayProvider(
+    new StaticProvider(
+      { 'X|5m': [...warmup, final], 'X|1m': children },
+      {
+        alignment: 'utc-24x7',
+        timeframes: ['1m', '5m'],
+        cacheIdentity: `intrabar-server-lower-${childCount}`,
+      },
+    ).setInstrument('X', { minQty: 1, mintick: 0.01 }),
+    { cutoverTime: 600, instrument: { minOrderQty: 1 } },
+  );
+  return {
+    id: replay.id,
+    history: replay.history.bind(replay),
+    resolve: replay.resolve.bind(replay),
+    async historyResolved(_instrument, timeframe, range = {}) {
+      if (timeframe === '5m' && range.from === undefined) return warmup;
+      if (timeframe === '5m' && range.from === 600 && range.to === 600) return [final];
+      if (timeframe === '1m') {
+        return children.slice(0, childCount).filter((item) => item.time >= (range.from ?? 0));
+      }
+      return [];
+    },
+    async *closedBars() {
+      throw new Error('lower-bars polling must not call closedBars');
+    },
+    async *liveBars() {
+      throw new Error('lower-bars polling must not call liveBars');
+    },
+    disconnect: replay.disconnect.bind(replay),
   };
 }
 
@@ -454,69 +520,115 @@ test('authority is deterministic and a recovered mismatch fails before lease or 
   expect(trace).not.toContain('lease:acquire');
 });
 
-test('active-bar recovery seeds discontinuity and only authoritative finals advance the cursor', async () => {
+test('polling recovery resumes after the authoritative final cursor', async () => {
   const prepared = prepareIntrabarRun(computeConfig(), strategy);
   const ledger = new TrackingLedger();
   const first = await runIntrabarServer({
     prepared,
-    dataFactory: () => provider([update(bar(120, 10.5), 1, false)]),
+    dataFactory: () => provider([update(bar(120, 11), 1, true)]),
     ledger,
   });
   expect(first.latestDecision).toMatchObject({
     barTime: 120,
-    authoritativeFinal: false,
+    authoritativeFinal: true,
   });
   const recoveredFirst = recoverLedger(ledger.events);
-  expect(recoveredFirst.activeBars.size).toBe(1);
-  expect(recoveredFirst.lastFinalCursor).toBeUndefined();
+  expect(recoveredFirst.activeBars.size).toBe(0);
+  expect(recoveredFirst.lastFinalCursor).toBe(120);
 
   const reasons: Array<[number, string]> = [];
   const prefix = structuredClone(ledger.events);
   const second = await runIntrabarServer({
     prepared,
-    dataFactory: () => provider([update(bar(120, 11), 2, true), update(bar(180, 9), 1, true)]),
+    dataFactory: () => provider([update(bar(120, 11), 1, true), update(bar(180, 9), 1, true)]),
     ledger,
     recoveredEvents: prefix,
     onEvaluation: (evaluation) => reasons.push([evaluation.update.barTime, evaluation.reason]),
   });
 
-  expect(reasons).toEqual([
-    [120, 'startup-discontinuity'],
-    [180, 'eligible'],
-  ]);
+  expect(reasons).toEqual([[180, 'eligible']]);
   expect(second.lastFinalCursor).toBe(180);
   expect(recoverLedger(ledger.events).lastFinalCursor).toBe(180);
 });
 
-test('mirrored active-bar restart journals discontinuity before the next final effect', async () => {
+test('lower-bars polling rebuilds an interrupted forming bar and finalizes it once', async () => {
+  const prepared = prepareIntrabarRun(lowerPollingConfig(), strategy);
+  const ledger = new TrackingLedger();
+  const firstController = new AbortController();
+
+  await expect(
+    runIntrabarServer({
+      prepared,
+      dataFactory: () => lowerPollingProvider(),
+      ledger,
+      signal: firstController.signal,
+      onEvaluation: (evaluation) => {
+        if (evaluation.update.revision === 2) firstController.abort();
+      },
+    }),
+  ).rejects.toThrow('cancelled');
+
+  const prefix = structuredClone(ledger.events);
+  const interrupted = recoverLedger(prefix);
+  expect(interrupted.activeBars.size).toBe(1);
+  expect(interrupted.lastFinalCursor).toBeUndefined();
+
+  const secondController = new AbortController();
+  const replayed: Array<[number, boolean, string]> = [];
+  await expect(
+    runIntrabarServer({
+      prepared,
+      dataFactory: () => lowerPollingProvider(),
+      ledger,
+      recoveredEvents: prefix,
+      signal: secondController.signal,
+      onEvaluation: (evaluation) => {
+        replayed.push([evaluation.update.revision, evaluation.finalCommit, evaluation.reason]);
+        if (evaluation.finalCommit) secondController.abort();
+      },
+    }),
+  ).rejects.toThrow('cancelled');
+
+  expect(replayed).toEqual([
+    [1, false, 'startup-discontinuity'],
+    [2, false, 'startup-discontinuity'],
+    [3, false, 'startup-discontinuity'],
+    [4, false, 'startup-discontinuity'],
+    [5, false, 'startup-discontinuity'],
+    [6, true, 'startup-discontinuity'],
+  ]);
+  const recovered = recoverLedger(ledger.events);
+  expect(recovered.lastFinalCursor).toBe(600);
+  expect(recovered.activeBars.size).toBe(0);
+});
+
+test('mirrored polling restart resumes effects after the authoritative final cursor', async () => {
   const prepared = prepareIntrabarRun(mirroredConfig(true), strategy);
   const ledger = new TrackingLedger();
   await runIntrabarServer({
     prepared,
-    dataFactory: () => provider([update(bar(120, 10.5), 1, false)]),
+    dataFactory: () => provider([update(bar(120, 11), 1, true)]),
     ledger,
-    lease: new TrackingLease('mirrored-active-bar'),
+    lease: new TrackingLease('mirrored-polling-restart'),
     brokerFactory: paperFactory([]),
   });
-  expect(recoverLedger(ledger.events).activeBars.size).toBe(1);
+  expect(recoverLedger(ledger.events).activeBars.size).toBe(0);
+  expect(recoverLedger(ledger.events).lastFinalCursor).toBe(120);
 
   const prefix = structuredClone(ledger.events);
   const reasons: Array<[number, string]> = [];
   const trace: string[] = [];
   const second = await runIntrabarServer({
     prepared,
-    dataFactory: () => provider([update(bar(120, 11), 2, true), update(bar(180, 11), 1, true)]),
+    dataFactory: () => provider([update(bar(120, 11), 1, true), update(bar(180, 11), 1, true)]),
     ledger,
     recoveredEvents: prefix,
-    lease: new TrackingLease('mirrored-active-bar'),
+    lease: new TrackingLease('mirrored-polling-restart'),
     brokerFactory: paperFactory(trace),
     onEvaluation: (evaluation) => reasons.push([evaluation.update.barTime, evaluation.reason]),
   });
 
-  expect(reasons).toEqual([
-    [120, 'startup-discontinuity'],
-    [180, 'eligible'],
-  ]);
+  expect(reasons).toEqual([[180, 'eligible']]);
   expect(trace.filter((item) => item.startsWith('broker:mark:'))).toEqual(['broker:mark:180']);
   expect(second).toMatchObject({
     mode: 'mirrored',
@@ -550,10 +662,12 @@ test('mirrored Paper acquires and records the lease before its lazy factory and 
 
   expect(trace.indexOf('lease:acquire')).toBeLessThan(trace.indexOf('broker:factory'));
   expect(trace.indexOf('ledger:lease')).toBeLessThan(trace.indexOf('broker:factory'));
-  expect(evaluations).toEqual([false, true]);
+  expect(evaluations).toEqual([true]);
+  expect(trace).toContain('provider:poll');
+  expect(trace).not.toContain('provider:stream');
   expect(trace.filter((item) => item.startsWith('broker:mark:'))).toEqual(['broker:mark:120']);
   expect(ledger.events.filter((event) => event.recordType === 'evaluation.skipped')).toHaveLength(
-    1,
+    0,
   );
   expect(ledger.events.filter((event) => event.recordType === 'evaluation.accepted')).toHaveLength(
     1,
@@ -1329,7 +1443,8 @@ test('advisory lifecycle callbacks observe durable readiness before subscription
   expect(trace.indexOf('ledger:execution-eligibility')).toBeLessThan(
     trace.indexOf('lifecycle:ready'),
   );
-  expect(trace.indexOf('lifecycle:ready')).toBeLessThan(trace.indexOf('provider:subscribe'));
+  expect(trace.indexOf('lifecycle:ready')).toBeLessThan(trace.indexOf('provider:poll'));
+  expect(trace).not.toContain('provider:stream');
   expect(trace.indexOf('lifecycle:stopping')).toBeLessThan(trace.indexOf('provider:disconnect'));
   expect(stoppingCalls).toBe(1);
 });

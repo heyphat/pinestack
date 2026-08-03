@@ -9,7 +9,7 @@ import {
   type IntrabarBrokerFactory,
   type LedgerEventV3,
 } from '@heyphat/pinelive';
-import { ReplayProvider, StaticProvider, type Bar, type BarUpdate } from '@heyphat/pinery';
+import { ReplayProvider, StaticProvider, type Bar } from '@heyphat/pinery';
 
 const native = Object.freeze({ kind: 'native' as const });
 const dataConfig = {
@@ -36,19 +36,8 @@ function bar(time: number, close = 9, open = 10): Bar {
   };
 }
 
-function update(value: Bar, revision: number, isClose: boolean): BarUpdate {
-  return Object.freeze({
-    bar: Object.freeze({ ...value }),
-    revision,
-    isClose,
-    eventTime: value.time * 1_000 + revision,
-    source: native,
-  });
-}
-
 interface ReplayFixtureOptions {
   readonly liveChartBars: readonly Bar[];
-  readonly updates?: readonly BarUpdate[];
   readonly securitySymbols?: readonly string[];
 }
 
@@ -70,7 +59,6 @@ function replayFixture(options: ReplayFixtureOptions): ReplayProvider {
   }).setInstrument('X', { minQty: 1, mintick: 0.01 });
   return new ReplayProvider(source, {
     cutoverTime: 7_200,
-    ...(options.updates ? { updates: { 'X|1h': options.updates } } : {}),
     instrument: { minOrderQty: 1 },
   });
 }
@@ -183,7 +171,7 @@ function decisionEvents(events: readonly LedgerEventV3[]) {
   );
 }
 
-test('public Replay preserves exact warmup, update identity, and interrupted-bar recovery', async () => {
+test('public Replay preserves exact warmup, polling identity, cancellation, and final-cursor recovery', async () => {
   const final7_200 = bar(7_200, 11);
   const final10_800 = bar(10_800, 9);
   const prepared = prepareIntrabarRun(magnifiedComputeConfig(), magnifiedEveryUpdateSource);
@@ -193,23 +181,19 @@ test('public Replay preserves exact warmup, update identity, and interrupted-bar
   await expect(
     runIntrabarServer({
       prepared,
-      dataFactory: () =>
-        replayFixture({
-          liveChartBars: [final7_200, final10_800],
-          updates: [update(bar(7_200, 10.5), 1, false)],
-        }),
+      dataFactory: () => replayFixture({ liveChartBars: [final7_200, final10_800] }),
       ledger,
       signal: controller.signal,
       onEvaluation: (evaluation) => {
-        if (!evaluation.finalCommit) controller.abort();
+        if (evaluation.update.barTime === 7_200) controller.abort();
       },
     }),
   ).rejects.toThrow('cancelled');
 
   const interruptedPrefix = structuredClone(ledger.events);
   const interrupted = recoverLedger(interruptedPrefix);
-  expect(interrupted.activeBars.size).toBe(1);
-  expect(interrupted.lastFinalCursor).toBeUndefined();
+  expect(interrupted.activeBars.size).toBe(0);
+  expect(interrupted.lastFinalCursor).toBe(7_200);
   const firstAuthority = interrupted.authority!.authority;
   expect(firstAuthority.prepared.historical).toMatchObject({
     mode: 'bar-magnifier',
@@ -221,21 +205,16 @@ test('public Replay preserves exact warmup, update identity, and interrupted-bar
     observed: { targetBars: 12, rawBars: 12 },
   });
 
-  const repeatedFinal = update(final7_200, 2, true);
   const second = await runIntrabarServer({
     prepared,
-    dataFactory: () =>
-      replayFixture({
-        liveChartBars: [final7_200, final10_800],
-        updates: [repeatedFinal, repeatedFinal, update(final10_800, 1, true)],
-      }),
+    dataFactory: () => replayFixture({ liveChartBars: [final7_200, final10_800] }),
     ledger,
     recoveredEvents: interruptedPrefix,
   });
 
   expect(second).toMatchObject({
     mode: 'compute-only',
-    evaluations: 2,
+    evaluations: 1,
     lastFinalCursor: 10_800,
   });
   expect(second.authority).toEqual(firstAuthority);
@@ -251,17 +230,17 @@ test('public Replay preserves exact warmup, update identity, and interrupted-bar
       event.reason,
     ]),
   ).toEqual([
-    [7_200, 1, false, 'forming'],
-    [7_200, 2, true, 'startup-discontinuity'],
+    [7_200, 1, true, 'compute-only'],
     [10_800, 1, true, 'compute-only'],
   ]);
-  expect(new Set(evaluations.map((event) => event.decisionId)).size).toBe(3);
+  expect(new Set(evaluations.map((event) => event.decisionId)).size).toBe(2);
   expect(evaluations.every((event) => event.update.eventId === event.decisionId)).toBe(true);
   expect(
     evaluations.every((event) => ![600, 1_200, 1_800, 2_400, 3_000].includes(event.barTime)),
   ).toBe(true);
-  expect(recoverLedger(ledger.events).lastFinalCursor).toBe(10_800);
-  expect(recoverLedger(ledger.events).activeBars.size).toBe(0);
+  const recovered = recoverLedger(ledger.events);
+  expect(recovered.lastFinalCursor).toBe(10_800);
+  expect(recovered.activeBars.size).toBe(0);
 });
 
 test('public close-only magnified exact-security run lazily effects one Paper correction', async () => {

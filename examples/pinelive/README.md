@@ -35,14 +35,14 @@ fill pass produced_. Which fill pass, and when, is what cases 02 and 03 are abou
 
 ## Cases
 
-| Config                            | Posture        | Timing flag                    | What it isolates                            |
-| --------------------------------- | -------------- | ------------------------------ | ------------------------------------------- |
-| `01-compute-only.json`            | compute-only   | aligned                        | Targets computed, no broker at all          |
-| `02-paper-default-timing.json`    | paper mirrored | default (`false`)              | One bar of fill latency                     |
-| `03-paper-aligned-timing.json`    | paper mirrored | `process_orders_on_close=true` | The corrected version of 02                 |
-| `04-paper-sub-minimum.json`       | paper mirrored | aligned                        | Silent book divergence                      |
-| `05-every-update-lower-bars.json` | compute-only   | aligned                        | Offline intrabar cadence has no data source |
-| `06-binance-realtime-5m-1m.json`  | compute-only   | aligned                        | **Realtime** 5m chart from live 1m bars     |
+| Config                            | Posture        | Timing flag                    | What it isolates                                     |
+| --------------------------------- | -------------- | ------------------------------ | ---------------------------------------------------- |
+| `01-compute-only.json`            | compute-only   | aligned                        | Targets computed, no broker at all                   |
+| `02-paper-default-timing.json`    | paper mirrored | default (`false`)              | One bar of fill latency                              |
+| `03-paper-aligned-timing.json`    | paper mirrored | `process_orders_on_close=true` | The corrected version of 02                          |
+| `04-paper-sub-minimum.json`       | paper mirrored | aligned                        | Silent book divergence                               |
+| `05-every-update-lower-bars.json` | compute-only   | aligned                        | Offline replay exposes no post-cutover child history |
+| `06-binance-realtime-5m-1m.json`  | compute-only   | aligned                        | **Realtime** 5m chart from polled closed 1m bars     |
 
 Cases 01–05 run on the 1h fixtures in `examples/data`, which are shared with the
 rest of the repo's docs and tests. A parallel `5m-*` set runs the same lessons on a
@@ -148,25 +148,26 @@ bun packages/pinelive/src/cli.ts run      --config examples/pinelive/05-every-up
 The config validates, the run exits 0, and it performs **zero evaluations**. Not
 an error — just nothing.
 
-This config selects the CSV provider, which becomes a `ReplayProvider`. That class
-does implement `liveBars()`, so the capability gate passes — but its lower-bars path
-needs a pre-recorded `BarUpdate` trace (`updates`/`liveUpdates`/`updateTraces`) plus
-explicit bucket anchor evidence, and `createNodeMarketDataProvider` supplies neither:
-it passes only `cutoverTime`, `paceMs`, and instrument metadata. With no trace, the
-live iterator returns immediately and the stream ends. **Adding 5m or 1m CSV files
-does not fix this**, because the provider wants an update trace, not bars.
+This config selects the CSV provider, which becomes a `ReplayProvider`.
+Pinelive's temporary lower-bars transport polls `historyResolved()` rather than
+calling `liveBars()`, but Replay deliberately caps an unbounded history request
+at its configured cutover. It therefore exposes no post-cutover child bars to
+this continuously polling path, so the run has nothing to evaluate and exits
+when the finite replay source is exhausted.
 
 This config uses `timeframe: "1h"` with a `5m` child only because the offline
 fixtures carry 1h data. **For a working 5m chart with 1m children, use case 06** —
-`BinanceLiveProvider` implements `liveBars()`, so the cadence is reachable from
-configuration against a real feed. Case 05 is kept to show what an every-update
-config does when its provider has no update source: it validates, exits 0, and does
-nothing, which is a silent no-op rather than a fail-closed error.
+Binance serves newly closed 1m history continuously, so Pinelive can rebuild the
+forming 5m chart through polling without invoking the provider's streaming
+`liveBars()` implementation. Case 05 remains a warning that a validated
+lower-bars policy does not create post-cutover data when its provider exposes
+none.
 
-Even if a provider did supply the stream, `every-update` would not execute:
-mirrored every-update is forced to Paper and rewritten to `mirrorOn: "bar-close"`,
-so forming decisions are journaled as skipped and only the authoritative close can
-move a position. It also rejects every `request.security` dependency.
+A lower-bars polling source does evaluate forming revisions, but
+`every-update` still cannot execute them: mirrored every-update is forced to
+Paper with `mirrorOn: "bar-close"`, so forming decisions are journaled as skipped
+and only the authoritative close can move a position. The cadence also rejects
+every `request.security` dependency.
 
 And `calc_on_every_tick=true`, which the config gate demands, is **inert metadata
 in piner** — the realtime driver executes the script on every update it is handed
@@ -297,70 +298,57 @@ your strategy's target actually moves mid-bar on your data. This script is how.
 **What it is not:** a live stream. It replays real history at full speed rather than
 following the market. For that, see case 06.
 
-### 06 — realtime 5m chart from live 1m bars
+### 06 — realtime 5m chart from polled closed 1m bars
 
-**Requires network.** This is the real thing: a continuously running 5m chart whose
-forming state is rebuilt from Binance's live 1m kline stream.
+**Requires network.** This is a continuously running 5m chart whose forming
+state is rebuilt from Binance's newly closed 1m REST history.
 
 ```bash
 bun packages/pinelive/src/cli.ts validate --config examples/pinelive/06-binance-realtime-5m-1m.json
-PINELIVE_RUNS_DIR=/tmp/pinelive-live bun packages/pinelive/src/cli.ts run --config examples/pinelive/06-binance-realtime-5m-1m.json
+PINELIVE_RUNS_DIR=/tmp/pinelive-live bun packages/pinelive/src/cli.ts run --config examples/pinelive/06-binance-realtime-5m-1m.json --verbose
 # Ctrl-C to stop. In another shell:
 PINELIVE_RUNS_DIR=/tmp/pinelive-live bun packages/pinelive/src/cli.ts status --all
 ```
 
-`BinanceLiveProvider` implements the `liveBars()` contract over Binance's public
-keyless kline WebSocket, so `every-update` is now reachable from configuration
-instead of only from a hand-built replay trace. Selecting it is a **data** decision
-only — execution authority stays entirely with `execution.broker`.
+Pinelive polls the provider-neutral `historyResolved()` contract every
+`live.throttleMs` (1 second in this example); it does not invoke Binance's
+WebSocket-backed `liveBars()`. Each newly visible closed 1m child is aggregated
+into the current 5m chart snapshot. When all five child slots are present,
+Pinelive separately polls Binance's closed 5m history and publishes the final
+only when it exactly matches the 1m aggregation. Selecting this cadence is a
+**data** decision only — execution authority stays entirely with
+`execution.broker`.
 
-**The cadence is exactly one re-evaluation per closed 1m bar.** Measured live,
-subscribing deliberately mid-bucket at 08:12:20:
+**The cadence is one re-evaluation per newly closed 1m child.** A run started
+mid-bucket may emit several catch-up revisions immediately, followed by one
+revision at each later minute boundary:
 
+```text
+chart=08:10  rev=1  forming  <- closed 08:10 child
+chart=08:10  rev=2  forming  <- closed 08:11 child
+chart=08:10  rev=3  forming  <- closed 08:12 child
+chart=08:10  rev=4  forming  <- closed 08:13 child
+chart=08:10  rev=5  forming  <- closed 08:14 child
+chart=08:10  rev=6  FINAL    <- separately verified 5m history
 ```
-subscribed at 08:12:20
-wall=08:13:00  chart=08:10  rev=1  forming  close=62540      <- seeded from REST
-wall=08:13:00  chart=08:10  rev=2  forming  close=62518.9    <- seeded from REST
-wall=08:13:00  chart=08:10  rev=3  forming  close=62560      <- live 08:12 child
-wall=08:14:00  chart=08:10  rev=4  forming  close=62568
-wall=08:15:00  chart=08:10  rev=6  FINAL    close=62566.01
-wall=08:16:00  chart=08:15  rev=1  forming  close=62563.03
-wall=08:17:00  chart=08:15  rev=2  forming  close=62522.01
 
-per wall-clock minute: 08:13=3  08:14=1  08:15=1  08:16=1  08:17=1
-```
-
-One update per minute, on the boundary, after the initial catch-up. Each completed
-bucket yields four forming snapshots plus one authoritative final whose bar is the
-exact aggregation of the five 1m children — published only once every child slot has
-closed. (The final's revision skips a number because the closing child's forming
-snapshot is computed and then suppressed: it would carry the identical bar.)
-
-Two behaviors make that cadence hold, and both were bugs found by measuring:
-
-- **Forming child klines are ignored.** Binance streams forming 1m klines about every
-  two seconds. Forwarding them produced ~30 chart updates per minute, mostly
-  re-reporting an unchanged price, which made `timeframe: '1m'` meaningless. A
-  lower-bars subscription is defined by its child _bars_, so only closed children
-  advance the chart. Sub-child granularity is what `source: { kind: 'native' }` is for.
-- **A mid-bucket start is seeded from REST.** The aggregator can publish nothing until
-  slot 0 of a bucket is present, and its bounded forming state forbids carrying a
-  partial bucket into the next one — so joining late used to discard the current bucket
-  and sit silent for up to a full chart period. The provider now backfills the elapsed
-  closed children of the current bucket once, so the first snapshot is immediate and
-  the first final lands at that bucket's own close. A backfill that comes back
-  incomplete or non-contiguous is discarded rather than used, falling back to waiting
-  for the next boundary.
+The closing child still produces a forming revision; the separately authoritative
+chart final is the next revision. Public history intentionally omits the
+currently forming 1m candle, so sub-minute Binance updates do not create extra
+chart evaluations. A missing child slot, non-contiguous catch-up, malformed bar,
+or target/child aggregate conflict fails closed instead of silently skipping a
+revision. Polling retries only provider-classified connectivity/rate-limit
+failures and remains bounded by the configured reconnect policy.
 
 The decision id records the whole provenance, e.g.
 `intrabar:sha256-…:binance%3ABTCUSDT:5:lower-bars:1m:1785738900:149:final` —
 `lower-bars:1m` source, bar open, revision, `final`.
 
 **Write volume.** Every evaluation is a durable ledger row and the ledger is
-append-only, never pruned. At five rows per 5m bar and ~1 KB each that is roughly
-**1,400 rows and 1.5 MB per day** — modest. `throttleMs` is now near-irrelevant for
-this cadence: updates arrive a minute apart, so any throttle below 60,000 drops
-nothing.
+append-only, never pruned. At six rows per 5m bar and roughly 1 KB each, that is
+about **1,700 rows and 1.7 MB per day**. `throttleMs` is now the REST polling
+interval: lower values detect each newly closed child sooner but make more
+requests; this example uses 1,000 ms.
 
 A healthy run of either posture reports `lifecycle=running` with no reasons:
 
@@ -402,9 +390,11 @@ journaled ownership is still reported as a mismatch.
   position.
 - **Venue-resident protective orders.** Your Pine stops live inside piner only.
 
-Live _data_, however, is no longer a gap: `binance` can be selected for a live run
-with either cadence. Every other pinery adapter (`okx`, `kraken`, `alpaca`,
-`massive`) is still history-only, and Tiger polls `closedBars()` with no `liveBars()`.
+Live _data_, however, is no longer a gap: case 06 polls Binance's public
+history for each newly closed child. The same lower-bars cadence can use another
+provider only when its `historyResolved()` path continuously exposes a complete,
+contiguous child grid. Pinelive currently does not invoke any provider's
+`liveBars()` implementation, including Tiger's official-SDK stream.
 
 ## The 5m set
 
@@ -443,10 +433,11 @@ Observed:
 
 The timing lesson reproduces on 5m: same four trades, **22% more realized P&L** purely
 from `process_orders_on_close`. `5m-04` again writes zero orders while piner trades all
-the way through. And `5m-05` is the honest version of case 05 — a real 5m chart with
-real 1m children, which gets past warmup and then performs **zero evaluations**,
-because the CSV/Replay path needs a `BarUpdate` trace and `createNodeMarketDataProvider`
-supplies none. For a 5m/1m chart that actually evaluates, use case 06.
+the way through. And `5m-05` is the honest version of case 05 — a real 5m
+chart with real 1m fixture files that gets past warmup and then performs **zero
+evaluations**, because Replay's continuously polled history contract deliberately
+exposes no unbounded post-cutover children. For a 5m/1m chart that actually
+evaluates, use case 06.
 
 ### A footgun worth knowing
 

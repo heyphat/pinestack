@@ -231,4 +231,5 @@ export {
   type TigerFutureContract,
   type TigerBarsRequest,
   type TigerBarsResult,
+  type TigerKlineUpdate,
 } from './adapters/tiger.js';

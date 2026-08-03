@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { closeSync, openSync, readFileSync, writeSync } from 'node:fs';
+import { closeSync, fchmodSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { type MarketDataProvider, type ResolvedDataInstrument } from '@heyphat/pinery';
 import { createNodeMarketDataProvider } from '@heyphat/pinery/node';
@@ -239,8 +239,19 @@ const defaultCliDependencies: CliDependencies = {
   log: (message) => console.log(message),
   openRunLogFile: (path) => {
     // Synchronous open surfaces a bad path immediately; per-line sync writes keep
-    // ordering durable at this volume. Mode 0600 matches the repo's privacy posture.
+    // ordering durable at this volume. Tighten existing files as well as newly
+    // created ones so mode 0600 is an enforced property, not only a creation hint.
     const descriptor = openSync(path, 'a', 0o600);
+    try {
+      fchmodSync(descriptor, 0o600);
+    } catch (error) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the permission failure as the reason the advisory sink did not open.
+      }
+      throw error;
+    }
     return {
       write: (line) => void writeSync(descriptor, `${line}\n`),
       close: async () => closeSync(descriptor),
@@ -823,34 +834,41 @@ interface CliRunLog {
  * log file degrades to a warning and the run continues on the console alone.
  */
 function createRunLog(dependencies: CliDependencies, logFilePath?: string): CliRunLog {
-  let file: CliRunLogFile | undefined;
+  let openedFile: CliRunLogFile | undefined;
   if (logFilePath !== undefined) {
     try {
-      file = dependencies.openRunLogFile(logFilePath);
+      openedFile = dependencies.openRunLogFile(logFilePath);
     } catch {
       dependencies.log('pinelive log warning: log-file-open-failed');
     }
   }
+  let writableFile = openedFile;
   const writeToFile = (line: string): void => {
-    if (!file) return;
+    if (!writableFile) return;
     try {
-      file.write(line);
+      writableFile.write(line);
     } catch {
-      // Stop retrying after the first failure; the console remains authoritative.
-      file = undefined;
+      // Stop retrying after the first failure, but retain the opened sink so its
+      // descriptor is still closed during shutdown.
+      writableFile = undefined;
       dependencies.log('pinelive log warning: log-file-write-failed');
     }
   };
   const emitRaw = (message: string): void => {
-    dependencies.log(message);
+    // A file failure must be reported before the raw result so the result remains
+    // the terminal machine-readable console line.
     writeToFile(message);
+    dependencies.log(message);
   };
-  const opened = file !== undefined;
+  const opened = openedFile !== undefined;
   return {
     log: (message) => emitRaw(`${dependencies.now().toISOString()} ${escapeTerminalText(message)}`),
     emitRaw,
     ...(opened && logFilePath !== undefined ? { logFilePath } : {}),
     close: async () => {
+      const file = openedFile;
+      openedFile = undefined;
+      writableFile = undefined;
       try {
         await file?.close();
       } catch {

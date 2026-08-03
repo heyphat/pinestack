@@ -43,13 +43,13 @@ retransmitted without definite proof that they were not sent. Use read-only
 
 ### Current capability matrix
 
-| Surface        | Current support                                                                                                                                                                                                                                                                            |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Compute-only   | `bar-close`, or `every-update` with compiled `calc_on_every_tick` support and an authoritative provider `liveBars()` contract. This posture constructs no broker and cannot submit broker effects; the CLI still uses internal durable compute-state storage and a temporary file lock.    |
-| Paper mirrored | `execution.mirrorOn: "bar-close"` only. With every-update data, forming decisions are computed and durably skipped; only the authoritative final can affect Paper. Paper account state remains process-local.                                                                              |
-| Exact history  | Standard or finite Bar Magnifier warmup on the characterized non-`calc_on_order_fills` path. Exact static `request.security` feeds use explicit feed, per-feed-bar, and total-bar budgets and are close-only.                                                                              |
-| Tiger monitor  | `execution.armed: false` connects read-only, acquires no account claim, journals `execution-ineligible` decisions, and performs no mutation.                                                                                                                                               |
-| Tiger armed    | Requires cooperative ownership, complete venue bootstrap, authoritative exact lookup, and gap-free account synchronization. Missing proof returns structured blocked data. The official transport cannot satisfy these requirements and remains ineligible for armed production execution. |
+| Surface        | Current support                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Compute-only   | `bar-close`, or `every-update` with compiled `calc_on_every_tick` support. Native `every-update` currently admits authoritative chart finals; `lower-bars` polls closed child history and emits forming chart revisions plus a separately verified authoritative final. Pinelive does not invoke provider `liveBars()`. This posture constructs no broker and cannot submit broker effects; the CLI still uses internal durable compute-state storage and a temporary file lock. |
+| Paper mirrored | `execution.mirrorOn: "bar-close"` only. Lower-bars forming revisions may be evaluated and journaled, but only an authoritative final can produce a broker effect; forming-update execution remains unavailable. Paper account state remains process-local.                                                                                                                                                                                                                       |
+| Exact history  | Standard or finite Bar Magnifier warmup on the characterized non-`calc_on_order_fills` path. Exact static `request.security` feeds use explicit feed, per-feed-bar, and total-bar budgets and are close-only.                                                                                                                                                                                                                                                                    |
+| Tiger monitor  | `execution.armed: false` connects read-only, acquires no account claim, journals `execution-ineligible` decisions, and performs no mutation.                                                                                                                                                                                                                                                                                                                                     |
+| Tiger armed    | Requires cooperative ownership, complete venue bootstrap, authoritative exact lookup, and gap-free account synchronization. Missing proof returns structured blocked data. The official transport cannot satisfy these requirements and remains ineligible for armed production execution.                                                                                                                                                                                       |
 
 Piner does not currently expose the typed pending-order snapshot and per-fill
 stream needed for forming-revision Paper effects, and complete Bar Magnifier
@@ -63,11 +63,14 @@ does not authorize mutation.
 Pinelive coordinates three owners without duplicating their responsibilities:
 
 1. **pinery owns market data.** A `MarketDataProvider` resolves one exact
-   instrument, returns finite warmup history, and supplies closed bars or an
-   explicitly advertised revision/finality stream. CSV parsing, bar closure,
-   overlap, deduplication, and gap recovery stay in pinery.
-2. **piner owns strategy state.** Pinelive advances piner for admitted forming or
-   final snapshots and reads `strategy.position_size` as the target.
+   instrument, returns finite warmup/history data, and supplies authoritative
+   closed bars or an explicitly advertised revision/finality stream. CSV
+   parsing, bar closure, overlap, deduplication, and provider gap recovery stay
+   in pinery.
+2. **piner owns strategy state.** Pinelive advances piner for authoritative
+   chart finals and, for a `lower-bars` every-update source, forming chart
+   snapshots aggregated from polled closed children. Pinelive currently does not
+   invoke provider `liveBars()`. It reads `strategy.position_size` as the target.
 3. **pinelive owns execution orchestration.** A `Broker` reports the exact
    position and account, submits corrections, and exposes truthful capabilities.
    The runner binds identities, enforces execution gates, drains provider work,
@@ -196,10 +199,11 @@ coercing them. The current top-level sections are:
 | `alerts`        | Optional bounded webhook or Telegram delivery configuration.                                                         |
 
 The pure validation boundary normalizes this structure and compiles the strategy
-before opening any runtime resource. `every-update` requires
-`strategy(calc_on_every_tick=true)` and an authoritative provider update
-contract. It rejects `request.security` dependencies. Mirrored execution remains
-final-only with `mirrorOn: "bar-close"`.
+before opening any runtime resource. `every-update` still requires
+`strategy(calc_on_every_tick=true)` and an explicit source policy, but Pinelive
+currently reads the provider's authoritative `closedBars()` polling path rather
+than `liveBars()`. It rejects `request.security` dependencies. Mirrored execution
+remains final-only with `mirrorOn: "bar-close"`.
 
 Mirrored order and broker policy are nested under `execution`. Market is the
 default order type. Bar-close startup reconciliation, when intentionally used,

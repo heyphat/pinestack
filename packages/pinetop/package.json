@@ -1,6 +1,6 @@
 {
   "name": "@heyphat/pinetop",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Terminal UI over the pinerun CLI: one page per command plus a vim editor for the .pine, flags live and editable, the report resident on screen.",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -34,7 +34,8 @@
     }
   },
   "dependencies": {
-    "@heyphat/pinerun": "workspace:*"
+    "@heyphat/pinerun": "workspace:*",
+    "@xterm/headless": "^6.0.0"
   },
   "peerDependencies": {
     "@heyphat/piner": ">=0.10.0"

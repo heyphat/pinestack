@@ -81,6 +81,71 @@ without being announced as a release.
   synchronization guard. Opting out takes an explicit
   `requireExecutionSafety: false`.
 
+## [0.9.2] - 2026-08-04
+
+`pinetop` only — no `pinerun`, `pinery`, or `pinelive` behaviour changes, and no
+`--json` contract moves.
+
+### Added
+
+- **A shell in the editor page.** `t` (or `ctrl-t`, which also reaches it from
+  inside the vim buffer) opens your `$SHELL` as a third column beside the source:
+  sidebar, buffer, terminal. It is a real terminal — `git diff`, a `pinerun`
+  invocation typed by hand, `vim`, `htop` and `claude` all run in it with the
+  script still on screen. Every keystroke goes to the child, `ctrl-c` included;
+  `esc` leaves at a shell prompt, and `ctrl-t` then `tab` always leaves whatever
+  the child is doing. `ctrl-d` or `exit` closes the column. It needs 108 columns
+  of width and is dropped below that rather than crushing the buffer.
+
+  No native module is involved, so the single-binary install is unchanged: the pty
+  comes from the libc the OS already ships (reached through `bun:ffi`) and the VT
+  parsing is `@xterm/headless`, which is pure JavaScript and bundles into the
+  compiled binary.
+
+- **Scrollback in the shell pane.** `ctrl-t` enters a sticky SCROLL mode —
+  `k`/`j` by line, `u`/`d` by page, `g`/`G` for top and back to live — over 1000
+  lines of history. The border reads `SCROLL ↑ 47` for as long as the mode lasts
+  and the hint strip swaps to its keys. `esc` or `ctrl-t` resumes the child; any
+  other key resumes it too and still reaches it, so picking up typing costs
+  nothing. The alternate screen keeps no history, so the keys do nothing there,
+  as in any terminal.
+
+- **`t` on the hint strip**, next to `e`, `r` and `a`, on every page.
+
+### Changed
+
+- **The editor buffer now follows the file on disk.** Change the open `.pine`
+  from the shell — `sed -i`, `git checkout`, a formatter — and the pane reloads
+  it, keeping the cursor where it was. An _unwritten_ buffer is never
+  overwritten: it reports `changed on disk — :e! to reload, :w to overwrite` and
+  leaves your edits alone. A file deleted underneath you keeps its buffer, marked
+  new, so `:w` puts it back.
+
+- **The EDITOR buffer hands `ctrl-t` back to the frame**, alongside `tab`,
+  `shift-tab`, `space` and `ctrl-p`, so the shell column is reachable from inside
+  the buffer where a bare `t` is vim's till motion.
+
+- **TERMINAL's pane accelerator is `[T]`**, shifted because `t` is now a global
+  binding — the same rule that makes RANKED `[R]`.
+
+- Removed `packages/pinetop/design.md`. The document had fallen behind the
+  implementation, and one of its decisions (that an in-pane terminal was
+  impossible without a native module) was no longer true.
+
+### Fixed
+
+- **Quitting no longer waits on the shell pane.** `q` now exits the way a signal
+  already did, instead of returning and waiting for the event loop to drain. The
+  emulator schedules timers of its own and a program run in the pane can leave a
+  child behind; waiting for those made quitting hang for as long as they lived,
+  after the frame had already gone.
+
+- **Closing a shell pane no longer takes the program inside it down by luck.**
+  Teardown now enumerates the child's descendants and signals each, escalating to
+  `SIGKILL`. Signalling a process _group_ was not enough: that needs the child to
+  be a group leader, and without `setsid` it is not, so `kill(-pid)` named no group
+  and `claude` or `vim` kept running behind a closed pane.
+
 ## [0.9.1] - 2026-08-03
 
 pinetop only — no change to `pinerun`, `pinery`, or any research output contract.
@@ -636,6 +701,7 @@ First public open-source release.
   security / conduct guides, issue & PR templates, and CI.
 
 [unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.1...HEAD
+[0.9.2]: https://github.com/heyphat/pinestack/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/heyphat/pinestack/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/heyphat/pinestack/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/heyphat/pinestack/compare/v0.7.0...v0.8.0

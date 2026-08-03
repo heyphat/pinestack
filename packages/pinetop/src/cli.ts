@@ -343,7 +343,18 @@ export async function main(argv: readonly string[]): Promise<number> {
   });
 
   app.stop();
-  return 0;
+  // Exit rather than returning and waiting for the event loop to drain — the same
+  // thing `shutdown` above does for a signal, and for the same reason now that the
+  // shell pane exists.
+  //
+  // Everything `stop()` does is synchronous (the flags file is a `writeFileSync`,
+  // the frame comes down with escape sequences), so there is nothing left to flush.
+  // What there *can* be is a handle nobody asked for: the terminal emulator schedules
+  // its own timers, and a program the user ran in the pane may have left a child of
+  // its own behind. Waiting for those to settle made quitting hang for as long as
+  // they lived, which is indistinguishable from a crash at the moment the frame has
+  // already gone.
+  process.exit(0);
 }
 
 /**

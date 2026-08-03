@@ -27,6 +27,14 @@ export type Action =
    */
   | { kind: 'walkforward' }
   | { kind: 'edit-external' }
+  /**
+   * The shell pane on the EDITOR page: open and focus it, or hand focus back.
+   *
+   * Bound globally rather than on that page alone for the same reason `space` is:
+   * it must work from *inside* the pane, where every other key belongs to the
+   * child. That is what makes it the guaranteed way out — see `term/pane.ts`.
+   */
+  | { kind: 'toggle-terminal' }
   | { kind: 'filter' }
   | { kind: 'toggle-advanced' }
   | { kind: 'ask' }
@@ -137,6 +145,18 @@ export const BINDINGS: Binding[] = [
     // claims the keyboard and `e` there is the word-end motion.
     description: 'Edit this page’s script in $EDITOR, then reload it',
     action: { kind: 'edit-external' },
+    group: 'act',
+  },
+  {
+    // Two keys for one action, because they are reachable in different places.
+    // `t` is the everyday one. `ctrl-t` is the one that still works where a bare
+    // letter cannot: inside the EDITOR buffer, where `t` is the till motion, and
+    // inside the shell pane itself, where every printable key belongs to the
+    // child — which makes it the guaranteed way back out.
+    keys: ['t', 'ctrl-t'],
+    display: 't / ctrl-t',
+    description: 'Shell pane on the editor page — and the way back out of it',
+    action: { kind: 'toggle-terminal' },
     group: 'act',
   },
   {
@@ -407,6 +427,10 @@ export const HINTS: readonly { key: string; label: string }[] = [
   { key: 'e', label: 'edit' },
   { key: 'r', label: 'run' },
   { key: 'a', label: 'ask' },
+  // Advertised on every page, not just EDITOR, because that is what the key does:
+  // it takes you to the editor page and opens the column. A hint here would be a
+  // lie if `t` only worked on one page — it does not.
+  { key: 't', label: 'shell' },
   { key: ':', label: 'command' },
   { key: '?', label: 'help' },
 ];

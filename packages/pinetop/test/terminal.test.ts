@@ -14,7 +14,7 @@ import type { AppState } from '../src/state.js';
 import { Screen, stripAnsi } from '../src/render/screen.js';
 import { editorPage, TERMINAL_MIN_BODY, terminalVisible } from '../src/pages/editor.js';
 import { initialState } from '../src/state.js';
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFile, syncWithDisk, writeFile } from '../src/editor/vim.js';
@@ -499,36 +499,68 @@ describe.if(ptyWorks)('a real child on a real pty', () => {
   });
 
   test('killing the session takes the program running inside it too', async () => {
-    // An interactive shell puts each job in its own process group, so signalling
-    // the shell alone leaves the job orphaned — `claude` or `vim` kept running
-    // behind a pane that is already gone.
-    const marker = `pinetop-test-orphan-${process.pid}`;
+    // Signalling the pane's own child is not enough — whatever it started has to go
+    // with it, or `claude` and `vim` outlive a pane that is already gone.
+    //
+    // Deliberately not an interactive shell. `sh -i` was the first attempt and it is
+    // the wrong instrument twice over: `exec -a NAME` for a recognisable process is a
+    // bash/zsh builtin that dash does not have (so on CI, where `$SHELL` is unset and
+    // `/bin/sh` is dash, the setup silently did nothing and the assertion failed
+    // against a process that never existed), and an interactive shell defers `SIGHUP`
+    // while it waits on a foreground job, which left the grandchild alive and hung the
+    // whole test run. A plain `sh -c` needs neither and tests the same thing.
+    const dir = mkdtempSync(join(tmpdir(), 'pinetop-orphan-'));
+    const pidFile = join(dir, 'child.pid');
     const session = new TermSession({
-      argv: [process.env['SHELL'] ?? '/bin/sh', '-i'],
-      rows: 10,
-      cols: 40,
+      // `echo $$` then `exec` is POSIX in every sh, and `exec` means the recorded pid
+      // is the long-lived process rather than a wrapper that exits immediately.
+      argv: ['sh', '-c', `sh -c 'echo $$ > ${pidFile}; exec sleep 60' & wait`],
+      rows: 8,
+      cols: 30,
     });
+
+    const childPid = (): number | null => {
+      try {
+        const pid = Number.parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
+        return Number.isFinite(pid) && pid > 0 ? pid : null;
+      } catch {
+        return null;
+      }
+    };
+    const alive = (pid: number): boolean =>
+      Bun.spawnSync(['ps', '-p', String(pid), '-o', 'pid='])
+        .stdout.toString()
+        .trim() !== '';
+
+    let pid: number | null = null;
     try {
-      await settle(session, /\$|%|#/, 1500);
-      session.send(`sh -c 'exec -a ${marker} sleep 60'\r`);
-      const alive = async () =>
-        Bun.spawnSync(['pgrep', '-f', marker]).stdout.toString().trim() !== '';
-      for (let i = 0; i < 40 && !(await alive()); i++) {
+      for (let i = 0; i < 60 && pid == null; i++) {
         session.poll();
         await Bun.sleep(50);
+        pid = childPid();
       }
-      expect(await alive()).toBe(true);
+      expect(pid).not.toBeNull();
+      expect(alive(pid!)).toBe(true);
 
       session.dispose();
       let gone = false;
-      for (let i = 0; i < 40 && !gone; i++) {
+      for (let i = 0; i < 60 && !gone; i++) {
         await Bun.sleep(50);
-        gone = !(await alive());
+        gone = !alive(pid!);
       }
       expect(gone).toBe(true);
     } finally {
       session.dispose();
-      Bun.spawnSync(['pkill', '-f', marker]);
+      // Never leave the runner holding a `sleep 60`: a survivor keeps Bun's loop
+      // open and the suite would hang after the last assertion rather than fail.
+      if (pid != null && alive(pid)) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

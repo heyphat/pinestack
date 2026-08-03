@@ -284,8 +284,18 @@ export function spawnPty(opts: PtyOptions): Pty {
      * A real terminal does not have this problem: its child is a session leader
      * with the pty as its controlling terminal, so closing the master makes the
      * *kernel* hang up the foreground process group. `Bun.spawn` cannot `setsid`,
-     * so that path is unavailable and the hangup is delivered by hand — ask the
-     * pty who is in the foreground (`tcgetpgrp`) and signal that group.
+     * so that path is unavailable.
+     *
+     * Nor is signalling a process *group* enough on its own. `kill(-pid)` needs the
+     * child to be a group leader, and without `setpgid` it is not — the negative pid
+     * then names no group at all and the call fails with ESRCH while everything keeps
+     * running. So the descendants are enumerated explicitly and signalled one by one,
+     * and the group attempts are kept only as a cheap extra for the case where a
+     * shell did establish its own group.
+     *
+     * The tree is read *before* anything is signalled. Kill the intermediate parent
+     * first and its children are reparented to init, at which point they are no
+     * longer reachable as descendants and would be missed.
      *
      * Then escalate. `SIGHUP` is the polite request that lets a shell write its
      * history file; anything still alive a moment later is not going to leave on
@@ -293,6 +303,8 @@ export function spawnPty(opts: PtyOptions): Pty {
      * process behind it.
      */
     kill(signal: NodeJS.Signals = 'SIGHUP'): void {
+      // Read the tree first — see the note above on reparenting.
+      const descendants = child.pid > 0 ? descendantsOf(child.pid) : [];
       const groups: number[] = [];
       const own = safe(() => lib.getpgrp(), -1);
 
@@ -307,6 +319,11 @@ export function spawnPty(opts: PtyOptions): Pty {
         groups.push(child.pid);
       }
 
+      // Deepest first, so a parent cannot spawn a replacement while its children
+      // are still being walked.
+      for (const pid of [...descendants].reverse()) {
+        safe(() => process.kill(pid, signal), undefined);
+      }
       for (const group of groups) safe(() => process.kill(-group, signal), undefined);
       safe(() => child.kill(signal), undefined);
 
@@ -314,6 +331,9 @@ export function spawnPty(opts: PtyOptions): Pty {
       // app exits first the groups have already had their SIGHUP, and the OS
       // reparents whatever is left.
       const escalation = setTimeout(() => {
+        for (const pid of [...descendants].reverse()) {
+          safe(() => process.kill(pid, 'SIGKILL'), undefined);
+        }
         for (const group of groups) safe(() => process.kill(-group, 'SIGKILL'), undefined);
         safe(() => child.kill('SIGKILL'), undefined);
       }, 250);
@@ -330,6 +350,43 @@ export function spawnPty(opts: PtyOptions): Pty {
       }
     },
   };
+}
+
+/**
+ * Every process descended from `root`, breadth-first, `root` excluded.
+ *
+ * Read from `ps` rather than tracked as children are spawned, because the pane has
+ * no visibility into what the shell starts — the whole point is that anything the
+ * user ran in there dies with the pane. Only descendants are ever returned, so this
+ * cannot walk upward into pinetop itself or its ancestors.
+ */
+function descendantsOf(root: number): number[] {
+  const listing = safe(() => Bun.spawnSync(['ps', '-Ao', 'pid=,ppid=']).stdout.toString(), '');
+  if (listing === '') return [];
+
+  const children = new Map<number, number[]>();
+  for (const line of listing.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (match == null) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const siblings = children.get(ppid);
+    if (siblings == null) children.set(ppid, [pid]);
+    else siblings.push(pid);
+  }
+
+  const found: number[] = [];
+  const queue = [root];
+  // Bounded so a cycle in a malformed listing cannot spin forever.
+  while (queue.length > 0 && found.length < 4096) {
+    const next = queue.shift()!;
+    for (const pid of children.get(next) ?? []) {
+      if (pid === root || found.includes(pid)) continue;
+      found.push(pid);
+      queue.push(pid);
+    }
+  }
+  return found;
 }
 
 /**

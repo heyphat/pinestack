@@ -354,7 +354,19 @@ export class TermSession {
     this.subscriptions.length = 0;
     this.pty.kill('SIGHUP');
     this.pty.dispose();
-    this.emulator.dispose();
+    // `emulator.dispose()` is deliberately NOT called, and this is not laziness.
+    //
+    // `@xterm/headless`'s dispose never returns under Bun when its write queue still
+    // holds un-parsed bytes — the queue is drained by a timer whose duration comes
+    // out NaN here (the same defect behind the `TimeoutNaNWarning` above), so the
+    // work it is waiting for never completes. Disposing a session immediately after
+    // a burst of output therefore hangs, and `App.stop` disposes on quit, so this
+    // was a hang between the user pressing `q` and pinetop exiting.
+    //
+    // Nothing leaks by skipping it. The emulator owns no OS resource — the pty does,
+    // and that is closed above — and the only listeners attached to it are the two
+    // reply subscriptions, already released. What is left is a JavaScript object with
+    // no references to it, which is the garbage collector's business.
   }
 }
 

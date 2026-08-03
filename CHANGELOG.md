@@ -132,6 +132,20 @@ without being announced as a release.
   implementation, and one of its decisions (that an in-pane terminal was
   impossible without a native module) was no longer true.
 
+### Fixed
+
+- **Quitting no longer waits on the shell pane.** `q` now exits the way a signal
+  already did, instead of returning and waiting for the event loop to drain. The
+  emulator schedules timers of its own and a program run in the pane can leave a
+  child behind; waiting for those made quitting hang for as long as they lived,
+  after the frame had already gone.
+
+- **Closing a shell pane no longer takes the program inside it down by luck.**
+  Teardown now enumerates the child's descendants and signals each, escalating to
+  `SIGKILL`. Signalling a process _group_ was not enough: that needs the child to
+  be a group leader, and without `setsid` it is not, so `kill(-pid)` named no group
+  and `claude` or `vim` kept running behind a closed pane.
+
 ## [0.9.1] - 2026-08-03
 
 pinetop only — no change to `pinerun`, `pinery`, or any research output contract.

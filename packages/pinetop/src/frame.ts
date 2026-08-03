@@ -1,5 +1,5 @@
 /**
- * The frame: everything that is identical on all eight pages.
+ * The frame: everything that is identical on all nine pages.
  *
  * Top to bottom — tab bar (§4.2), breadcrumb, the page's body, the composed
  * `$ pinerun …` line (§3 G2: always shown verbatim, always copy-pasteable), and
@@ -24,6 +24,15 @@ export function windowTitle(state: AppState): string {
 }
 
 function statusGlyph(state: AppState): { text: string; style: string } {
+  if (state.page === 'live') {
+    if (state.live.error && !state.live.snapshot)
+      return { text: '◆ unavailable', style: STYLE.error };
+    if (state.live.error) return { text: '◆ stale', style: STYLE.warn };
+    if (state.live.inFlightGeneration && !state.live.snapshot)
+      return { text: '◆ polling', style: STYLE.accentBold };
+    if (state.live.snapshot) return { text: '◆ observed', style: STYLE.positive };
+    return { text: '◆ waiting', style: STYLE.muted };
+  }
   const run = state.run;
   if (run == null) return { text: '◆ idle', style: STYLE.muted };
   switch (run.status) {
@@ -47,7 +56,7 @@ function drawTabs(screen: Screen, state: AppState, y: number): void {
   const status = statusGlyph(state);
   const grid = `${screen.cols}×${screen.rows}`;
   // The right side is drawn first so the tabs know how much room they actually
-  // have. With eight pages the full bar no longer fits an 80-column terminal, and
+  // have. With nine pages the full bar no longer fits an 80-column terminal, and
   // a tab bar overprinted by the grid size is worse than a compact one.
   const rightW = displayWidth(grid) + 3 + displayWidth(status.text);
   const room = screen.cols - 2 - rightW;
@@ -136,9 +145,13 @@ function drawDirtyBanner(screen: Screen, state: AppState, page: Page, y: number)
 
 function drawCommandLine(screen: Screen, state: AppState, page: Page, y: number): void {
   const command = page.command;
+  if (page.id === 'live') {
+    screen.text(1, y, '$', STYLE.accent);
+    screen.text(3, y, truncate('pinelive status --all --json', screen.cols - 4), STYLE.none);
+    return;
+  }
   if (command == null) {
-    // LOGS has no command of its own; it shows the run that produced the
-    // ledger, so the line still reproduces what is on screen.
+    // LOGS has no command of its own; it reproduces the loaded research run.
     const run = state.run;
     const text = run == null ? '$ (no run loaded)' : `$ pinerun ${run.argv.join(' ')}`;
     screen.text(1, y, '$', STYLE.accent);
@@ -162,10 +175,18 @@ function drawHints(screen: Screen, state: AppState, page: Page, y: number): void
   }
 
   const right: string[] = [];
-  if (state.run?.progress) right.push(state.run.progress);
-  else if (state.status) right.push(state.status);
-  if (state.run?.elapsedMs != null) right.push(duration(state.run.elapsedMs));
-  if (state.run != null) right.push(`run ${state.run.id}`);
+  if (state.page === 'live') {
+    if (state.live.error) right.push(`poll ${state.live.error.code}`);
+    if (state.live.lastSuccessAt) {
+      const age = Math.max(0, Date.now() - Date.parse(state.live.lastSuccessAt));
+      if (Number.isFinite(age)) right.push(`last success ${duration(age)} ago`);
+    }
+  } else {
+    if (state.run?.progress) right.push(state.run.progress);
+    else if (state.status) right.push(state.status);
+    if (state.run?.elapsedMs != null) right.push(duration(state.run.elapsedMs));
+    if (state.run != null) right.push(`run ${state.run.id}`);
+  }
   const text = truncate(right.join(' · '), Math.max(0, screen.cols - x - 2));
   if (text !== '') screen.text(screen.cols - 1 - displayWidth(text), y, text, STYLE.muted);
 }

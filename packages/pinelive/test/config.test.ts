@@ -471,6 +471,21 @@ describe('bounds and relationships', () => {
         `config.live.${key} must be ${constraint}`,
       );
     }
+    for (const throttleMs of [0, 249]) {
+      expect(() =>
+        normalizeRunConfig(
+          config({
+            live: everyUpdate({
+              source: { kind: 'lower-bars', timeframe: '1m' },
+              throttleMs,
+            }),
+          }),
+        ),
+      ).toThrow('config.live.throttleMs must be at least 250 for lower-bars polling');
+    }
+    expect(normalizeRunConfig(config({ live: everyUpdate({ throttleMs: 0 }) })).live).toMatchObject(
+      { cadence: 'every-update', source: { kind: 'native' }, throttleMs: 0 },
+    );
     expect(() =>
       normalizeRunConfig(
         config({ live: everyUpdate({ reconnectDelayMs: 100, reconnectMaxDelayMs: 99 }) }),

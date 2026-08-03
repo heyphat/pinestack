@@ -107,11 +107,10 @@ function paperFactory(): IntrabarBrokerFactory {
     });
 }
 
-// End-to-end regression for the feat-pinelive audit's F-1: every-update cadence + Paper +
-// mirrorOn "bar-close" is the documented supported combination ("forming revisions are durably
-// skipped and only the authoritative final can reach Paper"). The bar's forming revisions must
-// never starve its authoritative close of admission, for ANY revision count.
-test('an authoritative close is admitted and executed after arbitrarily many forming revisions', async () => {
+// End-to-end coverage for the temporary Pinelive transport selection: every-update
+// remains the prepared cadence, while the runner admits only the authoritative close
+// from closedBars() and does not consume the supplied forming liveBars revisions.
+test('every-update polling admits and executes only the authoritative close', async () => {
   const forming = Array.from({ length: 24 }, (_, index) =>
     update(bar(7_200, 10.5 + index / 100), index + 1, false),
   );
@@ -132,13 +131,11 @@ test('an authoritative close is admitted and executed after arbitrarily many for
   });
 
   const skips = ledger.events.filter((event) => event.recordType === 'evaluation.skipped');
-  // Every emitted forming revision was durably journaled as 'forming'; none was ever
-  // reclassified, and none reached the broker.
-  expect(skips.length).toBeGreaterThan(1);
-  expect(skips.every((event) => event.reason === 'forming')).toBe(true);
-  expect(skips.every((event) => event.update.authoritativeFinal === false)).toBe(true);
+  // The supplied liveBars revisions were not consumed by Pinelive's temporary
+  // polling path, so no forming decisions were journaled.
+  expect(skips).toHaveLength(0);
 
-  // The authoritative close was accepted, produced exactly one order, and the mirrored
+  // The authoritative polled close was accepted, produced exactly one order, and the mirrored
   // position reached the strategy's target (close 11 > open 10 → long 1).
   const accepted = ledger.events.filter((event) => event.recordType === 'evaluation.accepted');
   const intents = ledger.events.filter((event) => event.recordType === 'order.intent');

@@ -17,6 +17,8 @@ import {
   createNodeTigerBroker,
   createOfficialTigerTradingTransport,
   registerTigerTradingTransport,
+  type ActiveRunRegistrationV1,
+  type RunHistoryRecordV1,
 } from '../src/node.js';
 
 test('official Tiger trading transport rejects a missing credential profile path', () => {
@@ -219,6 +221,9 @@ interface CliHarness {
   readonly logs: string[];
   readonly addedSignals: string[];
   readonly removedSignals: string[];
+  readonly registrations: ActiveRunRegistrationV1[];
+  readonly histories: RunHistoryRecordV1[];
+  readonly registryCounts: { heartbeatStarts: number; heartbeatStops: number };
   readonly counts: {
     provider: number;
     paperBroker: number;
@@ -244,6 +249,10 @@ function createCliHarness(
   const logs: string[] = [];
   const addedSignals: string[] = [];
   const removedSignals: string[] = [];
+  const registrations: ActiveRunRegistrationV1[] = [];
+  const histories: RunHistoryRecordV1[] = [];
+  const registryCounts = { heartbeatStarts: 0, heartbeatStops: 0 };
+  const activeRegistrations = new Map<string, ActiveRunRegistrationV1>();
   const counts = {
     provider: 0,
     paperBroker: 0,
@@ -299,6 +308,41 @@ function createCliHarness(
         leaseId: `cli-lease-${sequence}-${counts.lease}`,
       });
     },
+    createRunRegistry: () => ({
+      async writeActive(record) {
+        const value = structuredClone(record);
+        activeRegistrations.set(record.instanceId, value);
+        registrations.push(value);
+      },
+      async updateActive(instanceId, update) {
+        const current = activeRegistrations.get(instanceId);
+        if (!current) throw new Error('test active registration is missing');
+        const value = structuredClone(await update(structuredClone(current)));
+        activeRegistrations.set(instanceId, value);
+        registrations.push(value);
+        return value;
+      },
+      createHeartbeatService() {
+        return {
+          start() {
+            registryCounts.heartbeatStarts++;
+          },
+          async stop() {
+            registryCounts.heartbeatStops++;
+          },
+        };
+      },
+      async completeRun(record) {
+        histories.push(structuredClone(record));
+        return { activeRemoved: activeRegistrations.delete(record.instanceId) };
+      },
+    }),
+    createRunInstanceId: () => sequence.toString(16).padStart(32, '0'),
+    readBootBoundProcessIdentity: async () => undefined,
+    resolveRunRegistrationPath: (path) => (path.startsWith('/') ? path : `/virtual/${path}`),
+    now: () => new Date(sequence * 1_000),
+    pid: 10_000 + sequence,
+    cwd: () => '/virtual',
     readTigerDataCredentials: () => {
       counts.dataCredentials++;
       throw new Error('Tiger data credentials must remain untouched');
@@ -311,7 +355,21 @@ function createCliHarness(
     addSignalHandler: (signal) => addedSignals.push(signal),
     removeSignalHandler: (signal) => removedSignals.push(signal),
   };
-  return { dependencies, events, logs, addedSignals, removedSignals, counts };
+  return {
+    dependencies,
+    events,
+    logs,
+    addedSignals,
+    removedSignals,
+    registrations,
+    histories,
+    registryCounts,
+    counts,
+  };
+}
+
+function expectOperationalLine(logs: readonly string[], message: string): void {
+  expect(logs.some((line) => line.endsWith(` ${message}`))).toBe(true);
 }
 
 function finalJsonLog(logs: readonly string[]): Record<string, unknown> {
@@ -324,9 +382,11 @@ test('CLI help advertises run, validate, parity, upgrade, and version', async ()
   const logs: string[] = [];
   await main(['help'], { log: (message) => logs.push(message) });
   expect(logs).toEqual([
-    'pinelive run --config <pinelive.json>',
+    'pinelive run --config <pinelive.json> [--verbose] [--log-file <path>]',
     'pinelive validate --config <pinelive.json>',
     'pinelive status --ledger <path> [--json] [--recent <n>]',
+    'pinelive status --all [--json] [--recent <n>]',
+    'pinelive status --instance <instance-id> [--json] [--recent <n>]',
     'pinelive recover --ledger <path> --lease <path> [--account-claim <path>] --confirm',
     'pinelive parity <live.jsonl> <expected.jsonl>',
     'pinelive upgrade [--check]',
@@ -522,31 +582,25 @@ test('recovered strong authority mismatch rejects before the Paper broker factor
   expect(second.removedSignals).toEqual(['SIGINT', 'SIGTERM']);
 });
 
-test('CLI direct recovery preserves an active bar and inhibits its first post-restart final', async () => {
+test('CLI every-update polling resumes after its authoritative final cursor', async () => {
   const config = computeConfig({
     live: { cadence: 'every-update', source: nativeSource },
   });
   const sharedEvents: LedgerEventV3[] = [];
   const first = createCliHarness(
     config,
-    () =>
-      replayProvider({
-        history: [testBar(0), testBar(60)],
-        rawUpdates: true,
-        updates: [testUpdate(testBar(120, 10.5), 1, false)],
-      }),
+    () => replayProvider({ history: [testBar(0), testBar(60), testBar(120, 11)] }),
     { events: sharedEvents },
   );
   await main(['run', '--config', 'active.json'], first.dependencies);
-  expect(recoverLedger(sharedEvents).activeBars.size).toBe(1);
+  expect(recoverLedger(sharedEvents).activeBars.size).toBe(0);
+  expect(recoverLedger(sharedEvents).lastFinalCursor).toBe(120);
 
   const second = createCliHarness(
     config,
     () =>
       replayProvider({
-        history: [testBar(0), testBar(60)],
-        rawUpdates: true,
-        updates: [testUpdate(testBar(120, 11), 2, true), testUpdate(testBar(180, 11), 1, true)],
+        history: [testBar(0), testBar(60), testBar(120, 11), testBar(180, 11)],
       }),
     { events: sharedEvents },
   );
@@ -555,11 +609,9 @@ test('CLI direct recovery preserves an active bar and inhibits its first post-re
   expect(
     sharedEvents.some(
       (event) =>
-        event.recordType === 'evaluation.skipped' &&
-        event.reason === 'startup-discontinuity' &&
-        event.barTime === 120,
+        event.recordType === 'evaluation.skipped' && event.reason === 'startup-discontinuity',
     ),
-  ).toBe(true);
+  ).toBe(false);
   expect(recoverLedger(sharedEvents).lastFinalCursor).toBe(180);
 });
 
@@ -994,4 +1046,382 @@ test('mirrored startup releases its administrative mutex only after durable leas
 
   await main(['run', '--config', 'durable-handoff.json'], dependencies);
   expect(releaseObservedDurableOwner).toBe(true);
+});
+
+test('status aggregate and exact-instance selectors are read-only and mutually exclusive', async () => {
+  const logs: string[] = [];
+  let aggregateReads = 0;
+  let instanceReads = 0;
+  let explicitLedgerReads = 0;
+  const instanceId = 'a'.repeat(32);
+  const aggregate = {
+    statusListVersion: 1 as const,
+    generatedAt: new Date(0).toISOString(),
+    items: [],
+  };
+  const terminal = {
+    discoveryVersion: 1 as const,
+    kind: 'terminal' as const,
+    generatedAt: new Date(0).toISOString(),
+    instanceId,
+    history: {
+      historyVersion: 1 as const,
+      instanceId,
+      startedAt: new Date(0).toISOString(),
+      endedAt: new Date(1).toISOString(),
+      outcome: 'failed-startup' as const,
+      finalReasonCode: 'startup-failed',
+      configVersion: 3 as const,
+      brokerId: 'compute-only' as const,
+      posture: 'compute-only' as const,
+    },
+    durable: { availability: 'not-recorded' as const, reason: 'startup failed before storage' },
+    lifecycle: { state: 'stopped' as const, reasons: [] },
+    warnings: [],
+  };
+  const dependencies: Partial<CliDependencies> = {
+    readPineliveStatusList: async () => {
+      aggregateReads++;
+      return aggregate;
+    },
+    readPineliveInstanceStatus: async () => {
+      instanceReads++;
+      return terminal;
+    },
+    readPineliveStatus: async () => {
+      explicitLedgerReads++;
+      throw new Error('explicit ledger reader must remain untouched');
+    },
+    createMarketDataProvider: (() => {
+      throw new Error('status must not create a provider');
+    }) as CliDependencies['createMarketDataProvider'],
+    createTigerBroker: (() => {
+      throw new Error('status must not create a broker');
+    }) as CliDependencies['createTigerBroker'],
+    createRunRegistry: () => {
+      throw new Error('injected status readers must own registry access');
+    },
+    log: (message) => logs.push(message),
+  };
+
+  await main(['status', '--all', '--json'], dependencies);
+  expect(JSON.parse(logs.pop()!)).toEqual(aggregate);
+  await main(['status', '--instance', instanceId, '--json'], dependencies);
+  expect(JSON.parse(logs.pop()!)).toEqual(terminal);
+  expect(aggregateReads).toBe(1);
+  expect(instanceReads).toBe(1);
+  expect(explicitLedgerReads).toBe(0);
+
+  await expect(
+    main(['status', '--all', '--ledger', '/virtual/ledger.jsonl'], dependencies),
+  ).rejects.toThrow('requires exactly one');
+  await expect(main(['status', '--all', '--recover'], dependencies)).rejects.toThrow(
+    'status does not allow --recover',
+  );
+  expect(aggregateReads).toBe(1);
+  expect(instanceReads).toBe(1);
+  expect(explicitLedgerReads).toBe(0);
+});
+
+test('run registration advances starting to running and stopping before terminal history', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'registered.json'], harness.dependencies);
+
+  expect(harness.registrations.map((record) => record.lifecycle)).toEqual([
+    'starting',
+    'running',
+    'stopping',
+  ]);
+  expect(harness.registrations[0]).toMatchObject({
+    brokerId: 'compute-only',
+    posture: 'compute-only',
+    paths: {
+      ledger: '/virtual/.pinelive/cli-current.pine-X-1m.jsonl',
+      executionLease: '/virtual/.pinelive/cli-current.pine-X-1m.jsonl.lock',
+      config: '/virtual/registered.json',
+    },
+  });
+  expect(harness.registrations[1]).toMatchObject({
+    lifecycle: 'running',
+    runId: expect.any(String),
+    executionId: expect.any(String),
+  });
+  expect(harness.histories).toHaveLength(1);
+  expect(harness.histories[0]).toMatchObject({
+    instanceId: harness.registrations[0]!.instanceId,
+    outcome: 'stopped',
+    finalLedgerPath: '/virtual/.pinelive/cli-current.pine-X-1m.jsonl',
+    finalLedgerSequence: recoverLedger(harness.events).lastSequence,
+    brokerId: 'compute-only',
+    posture: 'compute-only',
+  });
+  expect(harness.registryCounts).toEqual({ heartbeatStarts: 1, heartbeatStops: 1 });
+});
+
+test('registry failures stay advisory and never block an otherwise successful runtime', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'registry-unavailable.json'], {
+    ...harness.dependencies,
+    createRunRegistry: () => ({
+      async writeActive() {
+        throw new Error('sensitive registry failure');
+      },
+      async updateActive() {
+        throw new Error('must not update');
+      },
+      createHeartbeatService() {
+        throw new Error('must not heartbeat');
+      },
+      async completeRun() {
+        throw new Error('must not complete');
+      },
+    }),
+  });
+
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+  expectOperationalLine(harness.logs, 'pinelive registry warning: initial-registration-failed');
+  expect(harness.logs.join('\n')).not.toContain('sensitive registry failure');
+});
+
+test('a failure before storage opens produces normalized failed-startup history', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await expect(
+    main(['run', '--config', 'startup-failure.json'], {
+      ...harness.dependencies,
+      createFileExecutionLease: () => {
+        throw new Error('storage constructor failed');
+      },
+    }),
+  ).rejects.toThrow('storage constructor failed');
+
+  expect(harness.registrations.map((record) => record.lifecycle)).toEqual(['starting', 'stopping']);
+  expect(harness.histories).toEqual([
+    expect.objectContaining({
+      outcome: 'failed-startup',
+      finalReasonCode: 'startup-failed',
+    }),
+  ]);
+  expect(harness.histories[0]).not.toHaveProperty('finalLedgerPath');
+  expect(harness.histories[0]).not.toHaveProperty('finalLedgerSequence');
+  expect(harness.registryCounts).toEqual({ heartbeatStarts: 1, heartbeatStops: 1 });
+});
+
+test('nonsettling registry operations remain bounded and cannot hold CLI shutdown open', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  const never = new Promise<never>(() => undefined);
+  const dependencies: Partial<CliDependencies> = {
+    ...harness.dependencies,
+    registryOperationTimeoutMs: 5,
+    createRunRegistry: () => ({
+      async writeActive(record) {
+        harness.registrations.push(structuredClone(record));
+      },
+      updateActive() {
+        return never;
+      },
+      createHeartbeatService() {
+        return {
+          start() {
+            harness.registryCounts.heartbeatStarts++;
+          },
+          stop() {
+            return never;
+          },
+        };
+      },
+      completeRun() {
+        return never;
+      },
+    }),
+  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      main(['run', '--config', 'nonsettling-registry.json'], dependencies),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('nonsettling advisory registry blocked CLI shutdown')),
+          500,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+  expect(harness.counts.ledgerClose).toBe(1);
+  expectOperationalLine(harness.logs, 'pinelive registry warning: stopping-update-failed');
+  expectOperationalLine(harness.logs, 'pinelive registry warning: heartbeat-stop-failed');
+  expectOperationalLine(harness.logs, 'pinelive registry warning: terminal-history-write-failed');
+});
+
+test('human status output visibly escapes C0, C1, ESC, and OSC controls', async () => {
+  const logs: string[] = [];
+  const controls = `line\nalert\u0007\u001b]0;title\u0007\u001b]52;c;Y2FuYXJ5\u0007`;
+  await main(['status', '--all'], {
+    readPineliveStatusList: async () => ({
+      statusListVersion: 1,
+      generatedAt: new Date(0).toISOString(),
+      items: [
+        {
+          ok: false,
+          path: `/tmp/${controls}`,
+          error: { code: 'corrupt-record', message: controls },
+        },
+      ],
+    }),
+    log: (message) => logs.push(message),
+  });
+
+  const output = logs.join('');
+  expect(output).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+  expect(output).toContain('\\u000a');
+  expect(output).toContain('\\u0007');
+  expect(output).toContain('\\u001b]52');
+});
+
+test('run --verbose logs one timestamped line per durable evaluation', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'verbose.json', '--verbose'], harness.dependencies);
+
+  const evaluationLines = harness.logs.filter((line) => line.includes(' evaluation bar='));
+  const result = finalJsonLog(harness.logs);
+  expect(evaluationLines.length).toBe(result.evaluations as number);
+  expect(evaluationLines.length).toBeGreaterThan(0);
+  for (const line of evaluationLines) {
+    // ISO timestamp prefix, then greppable key=value fields.
+    expect(line).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z evaluation bar=\d+ revision=\d+ phase=(forming|final) target=-?[\d.]+ reason=\S+/,
+    );
+  }
+  // The machine-readable result line stays untimestamped and parseable.
+  expect(harness.logs.at(-1)!.startsWith('{')).toBe(true);
+});
+
+test('run without --verbose logs no evaluation lines', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'quiet.json'], harness.dependencies);
+
+  expect(harness.logs.some((line) => line.includes(' evaluation bar='))).toBe(false);
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+});
+
+test('run --log-file tees output, registers the log path, and closes the sink', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  const fileLines: string[] = [];
+  let opened: string | undefined;
+  let closed = 0;
+
+  await main(['run', '--config', 'teed.json', '--verbose', '--log-file', 'run.log'], {
+    ...harness.dependencies,
+    openRunLogFile: (path) => {
+      opened = path;
+      return {
+        write: (line) => void fileLines.push(line),
+        close: async () => void closed++,
+      };
+    },
+  });
+
+  expect(opened).toBe('run.log');
+  expect(closed).toBe(1);
+  // The file receives exactly what the console received during the run:
+  // timestamped operational lines plus the untimestamped final result.
+  const consoleEvaluations = harness.logs.filter((line) => line.includes(' evaluation bar='));
+  expect(fileLines.filter((line) => line.includes(' evaluation bar='))).toEqual(consoleEvaluations);
+  expect(fileLines.at(-1)).toBe(harness.logs.at(-1)!);
+  // The registry records where the log went, resolved against the run's cwd.
+  expect(harness.registrations[0]!.paths.log).toBe('/virtual/run.log');
+});
+
+test('an unopenable log file degrades to a warning and never fails the run', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+  await main(['run', '--config', 'bad-log-path.json', '--log-file', '/nope/run.log'], {
+    ...harness.dependencies,
+    openRunLogFile: () => {
+      throw new Error('EACCES sensitive path detail');
+    },
+  });
+
+  expect(harness.logs).toContain('pinelive log warning: log-file-open-failed');
+  expect(harness.logs.join('\n')).not.toContain('sensitive path detail');
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+  // A sink that never opened is not registered as evidence.
+  expect(harness.registrations[0]!.paths).not.toHaveProperty('log');
+});
+
+test('a failing log-file write warns once and the console remains authoritative', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  let closed = 0;
+
+  await main(['run', '--config', 'failing-log-writes.json', '--verbose', '--log-file', 'w.log'], {
+    ...harness.dependencies,
+    openRunLogFile: () => ({
+      write: () => {
+        throw new Error('ENOSPC sensitive detail');
+      },
+      close: async () => void closed++,
+    }),
+  });
+
+  const warnings = harness.logs.filter(
+    (line) => line === 'pinelive log warning: log-file-write-failed',
+  );
+  expect(warnings).toHaveLength(1);
+  expect(harness.logs.join('\n')).not.toContain('sensitive detail');
+  expect(harness.logs.some((line) => line.includes(' evaluation bar='))).toBe(true);
+  expect(finalJsonLog(harness.logs)).toMatchObject({ mode: 'compute-only' });
+});
+
+test('a final log-file write failure warns before JSON and still closes the sink', async () => {
+  const harness = createCliHarness(computeConfig(), () => replayProvider());
+  let closed = 0;
+
+  await main(['run', '--config', 'final-write-failure.json', '--log-file', 'final.log'], {
+    ...harness.dependencies,
+    openRunLogFile: () => ({
+      write: (line) => {
+        if (line.startsWith('{')) throw new Error('ENOSPC final write detail');
+      },
+      close: async () => void closed++,
+    }),
+  });
+
+  expect(closed).toBe(1);
+  const warningIndex = harness.logs.indexOf('pinelive log warning: log-file-write-failed');
+  expect(warningIndex).toBeGreaterThanOrEqual(0);
+  expect(warningIndex).toBeLessThan(harness.logs.length - 1);
+  expect(harness.logs.at(-1)!.startsWith('{')).toBe(true);
+  expect(JSON.parse(harness.logs.at(-1)!)).toMatchObject({ mode: 'compute-only' });
+  expect(harness.logs.join('\n')).not.toContain('final write detail');
+});
+
+test('run --log-file tightens an existing file to mode 0600', async () => {
+  const { chmod, mkdtemp, rm, stat, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'pinelive-log-mode-'));
+  const logPath = join(directory, 'existing.log');
+  try {
+    await writeFile(logPath, 'existing\n', { mode: 0o644 });
+    await chmod(logPath, 0o644);
+    const harness = createCliHarness(computeConfig(), () => replayProvider());
+
+    await main(['run', '--config', 'mode.json', '--log-file', logPath], harness.dependencies);
+
+    if (process.platform !== 'win32') {
+      expect((await stat(logPath)).mode & 0o777).toBe(0o600);
+    }
+    expect(harness.logs.at(-1)!.startsWith('{')).toBe(true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

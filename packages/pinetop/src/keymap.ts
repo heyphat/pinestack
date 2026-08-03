@@ -368,7 +368,10 @@ export const EDITOR_KEYS: readonly { display: string; description: string }[] = 
   { display: 'w b e', description: 'By word (W B E by WORD)' },
   { display: '0 ^ $', description: 'Line start · indent · line end' },
   { display: 'gg G', description: 'First line · last line (42G → line 42)' },
-  { display: 'space 1–8', description: 'Switch page — the app binding, unchanged here' },
+  {
+    display: `space 1–${PAGES.length}`,
+    description: 'Switch page — the app binding, unchanged here',
+  },
   { display: 'ctrl-p', description: 'Command palette — reaches any page by name' },
   { display: '{ }', description: 'Previous / next blank line' },
   { display: 'f F t T', description: 'To a character on this line' },
@@ -389,7 +392,10 @@ export const EDITOR_KEYS: readonly { display: string; description: string }[] = 
   { display: ':q :q!', description: 'Close · discard unwritten changes' },
   { display: ':e path', description: 'Open a file; a new path starts one' },
   { display: ':42', description: 'Go to a line (`:set nonu` hides the gutter)' },
-  { display: '1 2 3 …', description: 'A count (5j, 42G, 3dd) — space 1–8 switches page' },
+  {
+    display: '1 2 3 …',
+    description: `A count (5j, 42G, 3dd) — space 1–${PAGES.length} switches page`,
+  },
   { display: 'tab', description: 'Leave the buffer — pinetop is one key away' },
 ];
 

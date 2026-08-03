@@ -44,8 +44,9 @@ describe('argument parsing', () => {
     expect(parseArgs(['a.pine', 'b.pine']).scripts).toEqual(['a.pine', 'b.pine']);
   });
 
-  test('--page only accepts a real page name', () => {
+  test('--page only accepts a real page name, including LIVE', () => {
     expect(parseArgs(['--page', 'sweep']).page).toBe('sweep');
+    expect(parseArgs(['--page', 'live']).page).toBe('live');
     expect(parseArgs(['--page', 'nonsense']).page).toBeUndefined();
   });
 
@@ -66,10 +67,17 @@ describe('argument parsing', () => {
     expect(parseArgs(['--input', 'oops']).inputs).toEqual([]);
   });
 
-  test('--check-flags and --pinerun', () => {
-    const args = parseArgs(['--check-flags', '--pinerun', '/usr/local/bin/pinerun']);
+  test('--check-flags, --pinerun, and --pinelive', () => {
+    const args = parseArgs([
+      '--check-flags',
+      '--pinerun',
+      '/usr/local/bin/pinerun',
+      '--pinelive',
+      '/usr/local/bin/pinelive',
+    ]);
     expect(args.checkFlags).toBe(true);
     expect(args.bin).toBe('/usr/local/bin/pinerun');
+    expect(args.pineliveBin).toBe('/usr/local/bin/pinelive');
   });
 
   test('an unknown flag is not swallowed as a script', () => {

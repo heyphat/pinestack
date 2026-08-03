@@ -2,8 +2,9 @@
 
 `@heyphat/pinelive` orchestrates three strict boundaries: pinery resolves and
 yields market data, piner owns strategy calculations and target position, and a
-pinelive `Broker` owns execution. Pinelive never parses CSV, polls quote APIs,
-decides bar closure, deduplicates bars, or recovers data gaps.
+pinelive `Broker` owns execution. Pinelive never parses CSV or calls
+provider-specific quote APIs; its temporary every-update transport uses only
+provider-neutral history/closed-bar contracts.
 
 > **Availability:** releases ship a standalone `pinelive` binary, but the
 > installer fetches it only with an explicit opt-in
@@ -32,14 +33,14 @@ for armed production execution; see the
 
 ## Current runtime capability matrix
 
-| Surface               | Supported behavior                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Compute-only          | `bar-close`, or `every-update` when compiled `calc_on_every_tick` metadata and an authoritative provider `liveBars()` contract are present. Compute-only runs cannot own a broker factory or submit broker effects; the CLI still maintains durable compute state under a temporary file lock.                                                                                                                                          |
-| Paper mirrored        | `execution.mirrorOn: "bar-close"` only. An every-update cadence may compute and journal forming revisions, but forming revisions are durably skipped and only a fresh authoritative final can reach Paper. `mirrorOn: "every-update"` is rejected during pure validation/preparation before provider or broker construction.                                                                                                            |
-| Tiger monitor         | Broker-connected `monitor` posture resolves the exact instrument and journals decisions, but takes no account execution claim, creates no execution scheduler, and performs no mutation. It makes no execution-readiness claim.                                                                                                                                                                                                         |
-| Tiger armed           | Startup takes cooperative ownership and requires complete venue bootstrap, authoritative exact order lookup, and gap-free account synchronization. Missing proof produces structured `blocked` data, never a weaker success. The built-in official transport cannot prove complete open-order inventory, authoritative exact absence, or snapshot/account-stream gap closure, so it is intentionally blocked and production-ineligible. |
-| Exact historical data | Standard or finite Bar Magnifier warmup is supported for the characterized non-COOF path. Exact static-security proofs and independent feed, per-feed, and total budgets are supported only with close-only cadence; every-update rejects all security dependencies before data I/O.                                                                                                                                                    |
-| Upstream piner limits | Piner 0.11.1 exposes no typed public pending-order snapshot or per-fill stream, and reports complete Bar Magnifier data inactive with `calc_on_order_fills=true`. Forming-revision Paper effects and active magnifier+COOF therefore remain unavailable.                                                                                                                                                                                |
+| Surface               | Supported behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Compute-only          | `bar-close`, or `every-update` when compiled `calc_on_every_tick` metadata is present. Native `every-update` currently admits authoritative chart finals; `lower-bars` polls closed child history and emits forming chart revisions plus a separately verified final. Lower-bars polling requires provider-attested UTC-24×7 history alignment and `throttleMs >= 250`. Neither path invokes provider `liveBars()`. Compute-only runs cannot own a broker factory or submit broker effects; the CLI still maintains durable compute state under a temporary file lock. |
+| Paper mirrored        | `execution.mirrorOn: "bar-close"` only. Lower-bars forming revisions may be evaluated and journaled, but only authoritative finals can produce broker effects. `mirrorOn: "every-update"` is rejected during pure validation/preparation before provider or broker construction.                                                                                                                                                                                                                                                                                       |
+| Tiger monitor         | Broker-connected `monitor` posture resolves the exact instrument and journals decisions, but takes no account execution claim, creates no execution scheduler, and performs no mutation. It makes no execution-readiness claim.                                                                                                                                                                                                                                                                                                                                        |
+| Tiger armed           | Startup takes cooperative ownership and requires complete venue bootstrap, authoritative exact order lookup, and gap-free account synchronization. Missing proof produces structured `blocked` data, never a weaker success. The built-in official transport cannot prove complete open-order inventory, authoritative exact absence, or snapshot/account-stream gap closure, so it is intentionally blocked and production-ineligible.                                                                                                                                |
+| Exact historical data | Standard or finite Bar Magnifier warmup is supported for the characterized non-COOF path. Exact static-security proofs and independent feed, per-feed, and total budgets are supported only with close-only cadence; every-update rejects all security dependencies before data I/O.                                                                                                                                                                                                                                                                                   |
+| Upstream piner limits | Piner 0.11.1 exposes no typed public pending-order snapshot or per-fill stream, and reports complete Bar Magnifier data inactive with `calc_on_order_fills=true`. Forming-revision Paper effects and active magnifier+COOF therefore remain unavailable.                                                                                                                                                                                                                                                                                                               |
 
 These are repository-owned offline regression capabilities, not TradingView,
 broker, exchange, venue, credentialed Tiger, release, or production evidence.
@@ -171,17 +172,24 @@ opaque resolved object; broker marks, positions, orders, exact lookup, and final
 reads receive the exact execution symbol. The recovered binding is compared
 before mark, position, or order effects.
 
-Warmup places no order. Forming evaluations may compute and journal state when
-every-update cadence is enabled, but only a fresh authoritative final is
-eligible for reconciliation. An optional nested
-`execution.reconcileOnStart: true` writes a distinct startup correction event;
-it is available only for bar-close mirrored execution. Cancellation is checked
-before reconciliation and order paths. Shutdown cancels first, attempts
-provider disconnect, then waits for every real secondary-feed provider
-operation to settle. A provider that ignores both abort and disconnect produces
-a bounded cleanup failure instead of a false successful shutdown. Ledger
-flush/close and broker disconnect are still attempted after cleanup failures,
-and shutdown never auto-flattens.
+Warmup places no order. Bar-close and native every-update currently consume
+authoritative chart finals. A lower-bars every-update source instead requires
+provider-attested UTC-24×7 history alignment, polls closed child history at
+`live.throttleMs` (minimum 250 ms), and requests the oldest unprocessed child
+slots in forward-bounded pages capped at the smaller of 1,000 and the
+provider's advertised per-acquisition limit. It validates an exact contiguous
+child grid, emits one forming chart revision per newly closed child, and commits only a separately polled chart final that exactly matches the child
+aggregation. Providers with unknown or exchange-session alignment are rejected
+before subscription rather than treating a legitimate session closure as a
+missing bar. Pinelive does not invoke provider `liveBars()` in either path. An
+optional nested `execution.reconcileOnStart: true` writes a distinct startup
+correction event; it is available only for bar-close mirrored execution.
+Cancellation is checked before reconciliation and order paths. Shutdown cancels
+first, attempts provider disconnect, then waits for every real secondary-feed
+provider operation to settle. A provider that ignores both abort and disconnect
+produces a bounded cleanup failure instead of a false successful shutdown.
+Ledger flush/close and broker disconnect are still attempted after cleanup
+failures, and shutdown never auto-flattens.
 
 The ledger uses one format: every durable event carries `schemaVersion: 3` and
 a monotonic sequence. Binding, decision, scheduler, order, uncertainty,

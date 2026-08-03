@@ -7,15 +7,17 @@ import {
   type EngineOptions,
 } from '@heyphat/piner';
 import {
+  ExactChildBarAggregator,
+  MarketDataError,
   canonicalTimeframeToPineExact,
   liveTimeframeSeconds,
   parseCanonicalTimeframeExact,
   resolveHistorySource,
   snapshotLiveSourcePolicy,
-  supportsLiveBars,
   validateBarsExact,
   type Bar,
-  type LiveBarsProvider,
+  type BarUpdate,
+  type HistoryRange,
   type LiveSourcePolicy,
   type MarketDataProvider,
   type ResolvedDataInstrument,
@@ -43,6 +45,7 @@ import {
   type PreparedIntrabarAuthorityEnvelope,
   type PreparedSecurityAuthority,
 } from './intrabar-authority.js';
+import { MIN_LOWER_BARS_POLL_INTERVAL_MS } from './config.js';
 import {
   IntrabarState,
   type AcceptedIntrabarUpdate,
@@ -50,6 +53,8 @@ import {
   type IntrabarUpdateIdentity,
 } from './intrabar-state.js';
 import { toPinerBar } from './time.js';
+
+const MAX_LOWER_BARS_POLL_PAGE = 1_000;
 
 export type IntrabarBackend = 'js' | 'interp';
 
@@ -252,7 +257,6 @@ export class IntrabarRunner {
   private engine?: Engine;
   private state?: IntrabarState;
   private runBinding?: IntrabarHistoricalBinding;
-  private liveProvider?: LiveBarsProvider;
   private readonly abort = new AbortController();
   private initialized = false;
   private running = false;
@@ -261,6 +265,7 @@ export class IntrabarRunner {
   private committedAlertCount = 0;
   private resumeAfter?: number;
   private startupDiscontinuity = false;
+  private lowerBarsPollPageLimit = MAX_LOWER_BARS_POLL_PAGE;
 
   constructor(
     private readonly data: MarketDataProvider,
@@ -326,12 +331,30 @@ export class IntrabarRunner {
     this.validateHistory(history, normalized.warmupBars, normalized.timeframeSeconds);
     const chartBars = history.map((bar) => ({ ...bar }));
 
-    let exactSource: ResolvedHistorySource | undefined;
-    if (normalized.historical.mode === 'bar-magnifier') {
-      exactSource = await resolveHistorySource(this.data, resolved.venueSymbol);
+    const needsLowerBarsPollingSource =
+      normalized.live.cadence === 'every-update' && normalized.live.source.kind === 'lower-bars';
+    let resolvedHistorySource: ResolvedHistorySource | undefined;
+    if (normalized.historical.mode === 'bar-magnifier' || needsLowerBarsPollingSource) {
+      resolvedHistorySource = await resolveHistorySource(this.data, resolved.venueSymbol);
       this.ensureActive();
-      this.assertExactSourceIdentity(resolved, exactSource);
+      this.assertExactSourceIdentity(resolved, resolvedHistorySource);
     }
+    if (
+      needsLowerBarsPollingSource &&
+      resolvedHistorySource?.capabilities.alignment !== 'utc-24x7'
+    ) {
+      throw new IntrabarRunnerError(
+        'lower-bars polling requires provider UTC-24x7 history alignment evidence',
+      );
+    }
+    const lowerBarsPollPageLimit = needsLowerBarsPollingSource
+      ? Math.min(
+          MAX_LOWER_BARS_POLL_PAGE,
+          resolvedHistorySource?.capabilities.maxBarsPerAcquisition ?? MAX_LOWER_BARS_POLL_PAGE,
+        )
+      : MAX_LOWER_BARS_POLL_PAGE;
+    const exactSource =
+      normalized.historical.mode === 'bar-magnifier' ? resolvedHistorySource : undefined;
 
     const job: Job = {
       source: normalized.source,
@@ -411,6 +434,7 @@ export class IntrabarRunner {
     this.engine = engine;
     // Warmup-replay alerts are historical data; live collection starts here.
     this.committedAlertCount = engine.outputs.alerts.length;
+    this.lowerBarsPollPageLimit = lowerBarsPollPageLimit;
     this.state = state;
     this.runBinding = binding;
     this.initialized = true;
@@ -427,41 +451,21 @@ export class IntrabarRunner {
     try {
       await this.initialize();
       const normalized = this.normalized!;
-      if (normalized.live.cadence === 'every-update') {
-        const provider = this.liveProvider!;
-        for await (const update of provider.liveBars(this.resolved!, normalized.timeframe, {
-          after: this.resumeAfter ?? this.runBinding!.cutover.after,
-          signal: this.abort.signal,
+      if (
+        normalized.live.cadence === 'every-update' &&
+        normalized.live.source.kind === 'lower-bars'
+      ) {
+        await this.pollLowerBars(normalized, {
+          ...normalized.live,
           source: normalized.live.source,
-          throttleMs:
-            this.options.live?.cadence === 'every-update'
-              ? this.options.live.throttleMs
-              : undefined,
-          maxPendingFinals:
-            this.options.live?.cadence === 'every-update'
-              ? this.options.live.maxPendingFinals
-              : undefined,
-          reconnectAttempts:
-            this.options.live?.cadence === 'every-update'
-              ? this.options.live.reconnectAttempts
-              : undefined,
-          reconnectDelayMs:
-            this.options.live?.cadence === 'every-update'
-              ? this.options.live.reconnectDelayMs
-              : undefined,
-          reconnectMaxDelayMs:
-            this.options.live?.cadence === 'every-update'
-              ? this.options.live.reconnectMaxDelayMs
-              : undefined,
-        })) {
-          if (this.abort.signal.aborted) break;
-          const accepted = this.state!.acceptUpdate(update);
-          if (accepted) await this.evaluate(accepted);
-          this.ensureActive();
-        }
+        });
         return;
       }
 
+      // Bar-close and native every-update currently consume authoritative chart
+      // finals. A forming native candle is intentionally absent from Pinery's
+      // public history contract, so only lower-bars can synthesize safe polling
+      // revisions without invoking provider liveBars().
       for await (const bar of this.data.closedBars(this.resolved!, normalized.timeframe, {
         after: this.resumeAfter ?? this.runBinding!.cutover.after,
         signal: this.abort.signal,
@@ -474,6 +478,175 @@ export class IntrabarRunner {
     } finally {
       this.running = false;
     }
+  }
+
+  private async pollLowerBars(
+    normalized: NormalizedOptions,
+    live: Extract<IntrabarLiveConfig, { readonly cadence: 'every-update' }> & {
+      readonly source: Extract<LiveSourcePolicy, { readonly kind: 'lower-bars' }>;
+    },
+  ): Promise<void> {
+    const sourceTimeframe = live.source.timeframe;
+    const sourceDuration = liveTimeframeSeconds(sourceTimeframe);
+    const aggregator = new ExactChildBarAggregator({
+      sourceTimeframe,
+      targetTimeframe: normalized.timeframe,
+      anchorTime: this.runBinding!.chart.anchorTime,
+      maxFormingBars: 1,
+    });
+    let nextChildOpen =
+      (this.resumeAfter ?? this.runBinding!.cutover.after) + normalized.timeframeSeconds;
+    let pendingFinalOpen: number | undefined;
+    let lastEventTime = 0;
+    const nextEventTime = (): number => {
+      lastEventTime = Math.max(Date.now(), lastEventTime + 1);
+      return lastEventTime;
+    };
+    while (true) {
+      this.ensureActive();
+
+      if (pendingFinalOpen !== undefined) {
+        const finals = await this.readPollingHistory(
+          normalized.timeframe,
+          { from: pendingFinalOpen, to: pendingFinalOpen, limit: 1 },
+          live,
+        );
+        this.validatePolledBars(finals, normalized.timeframe);
+        const final = finals.find((bar) => bar.time === pendingFinalOpen);
+        if (!final) {
+          if (finals.length > 0) {
+            throw new IntrabarRunnerError(
+              `polling ${normalized.timeframe} history did not honor the requested final range`,
+            );
+          }
+          await this.waitForPolling(live.throttleMs ?? 250);
+          continue;
+        }
+
+        const update = aggregator.finalize(
+          Object.freeze({
+            bar: Object.freeze({ ...final }),
+            isClose: true,
+            revision: 1,
+            eventTime: nextEventTime(),
+            source: live.source,
+            provenance: Object.freeze({ authority: 'polled-chart-history' }),
+          }),
+        );
+        const accepted = this.state!.acceptUpdate(update);
+        if (accepted) await this.evaluate(accepted);
+        this.ensureActive();
+        pendingFinalOpen = undefined;
+        continue;
+      }
+
+      const bucket = aggregator.bucketFor(nextChildOpen);
+      const bucketLastOpen = bucket.slots.at(-1)!;
+      const pageEndCandidate = nextChildOpen + sourceDuration * (this.lowerBarsPollPageLimit - 1);
+      if (!Number.isSafeInteger(pageEndCandidate)) {
+        throw new IntrabarRunnerError('lower-bars polling page exceeded safe UNIX seconds');
+      }
+      const pageLastOpen = Math.min(bucketLastOpen, pageEndCandidate);
+      const pageLimit = (pageLastOpen - nextChildOpen) / sourceDuration + 1;
+      const children = await this.readPollingHistory(
+        sourceTimeframe,
+        { from: nextChildOpen, to: pageLastOpen, limit: pageLimit },
+        live,
+      );
+      this.validatePolledBars(children, sourceTimeframe);
+      if (children.some((bar) => bar.time < nextChildOpen || bar.time > pageLastOpen)) {
+        throw new IntrabarRunnerError(
+          `polling ${sourceTimeframe} history did not honor the requested child range`,
+        );
+      }
+      const fresh = children;
+      if (fresh.length === 0) {
+        await this.waitForPolling(live.throttleMs ?? 250);
+        continue;
+      }
+
+      for (const child of fresh) {
+        if (child.time !== nextChildOpen) {
+          throw new IntrabarRunnerError(
+            `polled ${sourceTimeframe} history is discontinuous: expected ${nextChildOpen}, received ${child.time}`,
+          );
+        }
+        const bucket = aggregator.bucketFor(child.time);
+        const output = aggregator.accept(
+          Object.freeze({
+            bar: Object.freeze({ ...child }),
+            isClose: true,
+            revision: 1,
+            eventTime: nextEventTime(),
+            source: live.source,
+            provenance: Object.freeze({ authority: 'polled-child-history' }),
+          }),
+        );
+        nextChildOpen += sourceDuration;
+        if (output) {
+          const accepted = this.state!.acceptUpdate(output);
+          if (accepted) await this.evaluate(accepted);
+          this.ensureActive();
+        }
+        if (aggregator.isComplete(bucket.open)) {
+          pendingFinalOpen = bucket.open;
+          break;
+        }
+      }
+    }
+  }
+
+  private async readPollingHistory(
+    timeframe: string,
+    range: HistoryRange,
+    live: Extract<IntrabarLiveConfig, { readonly cadence: 'every-update' }>,
+  ): Promise<Bar[]> {
+    const attempts = live.reconnectAttempts ?? 8;
+    const baseDelay = live.reconnectDelayMs ?? 250;
+    const maxDelay = live.reconnectMaxDelayMs ?? 30_000;
+    let attempt = 0;
+    while (true) {
+      try {
+        return await this.data.historyResolved(this.resolved!, timeframe, range, this.abort.signal);
+      } catch (error) {
+        this.ensureActive();
+        if (!(error instanceof MarketDataError) || !error.retryable || attempt >= attempts) {
+          throw error;
+        }
+        const delay = Math.min(maxDelay, baseDelay * 2 ** attempt);
+        attempt++;
+        await this.waitForPolling(delay);
+      }
+    }
+  }
+
+  private validatePolledBars(bars: readonly Bar[], timeframe: string): void {
+    try {
+      validateBarsExact(bars);
+    } catch (error) {
+      throw new IntrabarRunnerError(
+        error instanceof Error
+          ? error.message
+          : `polling ${timeframe} history returned malformed bars`,
+        { cause: error },
+      );
+    }
+  }
+
+  private waitForPolling(milliseconds: number): Promise<void> {
+    this.ensureActive();
+    if (milliseconds === 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(new IntrabarRunnerError('intrabar runner was cancelled'));
+      };
+      const timer = setTimeout(() => {
+        this.abort.signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, milliseconds);
+      this.abort.signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   cancel(): void {
@@ -626,15 +799,6 @@ export class IntrabarRunner {
       throw new IntrabarRunnerError(
         'active Bar Magnifier with calc_on_order_fills is unsupported by the characterized piner runtime',
       );
-    }
-
-    if (live.cadence === 'every-update') {
-      if (!supportsLiveBars(this.data)) {
-        throw new IntrabarRunnerError(
-          'every-update cadence requires a provider with authoritative liveBars support',
-        );
-      }
-      this.liveProvider = this.data;
     }
 
     return Object.freeze({
@@ -1143,6 +1307,8 @@ function normalizeLive(
     'live',
   );
   const source = snapshotLiveSourcePolicy(live.source);
+  const throttleMs = live.throttleMs ?? 250;
+  optionalNonnegativeSafeInteger(live.throttleMs, 'throttleMs');
   if (source.kind === 'lower-bars') {
     const sourceSeconds = liveTimeframeSeconds(source.timeframe);
     if (sourceSeconds >= chartSeconds || chartSeconds % sourceSeconds !== 0) {
@@ -1150,8 +1316,12 @@ function normalizeLive(
         `${source.timeframe} is not an exact child timeframe of the chart`,
       );
     }
+    if (throttleMs < MIN_LOWER_BARS_POLL_INTERVAL_MS) {
+      throw new IntrabarRunnerError(
+        `throttleMs must be at least ${MIN_LOWER_BARS_POLL_INTERVAL_MS} for lower-bars polling`,
+      );
+    }
   }
-  optionalNonnegativeSafeInteger(live.throttleMs, 'throttleMs');
   optionalPositiveSafeInteger(live.maxPendingFinals, 'maxPendingFinals');
   optionalNonnegativeSafeInteger(live.reconnectAttempts, 'reconnectAttempts');
   optionalNonnegativeSafeInteger(live.reconnectDelayMs, 'reconnectDelayMs');
@@ -1169,7 +1339,7 @@ function normalizeLive(
   return Object.freeze({
     ...live,
     source,
-    throttleMs: live.throttleMs ?? 250,
+    throttleMs,
     maxPendingFinals: live.maxPendingFinals ?? 256,
     reconnectAttempts: live.reconnectAttempts ?? 8,
     reconnectDelayMs: live.reconnectDelayMs ?? 250,

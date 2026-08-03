@@ -52,6 +52,38 @@ export { checkTitle, inputTitles, readInputTitles } from './flags/pine-inputs.js
 
 export type { LogLevel, LogLine, RunOutcome, SpawnOptions } from './run/spawn.js';
 export { classify, probePinerun, resolveBin, runPinerun } from './run/spawn.js';
+export type {
+  LiveActiveDiscoveredRunV1,
+  LiveActiveRegistrationV1,
+  LiveDiscoveredRunV1,
+  LiveEvidence,
+  LivePineliveStatusV1,
+  LiveRunHistoryV1,
+  LiveStatusChild,
+  LiveStatusPollError,
+  LiveStatusPollErrorCode,
+  LiveStatusPollEvent,
+  LiveStatusPollerLike,
+  LiveStatusPollerOptions,
+  LiveStatusSpawn,
+  LiveStatusSpawnOptions,
+  LiveStatusWarning,
+  LiveTerminalDiscoveredRunV1,
+  PineliveStatusListItemV1,
+  PineliveStatusListV1,
+} from './run/live-status.js';
+export {
+  LIVE_STATUS_CADENCE_MS,
+  LIVE_STATUS_DEADLINE_MS,
+  LIVE_STATUS_MAX_ITEMS,
+  LIVE_STATUS_STDERR_MAX_BYTES,
+  LIVE_STATUS_STDOUT_MAX_BYTES,
+  LIVE_STATUS_TERMINATE_GRACE_MS,
+  LiveStatusPoller,
+  LiveStatusProtocolError,
+  parsePineliveStatusList,
+  resolvePineliveBin,
+} from './run/live-status.js';
 export type { SessionEntry } from './run/session-log.js';
 export { appendSession, readSession, sessionLogPath, stateDir } from './run/session-log.js';
 
@@ -61,6 +93,7 @@ export type {
   AskState,
   AskTurn,
   EditState,
+  LiveState,
   Overlay,
   OverlayKind,
   PaneSelection,
@@ -173,6 +206,13 @@ export { ASK_CONTRACT, groundReport, parseAskResponse } from './ask/protocol.js'
 
 export type { Page, PageContext } from './pages/page.js';
 export { clampCursor, columns, rows, windowFor } from './pages/page.js';
+export {
+  liveItemKey,
+  livePage,
+  reconcileLiveSelection,
+  selectLiveCursor,
+  selectedLiveItem,
+} from './pages/live.js';
 
 export type { ScriptEntry } from './scripts.js';
 export {

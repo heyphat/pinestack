@@ -18,6 +18,7 @@ import { COMMANDS } from './flags/schema.js';
 import type { EditorState } from './editor/state.js';
 import { initialEditor } from './editor/state.js';
 import type { LogLine } from './run/spawn.js';
+import type { PineliveStatusListV1 } from './run/live-status.js';
 
 export type RunStatus = 'idle' | 'running' | 'ok' | 'failed';
 
@@ -141,10 +142,23 @@ export interface PaneSelection {
   cursor: Record<string, number>;
 }
 
+/** Dedicated, non-persisted state for the read-only Pinelive aggregate view. */
+export interface LiveState {
+  snapshot?: PineliveStatusListV1;
+  selectedInstanceId?: string;
+  /** Stable key for per-entry errors that do not carry a readable instance ID. */
+  selectedItemKey?: string;
+  lastSuccessAt?: string;
+  inFlightGeneration?: number;
+  error?: { code: string; message: string };
+}
+
 export interface AppState {
   page: PageId;
   /** Focus ring position and per-pane cursors, kept per page. */
   panes: Record<PageId, PaneSelection>;
+  /** Poll snapshots are observational only and are never persisted with research flags. */
+  live: LiveState;
   flags: Record<CommandId, FlagModel>;
   /** Keyed by script path, then by Pine input title (§4.6). */
   overrides: Record<string, Record<string, Override>>;
@@ -206,6 +220,7 @@ export function initialPanes(): Record<PageId, PaneSelection> {
     portfolio: make('strategies'),
     compare: make('strategies'),
     logs: make('ledger'),
+    live: make('runs'),
   };
 }
 
@@ -216,6 +231,7 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
   return {
     page: 'backtest',
     panes: initialPanes(),
+    live: {},
     flags: models,
     overrides: {},
     run: null,

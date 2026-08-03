@@ -1,0 +1,33 @@
+//@version=6
+// The same strategy as sma-cross-default-timing.pine with ONE difference:
+// process_orders_on_close=true.
+//
+// That runs an extra fill pass after the script body on the bar's close, so a
+// market order created by this bar fills at THIS bar's close instead of the next
+// bar's open. Pinelive reads `strategy.position_size` immediately after that
+// pass and mirrors at the same close, so piner's assumed fill price and the
+// broker's actual fill price converge on one price.
+//
+// For mirrored forward testing this is effectively required. Without it every
+// trade carries a full bar of latency plus a bar's range of fill-price error,
+// always in the same direction.
+strategy("SMA cross (aligned order timing)",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 50,
+     process_orders_on_close = true)
+
+fastLength = input.int(10, "fast", minval = 1)
+slowLength = input.int(30, "slow", minval = 2)
+
+fast = ta.sma(close, fastLength)
+slow = ta.sma(close, slowLength)
+
+if ta.crossover(fast, slow)
+    strategy.entry("long", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("long")
+
+plot(fast, "fast", color = color.teal)
+plot(slow, "slow", color = color.orange)

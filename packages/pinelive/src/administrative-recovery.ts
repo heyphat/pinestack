@@ -438,7 +438,9 @@ function parseProcessIdentity(value: unknown, kind: string): BootBoundProcessIde
     throw new Error(`${kind} process identity is invalid`);
   const record = value as Record<string, unknown>;
   if (
-    (record.kind !== 'darwin-start-time' && record.kind !== 'linux-start-ticks') ||
+    (record.kind !== 'darwin-boot-session' &&
+      record.kind !== 'darwin-start-time' &&
+      record.kind !== 'linux-start-ticks') ||
     typeof record.value !== 'string' ||
     !record.value ||
     typeof record.bootIdentityHash !== 'string' ||

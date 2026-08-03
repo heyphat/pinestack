@@ -1,0 +1,29 @@
+{
+  "configVersion": 3,
+  "strategy": "examples/pinelive/intrabar-stop-entry.pine",
+  "symbol": "BTCUSDT",
+  "timeframe": "5m",
+  "warmupBars": 60,
+  "data": {
+    "provider": "csv",
+    "dataDir": "examples/pinelive/data",
+    "cutoverTime": 1785666600
+  },
+  "historical": {
+    "mode": "standard"
+  },
+  "live": {
+    "cadence": "every-update",
+    "source": {
+      "kind": "lower-bars",
+      "timeframe": "1m"
+    },
+    "throttleMs": 250
+  },
+  "security": {
+    "enabled": false
+  },
+  "execution": {
+    "kind": "compute-only"
+  }
+}

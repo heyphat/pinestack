@@ -14,7 +14,12 @@ No single file is treated as universally authoritative:
 - **Deterministic warmup and the prepared authority record** own bar-derived strategy state.
 - **The durable `schemaVersion: 3` ledger** owns effect intent, transmission certainty, terminal result evidence, breakers, and lifecycle transitions.
 - **The ledger lease and account/instrument claim** provide cooperative same-host exclusion. They are not broker- or venue-enforced fencing tokens.
-- **Status output** reports evidence from one explicit ledger. It does not contact the venue, inspect every physical lock, or prove another host is inactive.
+- **Status output** reports durable evidence from one explicit ledger or wraps
+  registered ledgers in aggregate discovery. It never contacts the venue or
+  changes ownership.
+- **The private run registry, terminal history, process probes, and heartbeats**
+  are discovery evidence only. They do not prove execution safety, replace
+  exact-owner claims, or authorize stale takeover.
 
 A disagreement fails closed. Pinelive does not choose the most convenient source or infer flat/no-orders from a failed read.
 
@@ -78,9 +83,21 @@ For a mirrored current config (`configVersion: 3`):
 - ledger lease: `execution.lease.path`, for example `.pinelive/ledger.lock`;
 - administrative mutex: `<execution.lease.path>.admin.lock`;
 - account/instrument claim root: `~/.pinelive/claims/` by default;
-- claim file: `~/.pinelive/claims/<account-digest>/<instrument-digest>.lock`.
+- claim file: `~/.pinelive/claims/<account-digest>/<instrument-digest>.lock`;
+- run-registry root: `~/.pinelive/runs/` by default, overridable with
+  `PINELIVE_RUNS_DIR`;
+- active discovery record: `<runs-root>/active/<instance-id>.json`; and
+- terminal discovery record: `<runs-root>/history/<instance-id>.json`.
 
-Ledger, lease, administrative lock, and claim files are created mode `0600`. Account claim directories are forced to mode `0700`. Keep all paths on a local filesystem with reliable exclusive-create and rename semantics. These files coordinate mutually cooperative processes on one host only; they do not fence another machine, a manually operated broker session, another application, or a malicious local user with equivalent filesystem permissions.
+Ledger, lease, administrative lock, and claim files are created mode `0600`.
+Account claim directories are forced to mode `0700`. Registry directories use
+mode `0700` and registry records mode `0600` where supported. Registry readers
+refuse symlinks and non-regular files; records are bounded to 64 KiB and
+enumeration to 1,000 entries. Keep all paths on a local filesystem with reliable
+exclusive-create and rename semantics. These files coordinate mutually
+cooperative processes on one host only; they do not fence another machine, a
+manually operated broker session, another application, or a malicious local
+user with equivalent filesystem permissions.
 
 Claim names use domain-separated SHA-256 digests. The ledger records only `resourceDigest`, `claimId`, and `ownerId`. To locate a claim for explicit recovery, list candidates without deleting them:
 
@@ -90,24 +107,104 @@ find "$HOME/.pinelive/claims" -type f -name '*.lock' -print
 
 Inspect candidate JSON and match its `resourceDigest`, `claimId`, and `ownerId` to `pinelive status --json`/the ledger before passing the path to recovery.
 
-## Read-only status
+## Read-only status and run discovery
 
-Status reads one explicit ledger path and constructs no provider, broker, alert channel, lease, or claim:
+The explicit-ledger status form remains the durable primitive and constructs no
+provider, broker, alert channel, lease, or claim:
 
 ```bash
 pinelive status --ledger .pinelive/ledger.jsonl
 pinelive status --ledger .pinelive/ledger.jsonl --json --recent 20
 ```
 
-The text form is a short ledger summary. Use `--json` for posture/eligibility evidence, active durable lease and claim, breaker state, unresolved effects, latest observation, counters, recent event headers, `schemaVersion`, byte counts, and partial-tail warnings.
+The text form is a short ledger summary. Use `--json` for posture/eligibility
+evidence, active durable lease and claim, breaker state, unresolved effects,
+latest observation, counters, recent event headers, `schemaVersion`, byte counts,
+and partial-tail warnings.
+
+Each runtime also writes best-effort discovery metadata under the private run
+registry. Registration begins in `starting` and requests `running` only after
+the current posture/eligibility state has been durably flushed. Cancellation and
+ownership cleanup never wait for advisory registry I/O: after cancellation is
+requested, Pinelive best-effort requests `stopping`, with each operation bounded
+to one second by default. A non-overlapping advisory heartbeat updates every
+five seconds. Clean or normalized failed termination atomically publishes
+no-replace terminal history before removing the active record. The captured
+final sequence selects that run's validated ledger prefix even if a later run
+appends to the same ledger. History retention is bounded by all
+three limits: 500 records, 8 MiB, and 30 days.
+
+Aggregate and exact-instance status read this evidence without mutation:
+
+```bash
+pinelive status --all
+pinelive status --all --json --recent 20
+pinelive status --instance <instance-id> --json --recent 20
+```
+
+`--ledger`, `--all`, and `--instance` are mutually exclusive. Aggregate output
+uses a versioned `statusListVersion: 1` envelope, returns healthy runs alongside
+normalized per-entry errors, includes terminal history, and reports conservative
+process/heartbeat/physical-claim comparisons and duplicate execution/account
+resource conflicts. `--instance` selects the exact opaque instance id across
+active and terminal records. Neither command prunes history, acquires/releases
+ownership, invokes recovery, constructs provider/broker clients, or contacts the
+venue.
 
 Important interpretation rules:
 
 - `availability: "not-recorded"` is not the same as a known empty/false value.
 - A partial final JSONL fragment is excluded and reported; status does not repair it.
-- Durable ownership describes ledger evidence, not a live OS-process probe.
-- Status does not query the broker. A clean ledger cannot prove the venue is flat or has no orders.
-- A completed run records a terminal blocked eligibility transition before releasing ownership. Active claim/lease evidence remains the decisive current-lifecycle signal.
+- Durable ownership describes ledger evidence; physical ownership and process
+  probes are separate, conservative discovery evidence.
+- A fresh heartbeat proves only that a process recently rewrote its registry
+  record. It does not prove scheduler progress, current synchronization, held
+  claims, or enabled execution.
+- A stale heartbeat does not prove process death and never permits takeover.
+- Lifecycle `running` is independent of durable execution eligibility and can
+  coexist with `blocked` or `disabled-by-posture`.
+- Status does not query the broker. A clean ledger or registry cannot prove the
+  venue is flat or has no orders.
+- A completed run records a terminal blocked eligibility transition before
+  releasing ownership. Active claim/lease evidence remains the decisive
+  current-lifecycle signal.
+- Registry and heartbeat failures are advisory. They cannot grant or revoke
+  execution authority or change claim/recovery behavior.
+
+### Registry capacity and stale discovery records
+
+A SIGKILL or host crash intentionally leaves its active registration behind.
+Pinelive does not delete it by age: doing so would hide conservative discovery
+evidence and could be mistaken for ownership recovery. History retention does
+not prune active records. The active registration currently includes optional
+display metadata (strategy id, strategy/execution symbol, and timeframe) by
+default, so keep the registry root private or select a private
+`PINELIVE_RUNS_DIR` when those identifiers are sensitive.
+
+Enumeration inspects at most 1,000 active/history directory entries. If more are
+present, aggregate status returns the bounded readable subset plus an
+`entry-limit-exceeded` error; it does not fail the entire snapshot. Treat runs
+outside that subset as unknown. Exact-instance lookup also reports the cap as
+inconclusive instead of claiming that an instance is absent. Dot-prefixed host
+metadata and abandoned atomic-write temporaries count toward the scan bound but
+are not rendered as registry corruption.
+
+There is deliberately no automatic active-record cleanup command. If capacity
+maintenance is required, stop launch/restart automation, preserve a copy of the
+private registry, and review each candidate's process identity, ledger, terminal
+history, and physical claims. A compatible terminal history can supersede its
+leftover active record. An active-only record may be moved to a separate private
+incident archive only after the exact process is proved dead; moving it neither
+releases claims nor makes restart safe. Use the externally serialized confirmed
+recovery workflow for stale ownership artifacts, and never delete a registration
+merely because its heartbeat is old.
+
+Pinetop page 9 polls only `pinelive status --all --json` while LIVE is visible
+and renders this bounded evidence. It is not an execution console: there is no
+launch, stop/kill, arm/disarm, recover, acknowledge, breaker-reset,
+claim-release, cancel, flatten, or broker action. It never signals a registry
+PID. Stale recovery remains the explicit operator workflow below and must be
+externally serialized.
 
 ## Ordinary startup and the administrative mutex
 
@@ -250,7 +347,13 @@ Required release review should include the Pinelive test suite, type check, form
 
 - The built-in official Tiger transport is not production-ready and cannot enable the armed gate.
 - Same-host claims are cooperative exclusion, not venue fencing or distributed consensus.
-- Status is explicit-ledger only; there is no global registry or `status --all` discovery surface.
+- The run registry and aggregate status are local discovery surfaces only; they
+  neither discover other hosts nor establish execution authority.
+- Heartbeat freshness cannot prove scheduler progress, venue synchronization,
+  ownership, or safety, and heartbeat age never authorizes recovery.
+- The stale administrative rename/acquire election remains unsafe under
+  concurrency. Recovery is operator-only, must be externally serialized, and
+  must not be automated with restart orchestration.
 - Recovery cannot reconcile the venue and refuses unresolved effects.
 - No automatic futures rolling or exposure transfer exists.
 - Credentialed read-only connectivity is opt-in; demo/live order mutation is not authorized by this runbook.

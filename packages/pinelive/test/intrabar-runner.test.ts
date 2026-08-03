@@ -77,23 +77,26 @@ function everyUpdateRunner(
   });
 }
 
-test('every-update drives forming snapshots and one authoritative final on both backends', async () => {
-  const final = bar(120, 11);
+test('every-update temporarily polls authoritative closed bars on both backends', async () => {
   const traces = [
     update(bar(120, 10.5), 1, false, 120_001),
     update(bar(120, 9.5), 2, false, 120_002),
-    update(final, 3, true, 120_003),
+    update(bar(120, 11), 3, true, 120_003),
   ];
   const byBackend = {} as Record<IntrabarBackend, IntrabarEvaluation[]>;
 
   for (const backend of ['js', 'interp'] as const) {
     const evaluations: IntrabarEvaluation[] = [];
-    await everyUpdateRunner(minuteReplay(traces), evaluations, backend).start();
-    expect(evaluations.map((item) => item.finalCommit)).toEqual([false, false, true]);
-    expect(evaluations.map((item) => item.update.revision)).toEqual([1, 2, 3]);
-    expect(evaluations.map((item) => item.update.barTime)).toEqual([120, 120, 120]);
-    expect(new Set(evaluations.map((item) => item.decisionId)).size).toBe(3);
+    const runner = everyUpdateRunner(minuteReplay(traces), evaluations, backend);
+    await runner.start();
+    expect(evaluations.map((item) => item.finalCommit)).toEqual([true, true]);
+    expect(evaluations.map((item) => item.update.revision)).toEqual([1, 1]);
+    expect(evaluations.map((item) => item.update.barTime)).toEqual([120, 180]);
+    expect(evaluations.every((item) => item.update.kind === 'closed-bar')).toBe(true);
+    expect(evaluations.every((item) => item.update.recovered === false)).toBe(true);
+    expect(new Set(evaluations.map((item) => item.decisionId)).size).toBe(2);
     expect(evaluations.every((item) => Object.isFrozen(item))).toBe(true);
+    expect(runner.binding?.live).toMatchObject({ cadence: 'every-update', source: native });
     byBackend[backend] = evaluations;
   }
 
@@ -109,7 +112,233 @@ test('every-update drives forming snapshots and one authoritative final on both 
   );
 });
 
-test('bar-close closedBars and final-only live updates produce equivalent final targets', async () => {
+test('lower-bars every-update polls child finals into forming chart revisions', async () => {
+  const childBars = [
+    bar(600, 10.2, 10),
+    bar(660, 10.4, 10.2),
+    bar(720, 10.6, 10.4),
+    bar(780, 10.8, 10.6),
+    bar(840, 11, 10.8),
+  ];
+  const finalBar = { ...bar(600, 11, 10), volume: 5 };
+
+  for (const backend of ['js', 'interp'] as const) {
+    const base = new ReplayProvider(
+      new StaticProvider(
+        {
+          'X|5m': [bar(0, 9), bar(300, 10), finalBar],
+          'X|1m': childBars,
+        },
+        {
+          alignment: 'utc-24x7',
+          timeframes: ['1m', '5m'],
+          cacheIdentity: `intrabar-polled-lower-${backend}`,
+        },
+      ).setInstrument('X', { minQty: 1, mintick: 0.01 }),
+      { cutoverTime: 600, instrument: { minOrderQty: 1 } },
+    );
+    let closedCalls = 0;
+    let liveCalls = 0;
+    const provider: MarketDataProvider = {
+      id: base.id,
+      history: base.history.bind(base),
+      resolve: base.resolve.bind(base),
+      resolveHistorySource: base.resolveHistorySource!.bind(base),
+      async historyResolved(_instrument, timeframe, range = {}) {
+        if (timeframe === '5m' && range.from === undefined) return [bar(0, 9), bar(300, 10)];
+        if (timeframe === '5m' && range.from === 600 && range.to === 600) return [finalBar];
+        if (timeframe === '1m') {
+          return childBars.filter((item) => item.time >= (range.from ?? 0));
+        }
+        return [];
+      },
+      async *closedBars() {
+        closedCalls++;
+        throw new Error('lower-bars polling must not call closedBars');
+      },
+      async *liveBars() {
+        liveCalls++;
+        throw new Error('lower-bars polling must not call liveBars');
+      },
+      disconnect: base.disconnect.bind(base),
+    };
+    const evaluations: IntrabarEvaluation[] = [];
+    let runner: IntrabarRunner;
+    runner = new IntrabarRunner(provider, {
+      source: everyUpdateSource,
+      symbol: 'X',
+      timeframe: '5m',
+      warmupBars: 2,
+      backend,
+      historical: { mode: 'standard' },
+      live: {
+        cadence: 'every-update',
+        source: { kind: 'lower-bars', timeframe: '1m' },
+        throttleMs: 250,
+      },
+      onEvaluation: (evaluation) => {
+        evaluations.push(evaluation);
+        if (evaluation.finalCommit) runner.cancel();
+      },
+    });
+
+    await expect(runner.start()).rejects.toThrow('cancelled');
+    expect(closedCalls).toBe(0);
+    expect(liveCalls).toBe(0);
+    expect(evaluations.map((item) => item.update.revision)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(evaluations.map((item) => item.finalCommit)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    ]);
+    expect(evaluations.every((item) => item.update.kind === 'live-update')).toBe(true);
+    expect(evaluations.every((item) => item.update.barTime === 600)).toBe(true);
+    expect(evaluations.at(-1)?.bar).toEqual(finalBar);
+  }
+});
+
+test('lower-bars runner rejects a sub-250ms poll interval before provider I/O', async () => {
+  const { provider, calls } = untouchedProvider(false);
+  await expect(
+    new IntrabarRunner(provider, {
+      source: everyUpdateSource,
+      symbol: 'X',
+      timeframe: '5m',
+      warmupBars: 1,
+      historical: { mode: 'standard' },
+      live: {
+        cadence: 'every-update',
+        source: { kind: 'lower-bars', timeframe: '1m' },
+        throttleMs: 249,
+      },
+    }).initialize(),
+  ).rejects.toThrow('throttleMs must be at least 250 for lower-bars polling');
+  expect(calls).toEqual({ resolve: 0, history: 0, exact: 0, closed: 0, live: 0 });
+});
+
+test('lower-bars polling requires explicit UTC-24x7 history alignment evidence', async () => {
+  const provider = new ReplayProvider(
+    new StaticProvider(
+      {
+        'X|5m': [bar(0, 9), bar(300, 10), bar(600, 11)],
+        'X|1m': [bar(600), bar(660), bar(720), bar(780), bar(840)],
+      },
+      {
+        alignment: 'unknown',
+        timeframes: ['1m', '5m'],
+        cacheIdentity: 'intrabar-polled-unknown-alignment',
+      },
+    ).setInstrument('X', { minQty: 1, mintick: 0.01 }),
+    { cutoverTime: 600, instrument: { minOrderQty: 1 } },
+  );
+
+  await expect(
+    new IntrabarRunner(provider, {
+      source: everyUpdateSource,
+      symbol: 'X',
+      timeframe: '5m',
+      warmupBars: 2,
+      historical: { mode: 'standard' },
+      live: {
+        cadence: 'every-update',
+        source: { kind: 'lower-bars', timeframe: '1m' },
+        throttleMs: 250,
+      },
+    }).initialize(),
+  ).rejects.toThrow('lower-bars polling requires provider UTC-24x7 history alignment evidence');
+});
+
+test('lower-bars polling honors provider caps while paging more than 1000 children forward', async () => {
+  const chartOpen = 2 * 86_400;
+  const children = Array.from({ length: 1_440 }, (_, index) => bar(chartOpen + index * 60, 11, 10));
+  const finalBar = { ...bar(chartOpen, 11, 10), volume: children.length };
+  const base = new ReplayProvider(
+    new StaticProvider(
+      {
+        'X|1d': [bar(0, 9), bar(86_400, 10), finalBar],
+        'X|1m': children,
+      },
+      {
+        alignment: 'utc-24x7',
+        timeframes: ['1m', '1d'],
+        cacheIdentity: 'intrabar-polled-forward-pages',
+      },
+    ).setInstrument('X', { minQty: 1, mintick: 0.01 }),
+    { cutoverTime: chartOpen, instrument: { minOrderQty: 1 } },
+  );
+  const childRanges: Array<{ from?: number; to?: number; limit?: number }> = [];
+  const provider: MarketDataProvider = {
+    id: base.id,
+    history: base.history.bind(base),
+    resolve: base.resolve.bind(base),
+    async resolveHistorySource(symbol: string): Promise<ResolvedHistorySource> {
+      const source = await base.resolveHistorySource!(symbol);
+      return {
+        ...source,
+        capabilities: { ...source.capabilities, maxBarsPerAcquisition: 400 },
+      };
+    },
+    async historyResolved(_instrument, timeframe, range = {}) {
+      if (timeframe === '1d' && range.from === undefined) return [bar(0, 9), bar(86_400, 10)];
+      if (timeframe === '1d' && range.from === chartOpen && range.to === chartOpen) {
+        return [finalBar];
+      }
+      if (timeframe !== '1m') return [];
+      childRanges.push({ from: range.from, to: range.to, limit: range.limit });
+      const inRange = children.filter(
+        (item) =>
+          item.time >= (range.from ?? Number.MIN_SAFE_INTEGER) &&
+          item.time <= (range.to ?? Number.MAX_SAFE_INTEGER),
+      );
+      const limit = range.limit ?? inRange.length;
+      return inRange.slice(-limit);
+    },
+    async *closedBars() {
+      throw new Error('lower-bars polling must not call closedBars');
+    },
+    async *liveBars() {
+      throw new Error('lower-bars polling must not call liveBars');
+    },
+    disconnect: base.disconnect.bind(base),
+  };
+  const evaluations: Array<[number, boolean]> = [];
+  let runner: IntrabarRunner;
+  runner = new IntrabarRunner(provider, {
+    source: everyUpdateSource,
+    symbol: 'X',
+    timeframe: '1d',
+    warmupBars: 2,
+    historical: { mode: 'standard' },
+    live: {
+      cadence: 'every-update',
+      source: { kind: 'lower-bars', timeframe: '1m' },
+      throttleMs: 250,
+    },
+    onEvaluation: (evaluation) => {
+      evaluations.push([evaluation.update.revision, evaluation.finalCommit]);
+      if (evaluation.finalCommit) runner.cancel();
+    },
+  });
+
+  await expect(runner.start()).rejects.toThrow('cancelled');
+  expect(childRanges).toEqual([
+    { from: chartOpen, to: chartOpen + 399 * 60, limit: 400 },
+    { from: chartOpen + 400 * 60, to: chartOpen + 799 * 60, limit: 400 },
+    { from: chartOpen + 800 * 60, to: chartOpen + 1_199 * 60, limit: 400 },
+    { from: chartOpen + 1_200 * 60, to: chartOpen + 1_439 * 60, limit: 240 },
+  ]);
+  expect(evaluations).toHaveLength(1_441);
+  expect(evaluations[0]).toEqual([1, false]);
+  expect(evaluations[999]).toEqual([1_000, false]);
+  expect(evaluations[1_000]).toEqual([1_001, false]);
+  expect(evaluations.at(-2)).toEqual([1_440, false]);
+  expect(evaluations.at(-1)).toEqual([1_441, true]);
+});
+
+test('bar-close and every-update polling produce equivalent final targets', async () => {
   const closeOnly: IntrabarEvaluation[] = [];
   await new IntrabarRunner(minuteReplay(), {
     source: everyUpdateSource,
@@ -121,39 +350,44 @@ test('bar-close closedBars and final-only live updates produce equivalent final 
     onEvaluation: (evaluation) => closeOnly.push(evaluation),
   }).start();
 
-  const finalOnly: IntrabarEvaluation[] = [];
+  const everyUpdate: IntrabarEvaluation[] = [];
   await everyUpdateRunner(
-    minuteReplay([update(bar(120, 11), 1, true, 120_001), update(bar(180, 9), 1, true, 180_001)]),
-    finalOnly,
+    minuteReplay([update(bar(120, 99), 1, false, 120_001)]),
+    everyUpdate,
   ).start();
 
   expect(closeOnly.map((item) => [item.update.barTime, item.target, item.finalCommit])).toEqual(
-    finalOnly.map((item) => [item.update.barTime, item.target, item.finalCommit]),
+    everyUpdate.map((item) => [item.update.barTime, item.target, item.finalCommit]),
   );
   expect(closeOnly.every((item) => item.update.kind === 'closed-bar')).toBe(true);
-  expect(finalOnly.every((item) => item.update.kind === 'live-update')).toBe(true);
+  expect(everyUpdate.every((item) => item.update.kind === 'closed-bar')).toBe(true);
 });
 
-test('recovered finals compute but are explicitly non-executable', async () => {
+test('every-update accepts a polling-only provider without synthesizing recovered updates', async () => {
+  const base = minuteReplay();
+  let closedCalls = 0;
+  const pollingOnly: MarketDataProvider = {
+    id: base.id,
+    history: base.history.bind(base),
+    resolve: base.resolve.bind(base),
+    historyResolved: base.historyResolved.bind(base),
+    async *closedBars(instrument, timeframe, options) {
+      closedCalls++;
+      yield* base.closedBars(instrument, timeframe, options);
+    },
+    disconnect: base.disconnect.bind(base),
+  };
   const evaluations: IntrabarEvaluation[] = [];
-  await everyUpdateRunner(
-    minuteReplay([
-      update(bar(120, 10.5), 1, false, 120_001),
-      update(bar(180, 9), 1, true, 180_001),
-    ]),
-    evaluations,
-  ).start();
 
-  expect(evaluations.map((item) => [item.update.barTime, item.update.recovered])).toEqual([
-    [120, false],
-    [120, true],
-    [180, false],
+  await everyUpdateRunner(pollingOnly, evaluations).start();
+
+  expect(closedCalls).toBe(1);
+  expect(evaluations.map((item) => [item.update.barTime, item.update.kind])).toEqual([
+    [120, 'closed-bar'],
+    [180, 'closed-bar'],
   ]);
-  expect(evaluations[1]).toMatchObject({
-    executable: false,
-    reason: 'recovered-final',
-    finalCommit: true,
-  });
+  expect(evaluations.every((item) => item.update.recovered === false)).toBe(true);
+  expect(evaluations.every((item) => item.finalCommit)).toBe(true);
 });
 
 test('startup discontinuity inhibits the first live chart time through its final', async () => {
@@ -170,7 +404,6 @@ test('startup discontinuity inhibits the first live chart time through its final
   ).start();
 
   expect(evaluations.map((item) => [item.update.barTime, item.executable, item.reason])).toEqual([
-    [120, false, 'startup-discontinuity'],
     [120, false, 'startup-discontinuity'],
     [180, true, 'eligible'],
   ]);
@@ -211,18 +444,6 @@ test('compile, cadence, and security failures occur before provider I/O', async 
     ).rejects.toThrow(fixture.error);
     expect(calls).toEqual({ resolve: 0, history: 0, exact: 0, closed: 0, live: 0 });
   }
-
-  const unsupported = untouchedProvider(false);
-  await expect(
-    new IntrabarRunner(unsupported.provider, {
-      source: everyUpdateSource,
-      symbol: 'X',
-      timeframe: '1m',
-      warmupBars: 1,
-      live: { cadence: 'every-update', source: native },
-    }).init(),
-  ).rejects.toThrow('authoritative liveBars support');
-  expect(unsupported.calls.resolve).toBe(0);
 });
 
 test('compute options reject execution ownership fields without touching their values', async () => {

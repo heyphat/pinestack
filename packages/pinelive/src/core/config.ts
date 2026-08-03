@@ -261,6 +261,7 @@ export interface CompiledIntrabarMetadata {
 }
 
 export const DEFAULT_LIVE_THROTTLE_MS = 250;
+export const MIN_LOWER_BARS_POLL_INTERVAL_MS = 250;
 export const DEFAULT_MAX_PENDING_FINALS = 256;
 export const DEFAULT_LIVE_RECONNECT_ATTEMPTS = 8;
 export const DEFAULT_LIVE_RECONNECT_DELAY_MS = 250;
@@ -466,6 +467,11 @@ function normalizeLive(value: unknown, chartTimeframe: string): NormalizedLiveCo
     0,
     60_000,
   );
+  if (source.kind === 'lower-bars' && throttleMs < MIN_LOWER_BARS_POLL_INTERVAL_MS) {
+    throw new Error(
+      `config.live.throttleMs must be at least ${MIN_LOWER_BARS_POLL_INTERVAL_MS} for lower-bars polling`,
+    );
+  }
   const maxPendingFinals = boundedSafeInteger(
     live.maxPendingFinals === undefined ? DEFAULT_MAX_PENDING_FINALS : live.maxPendingFinals,
     'config.live.maxPendingFinals',

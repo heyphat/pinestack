@@ -5,9 +5,11 @@ resident on screen and makes the command's own flags the thing you edit, so the
 **edit → rerun → reread** loop happens in place instead of through repeated shell
 invocations and scrollback archaeology.
 
-It adds no analytics of its own. Every number it shows comes from
+It adds no analytics or trading authority of its own. Research pages render
 `pinerun --json`; piner remains the sole authority for fills, timestamps, and
-metrics.
+metrics. Page 9, LIVE, renders the separate read-only
+`pinelive status --all --json` discovery contract without computing posture,
+eligibility, ownership, breaker, effect, or lifecycle state.
 
 ![The BACKTEST page: strategies, config, and history on the left; price, equity, and drawdown charts with the full tearsheet beside them; monthly returns and trades below](../../docs/assets/pinetop-backtest.png)
 
@@ -57,10 +59,10 @@ bun packages/pinetop/src/cli.ts
 (`upgrade` refuses from source — there is no compiled binary to replace. Use
 `git pull && bun run build:bin --install`.)
 
-**pinetop needs `pinerun` on your PATH.** It shells out for every number it shows
-(§4.1.a), and refuses to start if it cannot run `pinerun --version` — that check
-happens before the alternate screen opens, so the message is readable. Build it
-the same way if you have not already:
+**pinetop needs `pinerun` on your PATH.** It shells out for every research
+number it shows (§4.1.a), and refuses to start if it cannot run
+`pinerun --version` — that check happens before the alternate screen opens, so
+the message is readable. Build it the same way if you have not already:
 
 ```sh
 cd packages/pinerun && bun run build:bin --install
@@ -68,6 +70,11 @@ cd packages/pinerun && bun run build:bin --install
 
 Or point at one explicitly: `pinetop --pinerun ./dist/pinerun`, or set
 `$PINERUN_BIN`.
+
+LIVE additionally needs the standalone `pinelive` binary when page 9 is used.
+Resolve it with `pinetop --pinelive ./dist/pinelive`, `$PINELIVE_BIN`, or PATH.
+Its absence degrades LIVE to an unavailable poll status; it does not change any
+research page or start a Pinelive runtime.
 
 ## Run
 
@@ -97,13 +104,13 @@ Arguments are a shortcut, never a requirement:
 ```sh
 pinetop strats/mean-rev.pine --symbol BTC-PERP --tf 1h   # preload some flags
 pinetop --page sweep                                     # open on a page
+pinetop --page live --pinelive ./dist/pinelive           # read-only Pinelive status
 pinetop --check-flags                                    # diff the flag schema vs pinerun --help
 pinetop --version                                        # also -v, or bare `version`
 ```
 
-`--version` reports two lines, because pinetop computes nothing — every number it
-shows came out of whichever `pinerun` it spawned, so that binary's version is half
-the answer:
+`--version` reports two lines because research pages are driven by `pinerun`;
+that binary's version is half the answer for any research number:
 
 ```console
 $ pinetop --version
@@ -117,18 +124,20 @@ thing to rule out.
 
 ## Pages
 
-One tab per command, numbered in workflow order.
+Nine workflow pages preserve the existing research ordinals and append LIVE as
+page 9.
 
-| #   | Page        | Command                     | Purpose                                            |
-| --- | ----------- | --------------------------- | -------------------------------------------------- |
-| 1   | EDITOR      | (the `.pine` source)        | Write — the script itself, vim keys                |
-| 2   | BACKTEST    | `pinerun backtest`          | Analyze — one strategy, one symbol, full tearsheet |
-| 3   | SWEEP       | `pinerun sweep`             | Optimize — one script's input grid                 |
-| 4   | WALKFORWARD | `pinerun walkforward`       | Validate — does the swept edge survive OOS         |
-| 5   | SCAN        | `pinerun scan`              | Screen — one script across N symbols               |
-| 6   | PORTFOLIO   | `pinerun portfolio`         | Combine — N symbols, one pot                       |
-| 7   | COMPARE     | `pinerun compare`           | Compare — two strategies, same bars                |
-| 8   | LOGS        | (ledger of the current run) | The engine log and the fills                       |
+| #   | Page        | Command                              | Purpose                                            |
+| --- | ----------- | ------------------------------------ | -------------------------------------------------- |
+| 1   | EDITOR      | (the `.pine` source)                 | Write — the script itself, vim keys                |
+| 2   | BACKTEST    | `pinerun backtest`                   | Analyze — one strategy, one symbol, full tearsheet |
+| 3   | SWEEP       | `pinerun sweep`                      | Optimize — one script's input grid                 |
+| 4   | WALKFORWARD | `pinerun walkforward`                | Validate — does the swept edge survive OOS         |
+| 5   | SCAN        | `pinerun scan`                       | Screen — one script across N symbols               |
+| 6   | PORTFOLIO   | `pinerun portfolio`                  | Combine — N symbols, one pot                       |
+| 7   | COMPARE     | `pinerun compare`                    | Compare — two strategies, same bars                |
+| 8   | LOGS        | (ledger of the current research run) | The engine log and the fills                       |
+| 9   | LIVE        | `pinelive status --all --json`       | Observe registered Pinelive runs, read-only        |
 
 **SWEEP and WALKFORWARD have an INPUTS pane** below STRATEGIES, listing every
 `input()` the loaded script declares — the same pane EDITOR shows, plus the grid beside each swept
@@ -161,9 +170,44 @@ sweep grid into walkforward** takes SWEEP's axes, symbol and span over to
 WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed inputs, `↵` on
 a scanned symbol or a portfolio sleeve deep-dives it. EDITOR is page 1 because the
 source is where the workflow starts — every other page is downstream of the file
-it edits.
+it edits. LIVE is appended instead of inserted so pages 1–8 and their muscle
+memory remain stable.
 
-Below about 105 columns there is no room for eight titles beside the run status,
+### LIVE — read-only Pinelive observability
+
+LIVE polls exactly `pinelive status --all --json`: immediately when page 9 is
+opened and then every five seconds while LIVE remains visible, with no
+overlapping children. Leaving LIVE pauses the cadence and returning triggers a
+fresh poll. Each child has a four-second deadline, an 8 MiB stdout cap, a 64 KiB
+stderr cap, and a bounded 250 ms TERM-to-KILL shutdown path. Pinetop validates the versioned aggregate
+envelope locally, requires schema v3 for nonempty durable ledger evidence,
+rejects inconsistent byte/empty-ledger metadata and terminal-control strings,
+turns malformed nested entries into visible per-entry errors,
+and retains the last successful snapshot and its age when a later poll fails.
+App shutdown awaits child disposal before restoring the terminal.
+
+The run list includes active registrations, retained terminal history, and
+isolated discovery errors. The detail pane renders only evidence supplied by
+Pinelive: instance/run/execution identity, active lifecycle and reasons or
+terminal outcome, registered and durable posture, durable execution eligibility,
+heartbeat age, physical and durable ownership comparisons, ledger watermark and
+partial-tail state, breaker, unresolved effects, latest durable observation, and
+warnings. Selection is keyed by opaque `instanceId`, survives reordering, and
+moves to the nearest surviving row when retention removes a record. Wide
+terminals show list and detail together; narrow terminals use `↵` for detail and
+`esc` to return.
+
+LIVE deliberately has no control path. It cannot launch, stop, kill, arm,
+disarm, recover, acknowledge ambiguity, reset a breaker, release a claim,
+submit/cancel/flatten, or invoke any broker action. `r`, `/`, `e`, and `a` do not
+turn it into a research or control page; operational evidence is not sent to an
+Ask provider. Pinetop never signals a PID read from the registry and never uses
+a heartbeat as execution authority. Stale recovery remains operator-only,
+confirmation-gated, and externally serialized through the Pinelive CLI/runbook.
+The built-in official Tiger transport remains blocked for armed production
+execution.
+
+Below about 105 columns there is no room for nine titles beside the run status,
 so the tab bar names only the page you are on and shows the rest as bare
 ordinals. `:` and `?` list them all.
 
@@ -171,8 +215,8 @@ ordinals. `:` and `?` list them all.
 
 | Key                  | Action                                                                 |
 | -------------------- | ---------------------------------------------------------------------- |
-| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter      |
-| `space` `1`–`8`      | Switch page — also works inside the editor buffer                      |
+| `1`–`9`              | Switch page — a page is reached by its ordinal, never by a letter      |
+| `space` `1`–`9`      | Switch page — also works inside the editor buffer                      |
 | `tab` / `shift-tab`  | Next / previous pane in the focus ring                                 |
 | the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS          |
 | `j` / `k`, `↓` / `↑` | Move selection                                                         |
@@ -240,7 +284,7 @@ FILES) enters the buffer; from there it is vim:
 | `i` `I` `a` `A` `o` | Insert · at the indent · after · at the line end · a line   |
 | `h j k l` `w b e`   | By character, by word (`W B E` by WORD)                     |
 | `0 ^ $` `gg G` `{}` | Line start / indent / end · first / last line · paragraph   |
-| `space` `1`–`8`     | Switch page — the app's own binding, unchanged here         |
+| `space` `1`–`9`     | Switch page — the app's own binding, unchanged here         |
 | `ctrl-p`            | Command palette, to reach any page by name                  |
 | `f F t T`           | To a character on this line                                 |
 | `d c y` + a motion  | `dw` `d$` `c2w` `y}` `dfx` `dgg` — and `dd` `cc` `yy`       |
@@ -257,10 +301,10 @@ FILES) enters the buffer; from there it is vim:
 Counts work where you would expect them (`3dd`, `2w`, `42G`).
 
 **Switching pages from the buffer** is `space` then the page number — the same
-binding as everywhere else in pinetop, which is why it is `space`: bare `1`–`8`
+binding as everywhere else in pinetop, which is why it is `space`: bare `1`–`9`
 cannot do the job inside a buffer, where a digit is a vim count and `5j`, `42G`
 and `3dd` all need it. So the app gained a prefix instead of the editor gaining a
-dialect: `space 3` is page 3 on every page, buffer or not. `1`–`8` still work
+dialect: `space 3` is page 3 on every page, buffer or not. `1`–`9` still work
 directly anywhere outside the buffer.
 
 Keys the buffer hands straight back to the frame, each one already meaning the
@@ -340,8 +384,10 @@ worth it.
 - **The composed command is always on screen and always runnable.** The config
   pane, the `$ pinerun …` line, and the spawned process all come from one
   `FlagModel`. If the line on screen would not run, that is a bug.
-- **Nothing runs without a keypress.** Editing a flag never schedules a spawn; a
-  sweep can cost minutes and a keystroke should not spend them.
+- **No research command runs without a keypress.** Editing a flag never schedules
+  a spawn; a sweep can cost minutes and a keystroke should not spend them. LIVE
+  is the explicit exception: its read-only status poll starts with the app and
+  has no execution or lifecycle controls.
 - **A failed run announces itself.** When `pinerun` exits non-zero, a drawer opens
   over the bottom of the frame with every error line the engine printed, the exit
   code, and how long it took — not one truncated line in the status bar. `esc`
@@ -402,6 +448,13 @@ deliberately absent from pinetop's flag schema: credentials never enter the UI,
 are never persisted, and are redacted from the echoed command line and the
 session log.
 
+LIVE accepts only Pinelive's bounded, normalized aggregate status envelope. It
+does not display raw account identity, credentials, profile contents, URLs,
+headers, environment values, SDK objects, or alert bodies, and it never forwards
+operational evidence to the Ask layer. Registry paths can reveal local project
+layout; protect `~/.pinelive/runs` or the configured `PINELIVE_RUNS_DIR` with the
+private permissions documented by Pinelive.
+
 ## Per-project state
 
 `.pinetop/` beside the project holds:
@@ -425,6 +478,6 @@ pinetop --check-flags
 ## Development
 
 ```sh
-bun test packages/pinetop/    # 289 tests
+bun test packages/pinetop/    # full package suite
 bunx tsc -b                   # typecheck
 ```

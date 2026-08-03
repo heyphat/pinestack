@@ -6,6 +6,8 @@ import { readBootBoundProcessIdentity } from './coordination.js';
 export * from './coordination.js';
 export * from './status.js';
 export * from './administrative-recovery.js';
+export * from './run-registry.js';
+export * from './status-discovery.js';
 export * from './index.js';
 import {
   ExecutionLeaseError,

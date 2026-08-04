@@ -15,9 +15,11 @@
  *  - **`ctrl-t`** enters SCROLL mode and is reserved — the child never sees it. The
  *    mode is sticky rather than a one-shot prefix, because scrolling is repetitive
  *    by nature and re-arming a prefix for every line is the kind of friction that
- *    stops people using the scrollback at all. Inside it `k j u d g G` move through
- *    the history as often as you like, `tab` leaves the pane, and `esc` or `ctrl-t`
- *    hands the keyboard back to the child.
+ *    stops people using the scrollback at all. At a shell prompt `k j u d g G` move
+ *    through xterm's retained history. A full-screen program has no such terminal
+ *    history, so if it negotiated SGR mouse tracking `k j u d` become wheel gestures
+ *    and the program scrolls its own content instead. `tab` leaves the pane, and
+ *    `esc` or `ctrl-t` hands the keyboard back to the child.
  *
  *    A mode is a promise that keys mean something different, so it is stated on the
  *    border for as long as it lasts. It also falls out of the way: any key it does
@@ -71,6 +73,30 @@ const SCROLL_KEYS: Readonly<Record<string, (session: TermSession) => boolean>> =
   G: (s) => s.scrollToBottom(),
 };
 
+/**
+ * Alternate-screen programs have no emulator scrollback; when one negotiated SGR
+ * mouse tracking, these commands become wheel gestures owned by the program.
+ */
+const APPLICATION_SCROLL_KEYS: Readonly<Record<string, (session: TermSession) => boolean>> = {
+  k: (s) => s.scrollApplication(-1),
+  j: (s) => s.scrollApplication(1),
+  // A wheel detent commonly moves three rows. Send enough for approximately one
+  // pane while leaving the exact movement to the full-screen application.
+  u: (s) => s.scrollApplication(-Math.max(1, Math.ceil((s.rows - 1) / 3))),
+  d: (s) => s.scrollApplication(Math.max(1, Math.ceil((s.rows - 1) / 3))),
+};
+
+/** One width command moves the outer pane by this many terminal columns. */
+const TERMINAL_WIDTH_STEP = 4;
+
+/** Widths computed by the last visible editor layout. */
+export interface TerminalPaneWidth {
+  automatic: number;
+  minimum: number;
+  maximum: number;
+  rendered: number;
+}
+
 export interface TerminalPaneState {
   /**
    * Whether the pane exists at all. It is absent from the layout and the focus
@@ -87,6 +113,16 @@ export interface TerminalPaneState {
   visible: boolean;
   session: TermSession | null;
   /**
+   * User-selected outer pane width. Absent means the responsive default; keeping
+   * it here makes the choice last for this Pinetop session without persisting it.
+   */
+  preferredWidth?: number;
+  /**
+   * Responsive default, bounds, and effective width from the last visible frame.
+   * Raw input needs all four so coalesced commands behave like separate keypresses.
+   */
+  width?: TerminalPaneWidth;
+  /**
    * The pane that had focus when the shell took it, restored on the way out.
    *
    * Leaving cannot simply go to the buffer. The buffer claims the whole keyboard,
@@ -98,7 +134,8 @@ export interface TerminalPaneState {
    */
   returnTo: string;
   /**
-   * SCROLL mode: the keyboard drives the scrollback instead of the child.
+   * SCROLL mode: the keyboard drives retained shell history, or asks a
+   * mouse-aware full-screen child to move through the history it owns.
    *
    * Kept on the state rather than in a closure so the border can advertise it for as
    * long as it lasts. A mode nobody can see is a keyboard that has silently stopped
@@ -156,6 +193,11 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
   let rest = chunk;
   let took = false;
   let sent = false;
+  let layoutChanged = false;
+  const width = state.width;
+  const clampWidth = (value: number): number =>
+    width == null ? value : Math.min(width.maximum, Math.max(width.minimum, value));
+  let workingWidth = width?.rendered ?? 0;
   let leaving: 'hatch' | 'escape' | null = null;
 
   while (rest.length > 0 && leaving == null) {
@@ -180,10 +222,39 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
         took = true;
         continue;
       }
+      if (key === '=') {
+        state.preferredWidth = undefined;
+        workingWidth = width?.automatic ?? workingWidth;
+        layoutChanged = true;
+        took = true;
+        continue;
+      }
+      if (key === '<' || key === '>') {
+        // Apply and clamp every byte as though it had rendered separately. Terminal
+        // reads freely coalesce held keys, and chunk boundaries must not change the
+        // final width — especially at a bound or after `=` rebases to the default.
+        if (workingWidth > 0) {
+          const delta = key === '<' ? -TERMINAL_WIDTH_STEP : TERMINAL_WIDTH_STEP;
+          workingWidth = clampWidth(workingWidth + delta);
+          state.preferredWidth = workingWidth;
+        }
+        layoutChanged = true;
+        took = true;
+        continue;
+      }
       const scroll = SCROLL_KEYS[key];
       if (scroll != null) {
-        scroll(session);
-        took = true;
+        const applicationScroll = APPLICATION_SCROLL_KEYS[key];
+        if (session.applicationScrollAvailable === true && applicationScroll != null) {
+          // An alternate buffer has no terminal history to move through. The
+          // full-screen child owns that history, so deliver a wheel gesture and
+          // wait for its redraw instead of repainting the same cells locally.
+          if (applicationScroll(session)) sent = true;
+          else took = true;
+        } else {
+          scroll(session);
+          took = true;
+        }
         continue;
       }
       // Undefined in this mode: the mode ends and the key goes through, so picking
@@ -229,6 +300,10 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
   }
 
   if (leaving != null) return { kind: 'leave', reason: leaving };
+  // A width command needs a frame immediately: that frame computes the new layout
+  // and resizes the child. This deliberately outranks sent bytes in a coalesced
+  // chunk; the normal tick will still paint whatever response those bytes produce.
+  if (layoutChanged) return { kind: 'pane' };
   // When bytes also went to the child the tick will paint anyway, so `sent` wins:
   // painting now would draw the grid as it was before the keystroke landed.
   if (sent) return { kind: 'sent' };
@@ -324,10 +399,12 @@ function legendFor(state: TerminalPaneState, focused: boolean): string | undefin
   const exit = session.exitCode;
   if (exit != null) return exit === 0 ? 'exited' : `exited ${exit}`;
 
-  // Scrolled away from the live bottom outranks everything else it could say: a
-  // pane showing old output while the child keeps working looks frozen, and this
-  // line is the only thing that distinguishes the two.
   if (state.scrolling === true) {
+    // Alternate-screen history belongs to the child. A mouse-aware child redraws
+    // after each synthetic wheel report, so there is no local line count to show.
+    if (session.applicationScrollAvailable === true) return 'APP SCROLL';
+    if (session.altScreen) return 'CONTROL';
+
     // Terse on purpose. The legend competes with the pane title for the top border
     // and is *dropped entirely* when it will not fit (`drawPane`), which for a mode
     // indicator is the worst possible failure — it disappears exactly when it is
@@ -336,9 +413,15 @@ function legendFor(state: TerminalPaneState, focused: boolean): string | undefin
     return `SCROLL ${back > 0 ? `↑ ${back}` : 'live'}`;
   }
 
+  // Scrolled away from the live bottom outranks everything else it could say: a
+  // pane showing old output while the child keeps working looks frozen, and this
+  // line is the only thing that distinguishes the two.
   const back = session.scrolledLines;
   if (back > 0) return `↑ ${back} · ${ESCAPE_HATCH} to scroll`;
 
   if (!focused) return `${session.cols}×${session.rows}`;
-  return session.altScreen ? `${ESCAPE_HATCH} scroll · tab leaves` : `esc leaves`;
+  if (!session.altScreen) return 'esc leaves';
+  return session.applicationScrollAvailable === true
+    ? `${ESCAPE_HATCH} app scroll · tab leaves`
+    : `${ESCAPE_HATCH} control · tab leaves`;
 }

@@ -31,7 +31,7 @@ import { highlight } from '../editor/syntax.js';
 import { modeLabel, type EditorState } from '../editor/state.js';
 import { handleKey, openFile } from '../editor/vim.js';
 import { drawInputsPane } from './inputs-pane.js';
-import { drawTerminal, TERMINAL_PANE, ESCAPE_HATCH } from '../term/pane.js';
+import { drawTerminal, TERMINAL_PANE, ESCAPE_HATCH, type TerminalPaneWidth } from '../term/pane.js';
 import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
 /**
@@ -41,17 +41,37 @@ import { clampCursor, columns, rows, windowFor, type Page, type PageContext } fr
  */
 const PANES = ['files', 'editor', 'inputs'] as const;
 
+/** Narrowest useful terminal pane and widest automatic terminal pane. */
+const TERMINAL_MIN_WIDTH = 32;
+const TERMINAL_AUTO_MAX_WIDTH = 80;
+
+/**
+ * The narrowest source pane the adjustable terminal may leave behind. This is the
+ * 45-column source width produced by the existing automatic layout exactly where
+ * the terminal first becomes visible, so manual growth never makes the editor less
+ * usable than opening the unadjusted pane already could.
+ */
+const TERMINAL_MIN_EDITOR_WIDTH = 45;
+
 /**
  * Width of the shell column when it is open.
  *
- * Sized generously — 80 columns is what a shell's own output is written for, and
- * a terminal narrower than that wraps `git status` and every compiler error into
- * unreadable ribbons. It gives way before the buffer does, though: below
- * `TERMINAL_MIN_BODY` the column is dropped entirely rather than squeezing the
- * source into nothing.
+ * The responsive default is unchanged: 38%, bounded to 32–80 columns. An explicit
+ * preference may grow beyond 80 when the outer terminal has room, but it is always
+ * clamped before layout so the editor retains its established minimum width.
  */
-function terminalWidth(bodyW: number): number {
-  return Math.min(80, Math.max(32, Math.floor(bodyW * 0.38)));
+function terminalWidths(
+  bodyW: number,
+  sidebarW: number,
+  preferredWidth?: number,
+): TerminalPaneWidth {
+  const automatic = Math.min(
+    TERMINAL_AUTO_MAX_WIDTH,
+    Math.max(TERMINAL_MIN_WIDTH, Math.floor(bodyW * 0.38)),
+  );
+  const maximum = bodyW - sidebarW - TERMINAL_MIN_EDITOR_WIDTH;
+  const rendered = Math.min(maximum, Math.max(TERMINAL_MIN_WIDTH, preferredWidth ?? automatic));
+  return { automatic, minimum: TERMINAL_MIN_WIDTH, maximum, rendered };
 }
 
 /**
@@ -340,22 +360,51 @@ const EDITOR_HINTS: readonly { key: string; label: string }[] = [
   { key: '?', label: 'help' },
 ];
 
-/**
- * The shell pane's hints. Nothing but the exits: every other key on the strip
- * would be one the child is about to receive, and a hint for a key that reaches
- * the shell instead of the app is worse than no hint.
- */
+/** Shell-prompt hints, where Pinetop owns retained scrollback and Esc can leave. */
 const TERMINAL_HINTS: readonly { key: string; label: string }[] = [
   { key: ESCAPE_HATCH, label: 'scroll' },
-  { key: 'esc', label: 'leave (not in vim)' },
+  { key: 'esc', label: 'leave' },
   { key: 'tab', label: 'leave' },
 ];
 
-/** SCROLL mode's own strip. Only the keys the mode actually defines. */
+/** A mouse-aware full-screen child owns both the screen and its history. */
+const TERMINAL_APP_HINTS: readonly { key: string; label: string }[] = [
+  { key: ESCAPE_HATCH, label: 'app scroll' },
+  { key: 'tab', label: 'leave' },
+];
+
+/** A full-screen child without a scroll protocol still needs the escape hatch. */
+const TERMINAL_CONTROL_HINTS: readonly { key: string; label: string }[] = [
+  { key: ESCAPE_HATCH, label: 'control' },
+  { key: 'tab', label: 'leave' },
+];
+
+/** The escape-hatch mode when no application scroll protocol is available. */
+const TERMINAL_CONTROL_MODE_HINTS: readonly { key: string; label: string }[] = [
+  { key: '</>', label: 'width' },
+  { key: '=', label: 'reset' },
+  { key: ESCAPE_HATCH, label: 'resume' },
+  { key: 'esc', label: 'resume' },
+  { key: 'tab', label: 'leave' },
+];
+
+/** Normal-buffer SCROLL mode, backed by xterm's retained lines. */
 const TERMINAL_SCROLL_HINTS: readonly { key: string; label: string }[] = [
   { key: 'k/j', label: 'line' },
   { key: 'u/d', label: 'page' },
   { key: 'g/G', label: 'top/live' },
+  { key: '</>', label: 'width' },
+  { key: '=', label: 'reset' },
+  { key: 'esc', label: 'resume' },
+  { key: 'tab', label: 'leave' },
+];
+
+/** Alternate-screen SCROLL mode, translated into child-owned wheel gestures. */
+const TERMINAL_APP_SCROLL_HINTS: readonly { key: string; label: string }[] = [
+  { key: 'k/j', label: 'app line' },
+  { key: 'u/d', label: 'app page' },
+  { key: '</>', label: 'width' },
+  { key: '=', label: 'reset' },
   { key: 'esc', label: 'resume' },
   { key: 'tab', label: 'leave' },
 ];
@@ -394,7 +443,15 @@ export const editorPage: Page = {
   hints: (state) => {
     const focus = state.panes.editor.focus;
     if (focus === TERMINAL_PANE) {
-      return state.terminal.scrolling === true ? TERMINAL_SCROLL_HINTS : TERMINAL_HINTS;
+      const session = state.terminal.session;
+      if (state.terminal.scrolling === true) {
+        if (session?.applicationScrollAvailable === true) return TERMINAL_APP_SCROLL_HINTS;
+        if (session?.altScreen === true) return TERMINAL_CONTROL_MODE_HINTS;
+        return TERMINAL_SCROLL_HINTS;
+      }
+      if (session?.applicationScrollAvailable === true) return TERMINAL_APP_HINTS;
+      if (session?.altScreen === true) return TERMINAL_CONTROL_HINTS;
+      return TERMINAL_HINTS;
     }
     return focus === 'editor' ? EDITOR_HINTS : HINTS;
   },
@@ -468,10 +525,15 @@ export const editorPage: Page = {
     // appends one rect that absorbs the remainder, so the buffer is the absorber
     // in both cases and never has to be measured.
     const showTerminal = terminalVisible(state, body.w);
-    // Published for the focus ring, which cannot measure anything itself. Written
-    // every frame, so a resize is reflected by the time the next key is handled.
+    // Published for the focus ring and raw terminal controls, neither of which can
+    // measure the screen itself. Written every frame so an outer resize is reflected
+    // by the time the next key is handled.
     state.terminal.visible = showTerminal;
-    const termW = showTerminal ? terminalWidth(body.w) : 0;
+    const width = showTerminal
+      ? terminalWidths(body.w, sidebarW, state.terminal.preferredWidth)
+      : undefined;
+    state.terminal.width = width;
+    const termW = width?.rendered ?? 0;
     const [sidebar, main, terminalRect] = (
       showTerminal
         ? columns(body, [sidebarW, body.w - sidebarW - termW])

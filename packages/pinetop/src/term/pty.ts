@@ -183,10 +183,17 @@ export function spawnPty(opts: PtyOptions): Pty {
   delete env['LINES'];
   env['TERM'] = 'xterm-256color';
 
+  // Merely duping the slave onto stdio does not make it the child's controlling
+  // terminal. Without a new session the shell therefore inherits pinetop's outer
+  // controlling terminal and job-control operations can stop both the shell and
+  // its foreground program after a nested Ctrl-C. Bun's detached spawn calls
+  // `setsid()` before exec, leaving the pane with no controlling terminal rather
+  // than the wrong one; stdin/stdout/stderr still use the pane's pty slave.
   const child = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
     env,
     stdio: [slave, slave, slave],
+    detached: true,
   });
 
   // The parent's copy of the slave goes now. Holding it would keep the pty open
@@ -281,17 +288,16 @@ export function spawnPty(opts: PtyOptions): Pty {
      * a pane with `claude` or `vim` open and the shell dies while the program keeps
      * running, detached, reading from a pty whose master has gone.
      *
-     * A real terminal does not have this problem: its child is a session leader
-     * with the pty as its controlling terminal, so closing the master makes the
-     * *kernel* hang up the foreground process group. `Bun.spawn` cannot `setsid`,
-     * so that path is unavailable.
+     * The detached spawn makes the shell a session and process-group leader, which
+     * keeps it away from pinetop's outer controlling terminal. The already-open
+     * slave fd is not automatically adopted as the new session's controlling tty,
+     * though, so closing the master cannot be relied on to make the kernel hang up
+     * every process using it.
      *
-     * Nor is signalling a process *group* enough on its own. `kill(-pid)` needs the
-     * child to be a group leader, and without `setpgid` it is not — the negative pid
-     * then names no group at all and the call fails with ESRCH while everything keeps
-     * running. So the descendants are enumerated explicitly and signalled one by one,
-     * and the group attempts are kept only as a cheap extra for the case where a
-     * shell did establish its own group.
+     * Signalling the shell's process group reaches ordinary descendants, but a
+     * program can establish another group or session of its own. The descendants
+     * are therefore enumerated explicitly as well, and group attempts remain the
+     * cheap path for everything that stayed with the shell.
      *
      * The tree is read *before* anything is signalled. Kill the intermediate parent
      * first and its children are reparented to init, at which point they are no

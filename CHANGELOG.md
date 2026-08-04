@@ -103,6 +103,12 @@ without being announced as a release.
 
 ### Fixed
 
+- **The shell pane can no longer trap focus inside a full-screen CLI.** Claude,
+  Codex, Kiro, vim and similar programs keep their own `esc` and plain `tab`,
+  while `ctrl-t` then `tab` now moves to the next Pinetop pane and `ctrl-t` then
+  `shift-tab` moves to the previous one. The border, hint strip and help now show
+  the complete sequence instead of implying that `ctrl-t` or plain `tab` leaves.
+
 - **Scrolling a full-screen program in the shell pane now scrolls the program.**
   The alternate screen keeps no terminal history, so SCROLL mode's keys used to
   do nothing under `claude`, `vim` or `htop`. When the child negotiated SGR

@@ -147,14 +147,14 @@ export const BINDINGS: Binding[] = [
     group: 'act',
   },
   {
-    // Two keys for one action, because they are reachable in different places.
-    // `t` is the everyday one. `ctrl-t` is the one that still works where a bare
-    // letter cannot: inside the EDITOR buffer, where `t` is the till motion, and
-    // inside the shell pane itself, where every printable key belongs to the
-    // child — which makes it the guaranteed way back out.
+    // Two keys enter one pane from places with different ownership. `t` is the
+    // everyday one; `ctrl-t` reaches it from the EDITOR buffer, where `t` is a
+    // motion. Once the shell owns raw input, Ctrl-T becomes its reserved prefix:
+    // Ctrl-T then Tab/Shift-Tab navigates Pinetop without stealing either key
+    // from the child during normal use.
     keys: ['t', 'ctrl-t'],
     display: 't / ctrl-t',
-    description: 'Shell pane on the editor page — and the way back out of it',
+    description: 'Open shell · inside it, ctrl-t then tab/shift-tab changes pane',
     action: { kind: 'toggle-terminal' },
     group: 'act',
   },

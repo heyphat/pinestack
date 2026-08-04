@@ -362,21 +362,21 @@ const EDITOR_HINTS: readonly { key: string; label: string }[] = [
 
 /** Shell-prompt hints, where Pinetop owns retained scrollback and Esc can leave. */
 const TERMINAL_HINTS: readonly { key: string; label: string }[] = [
-  { key: ESCAPE_HATCH, label: 'scroll' },
+  { key: ESCAPE_HATCH, label: 'scroll / pane keys' },
+  { key: 'then tab/shift-tab', label: 'next / previous pane' },
   { key: 'esc', label: 'leave' },
-  { key: 'tab', label: 'leave' },
 ];
 
 /** A mouse-aware full-screen child owns both the screen and its history. */
 const TERMINAL_APP_HINTS: readonly { key: string; label: string }[] = [
-  { key: ESCAPE_HATCH, label: 'app scroll' },
-  { key: 'tab', label: 'leave' },
+  { key: ESCAPE_HATCH, label: 'app scroll / pane keys' },
+  { key: 'then tab/shift-tab', label: 'next / previous pane' },
 ];
 
 /** A full-screen child without a scroll protocol still needs the escape hatch. */
 const TERMINAL_CONTROL_HINTS: readonly { key: string; label: string }[] = [
-  { key: ESCAPE_HATCH, label: 'control' },
-  { key: 'tab', label: 'leave' },
+  { key: ESCAPE_HATCH, label: 'control / pane keys' },
+  { key: 'then tab/shift-tab', label: 'next / previous pane' },
 ];
 
 /** The escape-hatch mode when no application scroll protocol is available. */
@@ -385,7 +385,8 @@ const TERMINAL_CONTROL_MODE_HINTS: readonly { key: string; label: string }[] = [
   { key: '=', label: 'reset' },
   { key: ESCAPE_HATCH, label: 'resume' },
   { key: 'esc', label: 'resume' },
-  { key: 'tab', label: 'leave' },
+  { key: 'tab', label: 'next pane' },
+  { key: 'shift-tab', label: 'previous pane' },
 ];
 
 /** Normal-buffer SCROLL mode, backed by xterm's retained lines. */
@@ -396,7 +397,8 @@ const TERMINAL_SCROLL_HINTS: readonly { key: string; label: string }[] = [
   { key: '</>', label: 'width' },
   { key: '=', label: 'reset' },
   { key: 'esc', label: 'resume' },
-  { key: 'tab', label: 'leave' },
+  { key: 'tab', label: 'next pane' },
+  { key: 'shift-tab', label: 'previous pane' },
 ];
 
 /** Alternate-screen SCROLL mode, translated into child-owned wheel gestures. */
@@ -406,7 +408,8 @@ const TERMINAL_APP_SCROLL_HINTS: readonly { key: string; label: string }[] = [
   { key: '</>', label: 'width' },
   { key: '=', label: 'reset' },
   { key: 'esc', label: 'resume' },
-  { key: 'tab', label: 'leave' },
+  { key: 'tab', label: 'next pane' },
+  { key: 'shift-tab', label: 'previous pane' },
 ];
 
 export const editorPage: Page = {

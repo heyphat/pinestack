@@ -10,32 +10,33 @@
  * the rule every other pane follows. A shell needs `ctrl-c`, `tab`, `space` and
  * `ctrl-p` — all four of which the app binds — so a pane that hands any of them
  * back is a pane you cannot use. So this one takes the keyboard completely, and
- * buys back exactly two ways out:
+ * buys back one reserved control prefix plus a prompt-only shortcut:
  *
- *  - **`ctrl-t`** enters SCROLL mode and is reserved — the child never sees it. The
- *    mode is sticky rather than a one-shot prefix, because scrolling is repetitive
- *    by nature and re-arming a prefix for every line is the kind of friction that
- *    stops people using the scrollback at all. At a shell prompt `k j u d g G` move
- *    through xterm's retained history. A full-screen program has no such terminal
- *    history, so if it negotiated SGR mouse tracking `k j u d` become wheel gestures
- *    and the program scrolls its own content instead. `tab` leaves the pane, and
- *    `esc` or `ctrl-t` hands the keyboard back to the child.
+ *  - **`ctrl-t`** enters SCROLL/CONTROL mode and is reserved — the child never
+ *    sees it. The mode is sticky rather than a one-shot prefix, because scrolling
+ *    is repetitive by nature and re-arming a prefix for every line is the kind of
+ *    friction that stops people using the scrollback at all. At a shell prompt
+ *    `k j u d g G` move through xterm's retained history. A full-screen program
+ *    has no such terminal history, so if it negotiated SGR mouse tracking
+ *    `k j u d` become wheel gestures and the program scrolls its own content.
+ *    `tab` advances to the next Pinetop pane, `shift-tab` moves to the previous
+ *    pane, and `esc` or a second `ctrl-t` hands the keyboard back to the child.
  *
- *    A mode is a promise that keys mean something different, so it is stated on the
- *    border for as long as it lasts. It also falls out of the way: any key it does
- *    not define ends it *and reaches the child*, so resuming work costs nothing and
- *    no keystroke is lost — type `ls` while scrolled and you get `ls`, not `s`. The
- *    accepted cost is that a mistyped key ends the mode silently, which is the right
- *    way round for something you are in for a few seconds at a time.
+ *    A mode is a promise that keys mean something different, so it is stated on
+ *    the border for as long as it lasts. It also falls out of the way: any key it
+ *    does not define ends it *and reaches the child*, so resuming work costs
+ *    nothing and no keystroke is lost — type `ls` while scrolled and you get `ls`,
+ *    not `s`. The accepted cost is that a mistyped key ends the mode silently,
+ *    which is the right way round for something you are in briefly.
  *  - **`esc`** returns to the frame too, *unless* the child is on the alternate
  *    screen — which is the signal that a full-screen program (vim, htop, less)
  *    is running and wants `esc` for itself. Without that carve-out `esc` would be
  *    swallowed before vim ever saw it; with it, the cheap exit still works at a
  *    shell prompt where `esc` does nothing anyway.
  *
- * The pane is *entered* with a bare `t` from anywhere in the frame; `ctrl-t` is
- * the same toggle for the two places a letter cannot reach (the EDITOR buffer,
- * and this pane).
+ * The pane is entered with a bare `t` from the frame, or `ctrl-t` from the EDITOR
+ * buffer where `t` is a motion. Once the shell has focus, `ctrl-t` is the control
+ * prefix; `ctrl-t` then `tab`/`shift-tab` is the guaranteed path back to Pinetop.
  */
 
 import { drawPane, type Rect, type Screen } from '../render/screen.js';
@@ -46,7 +47,7 @@ import type { TermSession } from './session.js';
 /** The pane's id in the focus ring and the layout. */
 export const TERMINAL_PANE = 'terminal';
 
-/** The key that always gets you out, even mid-vim. Reserved from the child. */
+/** The prefix that always reclaims the keyboard, even mid-full-screen app. */
 export const ESCAPE_HATCH = 'ctrl-t';
 
 /** The key that opens the pane from the frame, where a bare letter is free. */
@@ -56,7 +57,7 @@ export const TERMINAL_KEY = 't';
 const ESCAPE_HATCH_BYTE = '\x14';
 const ESC = '\x1b';
 
-/** `tab`, which leaves the pane from SCROLL mode — the focus-ring key everywhere else. */
+/** Focus-ring navigation, available after the reserved `ctrl-t` prefix. */
 const TAB = '\t';
 const SHIFT_TAB = '\x1b[Z';
 
@@ -168,7 +169,8 @@ export function initialTerminalPane(): TerminalPaneState {
  */
 export type TerminalKeyVerdict =
   | { kind: 'sent' }
-  | { kind: 'leave'; reason: 'hatch' | 'escape' }
+  | { kind: 'leave'; reason: 'hatch'; direction: 1 | -1 }
+  | { kind: 'leave'; reason: 'escape' }
   /** Taken by the pane itself — arming the prefix, or scrolling. Repaint. */
   | { kind: 'pane' }
   | { kind: 'ignored' };
@@ -198,20 +200,19 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
   const clampWidth = (value: number): number =>
     width == null ? value : Math.min(width.maximum, Math.max(width.minimum, value));
   let workingWidth = width?.rendered ?? 0;
-  let leaving: 'hatch' | 'escape' | null = null;
+  let leaving: { reason: 'hatch'; direction: 1 | -1 } | { reason: 'escape' } | null = null;
 
   while (rest.length > 0 && leaving == null) {
     if (state.scrolling === true) {
       const key = nextKey(rest);
       rest = rest.slice(key.length);
 
-      // `tab` is the way out of the pane from here, which is what `tab` means on
-      // every other pane in the app. It has to be *some* key: `esc` and `ctrl-t`
-      // are spent on leaving the mode, and a full-screen child keeps `esc` for
-      // itself, so without this there would be no exit from a vim in the pane.
+      // Once the prefix has reclaimed the keyboard, Tab follows the same focus-ring
+      // direction as every other pane. Keeping both directions here means a
+      // full-screen child cannot trap focus without losing either Tab for itself.
       if (key === TAB || key === SHIFT_TAB) {
         state.scrolling = false;
-        leaving = 'hatch';
+        leaving = { reason: 'hatch', direction: key === TAB ? 1 : -1 };
         break;
       }
       if (key === ESCAPE_HATCH_BYTE || key === ESC) {
@@ -276,7 +277,7 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
       // A chunk that is *exactly* one escape byte was the Escape key; anything
       // longer is a sequence (an arrow, a function key) the child should get whole.
       if (rest === ESC && !session.altScreen) {
-        leaving = 'escape';
+        leaving = { reason: 'escape' };
         break;
       }
       if (!session.running) return took || sent ? { kind: 'pane' } : { kind: 'ignored' };
@@ -299,7 +300,7 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
     rest = rest.slice(at + 1);
   }
 
-  if (leaving != null) return { kind: 'leave', reason: leaving };
+  if (leaving != null) return { kind: 'leave', ...leaving };
   // A width command needs a frame immediately: that frame computes the new layout
   // and resizes the child. This deliberately outranks sent bytes in a coalesced
   // chunk; the normal tick will still paint whatever response those bytes produce.
@@ -420,8 +421,8 @@ function legendFor(state: TerminalPaneState, focused: boolean): string | undefin
   if (back > 0) return `↑ ${back} · ${ESCAPE_HATCH} to scroll`;
 
   if (!focused) return `${session.cols}×${session.rows}`;
-  if (!session.altScreen) return 'esc leaves';
+  if (!session.altScreen) return `esc leaves · ${ESCAPE_HATCH} then tab panes`;
   return session.applicationScrollAvailable === true
-    ? `${ESCAPE_HATCH} app scroll · tab leaves`
-    : `${ESCAPE_HATCH} control · tab leaves`;
+    ? `${ESCAPE_HATCH} app scroll · then tab panes`
+    : `${ESCAPE_HATCH} control · then tab panes`;
 }

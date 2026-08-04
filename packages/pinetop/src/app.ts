@@ -318,9 +318,17 @@ export class App {
     const verdict = routeRawKey(this.state.terminal, chunk);
     switch (verdict.kind) {
       case 'leave':
-        this.leaveTerminal();
-        this.state.status =
-          verdict.reason === 'hatch' ? 'left the shell' : 'left the shell — t returns';
+        if (verdict.reason === 'hatch') {
+          // The prefix reclaimed Tab from the child, so preserve the direction it
+          // has everywhere else in the frame instead of always restoring returnTo.
+          this.moveFocus(verdict.direction);
+          this.state.status = verdict.direction > 0 ? 'next pane' : 'previous pane';
+        } else {
+          // Prompt-level Esc is a non-directional exit and returns to the pane that
+          // opened the shell, as it did before directional prefix navigation.
+          this.leaveTerminal();
+          this.state.status = 'left the shell — t returns';
+        }
         this.paint();
         return true;
       case 'pane':
@@ -389,7 +397,7 @@ export class App {
 
     if (pane.session != null) {
       this.enterTerminal();
-      this.state.status = 'shell — ctrl-t leaves, esc leaves unless a full-screen app has it';
+      this.state.status = 'shell — ctrl-t then tab/shift-tab changes pane; esc leaves at a prompt';
     }
   }
 

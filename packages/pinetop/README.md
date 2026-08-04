@@ -167,26 +167,26 @@ ordinals. `:` and `?` list them all.
 
 ## Keys
 
-| Key                  | Action                                                            |
-| -------------------- | ----------------------------------------------------------------- |
-| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter |
-| `space` `1`–`8`      | Switch page — also works inside the editor buffer                 |
-| `tab` / `shift-tab`  | Next / previous pane in the focus ring                            |
-| the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS     |
-| `j` / `k`, `↓` / `↑` | Move selection                                                    |
-| `g` / `G`            | First / last row                                                  |
-| `↵`                  | Edit the focused config flag · load selection                     |
-| `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)      |
-| `e`                  | Edit this page's script in `$EDITOR`, then reload it              |
-| `t` / `ctrl-t`       | Shell pane on the editor page — and the way back out of it        |
-| `/`                  | Filter fills                                                      |
-| `.`                  | Show / hide the advanced flags                                    |
-| `ctrl-u`             | Clear the field being edited                                      |
-| `:` or `ctrl-p`      | Command palette                                                   |
-| `?`                  | Keybinding overlay                                                |
-| `esc`                | Dismiss overlay · clear filter · unscope log                      |
-| `ctrl-x`             | Revert pending edits                                              |
-| `q`                  | Quit                                                              |
+| Key                  | Action                                                              |
+| -------------------- | ------------------------------------------------------------------- |
+| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter   |
+| `space` `1`–`8`      | Switch page — also works inside the editor buffer                   |
+| `tab` / `shift-tab`  | Next / previous pane in the focus ring                              |
+| the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS       |
+| `j` / `k`, `↓` / `↑` | Move selection                                                      |
+| `g` / `G`            | First / last row                                                    |
+| `↵`                  | Edit the focused config flag · load selection                       |
+| `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)        |
+| `e`                  | Edit this page's script in `$EDITOR`, then reload it                |
+| `t` / `ctrl-t`       | Open shell; inside it, `ctrl-t` then `tab`/`shift-tab` changes pane |
+| `/`                  | Filter fills                                                        |
+| `.`                  | Show / hide the advanced flags                                      |
+| `ctrl-u`             | Clear the field being edited                                        |
+| `:` or `ctrl-p`      | Command palette                                                     |
+| `?`                  | Keybinding overlay                                                  |
+| `esc`                | Dismiss overlay · clear filter · unscope log                        |
+| `ctrl-x`             | Revert pending edits                                                |
+| `q`                  | Quit                                                                |
 
 `?` is generated from the keymap table, so it always documents the real
 bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
@@ -328,52 +328,57 @@ buffer, shell. It is your `$SHELL`, interactive, started in the project
 directory — so `git diff`, a `pinerun` invocation you want to type by hand, or
 `vim` itself all run there with the source still on screen.
 
-`t` is the everyday key. `ctrl-t` is the same toggle for the two places a bare
-letter cannot reach: inside the editor buffer, where `t` is vim's till motion, and
-inside the shell pane itself.
+`t` is the everyday key. `ctrl-t` opens the same pane from the editor buffer,
+where `t` is vim's till motion. Once the shell pane has focus, `ctrl-t` becomes a
+reserved control prefix rather than an immediate toggle.
 
 Everything you type goes to the shell, including the keys pinetop normally binds:
-`ctrl-c` interrupts the child rather than quitting pinetop, `tab` completes,
-`space` is a space, `t` is a `t`. Two keys get you back out:
+`ctrl-c` interrupts the child rather than quitting pinetop, plain `tab` completes,
+`space` is a space, and `t` is a `t`. These sequences always reclaim pane
+navigation, even while Claude, Codex, Kiro, vim, or another full-screen app owns
+its terminal:
 
-| Key      | Leaves the pane                                                    |
-| -------- | ------------------------------------------------------------------ |
-| `ctrl-t` | Always — whatever the child is doing. This is the guaranteed exit  |
-| `esc`    | At a shell prompt only. A full-screen program in the pane keeps it |
+| Sequence                   | Pinetop action                                   |
+| -------------------------- | ------------------------------------------------ |
+| `ctrl-t`, then `tab`       | Move to the next pane                            |
+| `ctrl-t`, then `shift-tab` | Move to the previous pane                        |
+| `esc`                      | Return to the opening pane, but only at a prompt |
 
-`ctrl-t` is a **prefix**, the way `tmux` uses one: it is reserved from the child, and
-the key after it belongs to the pane. That is what pays for scrollback without taking
-`PageUp` — or any other key — away from the program running inside.
+`ctrl-t` is a **prefix**, the way `tmux` uses one: it is reserved from the child,
+and the key after it belongs to the pane. That pays for scrollback and navigation
+without taking `PageUp`, plain `tab`, or any other key away from the running
+program.
 
-| After `ctrl-t` |                                                |
-| -------------- | ---------------------------------------------- |
-| `k` / `j`      | Back / forward one line                        |
-| `u` / `d`      | Back / forward one page                        |
-| `g` / `G`      | Top of history / back to the live view         |
-| `ctrl-t`       | Leave the pane                                 |
-| anything else  | Abandons the prefix; the key reaches the child |
+| After `ctrl-t`   | Pinetop action                                  |
+| ---------------- | ----------------------------------------------- |
+| `k` / `j`        | Back / forward one line                         |
+| `u` / `d`        | Back / forward one page                         |
+| `g` / `G`        | Top of history / back to the live view          |
+| `tab`            | Next pane                                       |
+| `shift-tab`      | Previous pane                                   |
+| `ctrl-t` / `esc` | Resume the child without leaving the shell pane |
+| anything else    | Abandon the prefix; the key reaches the child   |
 
-1000 lines of history are kept. While you are scrolled the border reads `↑ 47 ·
-ctrl-t G to follow`, because a pane showing old output while the child keeps working
-would otherwise look frozen — and typing anything returns to the live view, since
-input you cannot see the result of is worse than losing your place.
+1000 lines of normal-screen history are kept. While you are scrolled the border
+reads `SCROLL ↑ 47`, and the hint strip shows `G live`; typing anything returns
+to the live view, since input whose result you cannot see is worse than losing
+your place.
 
-Scrollback is a normal-screen thing. On the alternate screen — `vim`, `htop`, `less` —
-there is no history to show and the scroll keys do nothing, which is what a real
-terminal does too.
+On the alternate screen — used by `vim`, `htop`, `less`, and interactive agent
+CLIs — the application owns its history. If it negotiated mouse scrolling,
+`k`/`j`/`u`/`d` in `ctrl-t` mode become wheel gestures and the border reads
+`APP SCROLL`; otherwise the border reads `CONTROL`. Width controls and the two
+pane-navigation sequences work in both modes.
 
-That `esc` split is deliberate. At a prompt `esc` does nothing, so it is a cheap
-way out; but once the child switches to the alternate screen — vim, `htop`,
-`less` — `esc` is the key that program most needs, so it goes to the child and
-`ctrl-t` becomes the only exit. The pane's border says which is which: it reads
-`esc / ctrl-t leaves` at a prompt and `ctrl-t leaves` when a full-screen app has
-taken over.
+The `esc` split is deliberate. At a prompt `esc` does nothing, so it is a cheap
+way back to the pane that opened the shell. Once a child switches to the alternate
+screen, `esc` is the key that program most needs, so it goes to the child and the
+`ctrl-t` prefix is the guaranteed route back to Pinetop.
 
-Leaving does not kill the shell — focus returns to the pane you came from and the
-session keeps running, so `t` comes back to the same prompt with your history and
-working directory intact. (It returns you to the _buffer_ only if that is where you
-opened it from; landing in the buffer by accident would turn every shortcut into a
-vim command.)
+Changing panes does not kill the shell. `ctrl-t` then `tab`/`shift-tab` follows
+the normal focus-ring direction; prompt-level `esc` returns to the pane that
+opened the shell. The session keeps running, so `t` comes back to the same prompt
+with its history and working directory intact.
 
 **To close it completely, end the shell: `ctrl-d`, or `exit`.** The column
 disappears the moment the child does — there is nothing left to look at — and focus

@@ -115,7 +115,7 @@ export interface ConfigPaneOptions {
   command: CommandId;
   paneId?: string;
   title?: string;
-  /** Action chips on the bottom row. Defaults to RUN / ASK / palette. */
+  /** Action chips on the bottom row. Defaults to run, edit, and flag controls. */
   actions?: string[];
 }
 
@@ -219,7 +219,7 @@ export function drawConfigPane(ctx: PageContext, rect: Rect, opts: ConfigPaneOpt
   // row, which always has room.
   const chips = opts.actions ?? [
     'RUN r',
-    focused ? '↵ edit' : 'ASK a',
+    ...(focused ? ['↵ edit'] : []),
     hidden > 0 ? `. +${hidden}` : state.showAdvanced ? '. fewer' : ': cmd',
   ];
   let x = inner.x;

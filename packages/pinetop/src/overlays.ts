@@ -1,9 +1,7 @@
 /**
- * Overlays: help, the run dialog, the command palette, the filter line, and the
- * Ask drawer.
+ * Overlays: help, the run dialog, the command palette, and the filter line.
  *
- * All of them paint over the frame rather than displacing it (§4.5.a for the
- * drawer specifically, and the same reasoning for the rest): width is the scarce
+ * They paint over the frame rather than displacing it: width is the scarce
  * resource on this surface, and a panel that permanently costs columns changes
  * what the page can show even when it is closed.
  */
@@ -338,14 +336,6 @@ export function paletteItems(): PaletteItem[] {
       action: { kind: 'edit-external' },
     },
     {
-      label: 'ask pinetop',
-      hint: 'open the AI prompt drawer',
-      run: (state) => {
-        state.ask.open = true;
-        return undefined;
-      },
-    },
-    {
       // This used to be `w`. Pages are reached by their ordinal now (§4.2.i), and
       // this was never merely a page switch: it copies the sweep's axes into
       // walkforward, which is an edit, and an edit belongs somewhere it has to be
@@ -648,9 +638,9 @@ export function errorHeight(state: AppState): number {
  * only half kept: the last error line went to the status strip, where it was
  * truncated to whatever space the hints left, and the rest sat in the engine log
  * on a page you had to know to open. A run that exits non-zero is the one thing
- * the user most needs to read, so it gets a drawer of its own — over the bottom
- * of the frame like the Ask drawer (§4.5.a), for the same reason: width is scarce
- * and a permanent panel would cost columns even when nothing has failed.
+ * the user most needs to read, so it gets a drawer of its own over the bottom of
+ * the frame: width is scarce and a permanent panel would cost columns even when
+ * nothing has failed.
  *
  * It appears on its own, because an error you have to ask for is an error you
  * will miss, and it stays until `esc` — unlike the read-only overlays, which any
@@ -692,122 +682,4 @@ export function drawError(screen: Screen, state: AppState, offset = 0): void {
       ? `esc dismiss · ${hidden} more ${trouble.kind === 'failed' ? 'in the engine log (LOGS)' : 'not shown'}`
       : trouble.hint;
   screen.text(inner.x, inner.y + inner.h - 1, truncate(hint, inner.w), STYLE.muted, inner);
-}
-
-/** Rows the Ask drawer needs, so the frame can reserve them (§4.5.a). */
-export function askHeight(state: AppState): number {
-  if (!state.ask.open) return 0;
-  const proposal = state.ask.pending;
-  const base = 6;
-  return proposal == null ? base : base + 3 + proposal.edits.length;
-}
-
-/**
- * The Ask drawer: a prompt line, the last answer, and — when one came back — the
- * pending proposal as a reviewable diff. Nothing here is applied without a
- * keypress (§4.5.c): `↵` applies, `ctrl-x` rejects.
- */
-export function drawAsk(
-  screen: Screen,
-  state: AppState,
-  providerLabel: string,
-  remote: boolean,
-): void {
-  const height = askHeight(state);
-  if (height === 0) return;
-
-  const rect: Rect = { x: 0, y: screen.rows - 2 - height, w: screen.cols, h: height };
-  clear(screen, rect);
-  const inner = drawPane(screen, rect, {
-    title: '◆ ASK PINETOP',
-    focused: true,
-    // §9 — if the model runs remotely, the UI says so before first use.
-    legend: remote ? `${providerLabel} · sends derived metrics only` : providerLabel,
-  });
-  if (inner.h <= 0) return;
-
-  let y = inner.y;
-
-  const last = state.ask.transcript.at(-1);
-  if (state.ask.busy) {
-    screen.text(inner.x, y, 'thinking…', STYLE.muted, inner);
-    y += 1;
-  } else if (state.ask.error != null) {
-    screen.text(inner.x, y, truncate(state.ask.error, inner.w), STYLE.error, inner);
-    y += 1;
-  } else if (last != null) {
-    // The answer wraps across the drawer's rows rather than being cut at one.
-    const words = last.answer.split(/\s+/);
-    let line = '';
-    const maxLines = state.ask.pending == null ? inner.h - 2 : 2;
-    let drawn = 0;
-    for (const word of words) {
-      if (displayWidth(line) + word.length + 1 > inner.w) {
-        screen.text(inner.x, y, line, STYLE.none, inner);
-        y += 1;
-        drawn += 1;
-        line = '';
-        if (drawn >= maxLines) break;
-      }
-      line = line === '' ? word : `${line} ${word}`;
-    }
-    if (line !== '' && drawn < maxLines) {
-      screen.text(inner.x, y, line, STYLE.none, inner);
-      y += 1;
-    }
-  }
-
-  const proposal = state.ask.pending;
-  if (proposal != null) {
-    y += 1;
-    screen.text(inner.x, y, truncate(proposal.effect, inner.w), STYLE.pending, inner);
-    y += 1;
-    if (proposal.note !== '') {
-      screen.text(inner.x, y, truncate(proposal.note, inner.w), STYLE.muted, inner);
-      y += 1;
-    }
-    for (const edit of proposal.edits) {
-      if (y >= inner.y + inner.h - 1) break;
-      screen.text(inner.x, y, '● ', STYLE.pending, inner);
-      screen.text(inner.x + 2, y, truncate(edit.display, inner.w - 24), STYLE.none, inner);
-      screen.text(
-        inner.x + inner.w - 22,
-        y,
-        truncate(`--input ${edit.input}=${edit.to}`, 22),
-        STYLE.muted,
-        inner,
-      );
-      y += 1;
-    }
-    screen.text(
-      inner.x,
-      inner.y + inner.h - 1,
-      '↵ apply · ctrl-x reject — nothing changes until you press one',
-      STYLE.pending,
-      inner,
-    );
-    return;
-  }
-
-  if (state.ask.action != null) {
-    screen.text(
-      inner.x,
-      inner.y + inner.h - 1,
-      truncate(`suggested: ${state.ask.action.label}  (press ${state.ask.action.key})`, inner.w),
-      STYLE.accent,
-      inner,
-    );
-    return;
-  }
-
-  const promptY = inner.y + inner.h - 1;
-  screen.text(inner.x, promptY, '›', STYLE.accent, inner);
-  screen.text(inner.x + 2, promptY, truncate(state.ask.input, inner.w - 4), STYLE.none, inner);
-  screen.text(
-    inner.x + 2 + displayWidth(truncate(state.ask.input, inner.w - 4)),
-    promptY,
-    '█',
-    STYLE.accent,
-    inner,
-  );
 }

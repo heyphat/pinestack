@@ -85,6 +85,8 @@ export class TermSession {
   private anchor: number | null = null;
   /** Alt-screen state as of the last poll, to spot the transition out of it. */
   private wasAltScreen = false;
+  /** Whether the child selected SGR (1006) mouse reports. */
+  private sgrMouse = false;
 
   constructor(opts: TermSessionOptions) {
     installWarningSink();
@@ -102,6 +104,33 @@ export class TermSession {
       scrollback: 1000,
     });
     this.pty = spawnPty({ argv: opts.argv, cwd: opts.cwd, size: this.size });
+
+    // Full-screen programs own their history rather than putting it in xterm's
+    // normal scrollback. Modern TUIs can still be scrolled by a terminal wheel,
+    // but a wheel report is only valid in the encoding the child negotiated.
+    // Track SGR mouse mode (1006) alongside xterm's public tracking mode so the
+    // pane can synthesize protocol-correct wheel gestures without guessing.
+    for (const final of ['h', 'l']) {
+      this.subscriptions.push(
+        this.emulator.parser.registerCsiHandler({ prefix: '?', final }, (params) => {
+          const modes = params.flatMap((value) => (Array.isArray(value) ? value : [value]));
+          if (final === 'h' && modes.includes(1006)) this.sgrMouse = true;
+          if (final === 'l' && (modes.includes(1006) || modes.includes(1049))) {
+            this.sgrMouse = false;
+          }
+          // Observe only. Returning false lets xterm's built-in DECSET/DECRST
+          // handler update the buffer and its public mode state as usual.
+          return false;
+        }),
+      );
+    }
+    this.subscriptions.push(
+      this.emulator.parser.registerEscHandler({ final: 'c' }, () => {
+        // RIS resets every terminal mode, including the mouse protocol.
+        this.sgrMouse = false;
+        return false;
+      }),
+    );
 
     // The reply channel, and it is not optional.
     //
@@ -126,11 +155,13 @@ export class TermSession {
     // group (it reports 0 forever — see below), flushing the write queue at the
     // hand-over (the successor can read first), and invalidating replies when the
     // alternate screen is torn down (the query can precede the teardown by more than
-    // one poll). The clean fix is a real controlling terminal, which needs `setsid`
-    // before `exec` plus `TIOCSCTTY` — the first is unavailable through `Bun.spawn`
-    // and the second is the variadic `ioctl` that `pty.ts` documents as unusable on
-    // Apple arm64. With no controlling terminal there is no job control, every job
-    // runs in the shell's own process group, and `tcgetpgrp` cannot tell them apart.
+    // one poll). A fully addressable reply channel needs the slave to be the session's
+    // controlling terminal. The detached spawn in `pty.ts` creates the session and,
+    // critically, prevents the child from inheriting pinetop's outer terminal, but
+    // adopting the slave would still require `TIOCSCTTY` — the variadic `ioctl` that
+    // `pty.ts` documents as unusable on Apple arm64. With no controlling terminal
+    // there is no job control, every job runs in the shell's own process group, and
+    // `tcgetpgrp` cannot tell them apart.
     this.subscriptions.push(this.emulator.onData((data) => this.pty.write(data)));
     this.subscriptions.push(
       this.emulator.onBinary((data) => {
@@ -231,6 +262,38 @@ export class TermSession {
 
   get atBottom(): boolean {
     return this.scrolledLines === 0;
+  }
+
+  /**
+   * Whether a full-screen child asked for SGR mouse reports and can therefore
+   * receive synthetic wheel gestures from the pane's SCROLL mode.
+   */
+  get applicationScrollAvailable(): boolean {
+    return (
+      !this.closed &&
+      this.finishedWith == null &&
+      this.altScreen &&
+      this.sgrMouse &&
+      this.emulator.modes.mouseTrackingMode !== 'none'
+    );
+  }
+
+  /**
+   * Ask a full-screen child to scroll using SGR mouse-wheel reports.
+   *
+   * Negative steps move up and positive steps move down. Coordinates target the
+   * middle of the pane rather than the prompt at its bottom, which matters to TUIs
+   * with independently scrollable regions. The cap keeps a coalesced or malformed
+   * input chunk from flooding the child with an unbounded report burst.
+   */
+  scrollApplication(steps: number): boolean {
+    if (!this.applicationScrollAvailable || !Number.isFinite(steps) || steps === 0) return false;
+    const count = Math.min(64, Math.max(1, Math.floor(Math.abs(steps))));
+    const button = steps < 0 ? 64 : 65;
+    const x = Math.max(1, Math.ceil(this.size.cols / 2));
+    const y = Math.max(1, Math.ceil(this.size.rows / 2));
+    this.pty.write(`\x1b[<${button};${x};${y}M`.repeat(count));
+    return true;
   }
 
   /**

@@ -237,7 +237,7 @@ export const sweepPage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'sweep');
-    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === STRATEGIES_PANE) return strategyRowCount(state);
     if (paneId === 'inputs') return axisRows(state, 'sweep').length;
     if (paneId === 'config') return configRowCount(state, 'sweep');
     if (paneId === 'ranked') return rankedRows(state).length;
@@ -315,7 +315,7 @@ export const sweepPage: Page = {
     drawAxisPane(ctx, inputsRect, 'sweep');
     // `WF w` was here until the walkforward hand-off moved into the palette
     // (§4.2.i): the chips name real keys, so it names the palette instead.
-    drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'ASK a', ': WF'] });
+    drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', ': WF'] });
     drawHistoryPane(ctx, histRect, 'sweep');
     drawRanked(ctx, rankedCol);
     if (heatH > 0) drawHeatmap(ctx, surfaceRect);

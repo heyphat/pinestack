@@ -258,7 +258,7 @@ export const walkforwardPage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'walkforward');
-    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === STRATEGIES_PANE) return strategyRowCount(state);
     if (paneId === 'inputs') return axisRows(state, 'walkforward').length;
     if (paneId === 'config') return configRowCount(state, 'walkforward');
     if (paneId === 'windows') return windowRows(state).length;
@@ -337,7 +337,7 @@ export const walkforwardPage: Page = {
     drawHistoryPane(ctx, histRect, 'walkforward');
     drawConfigPane(ctx, configRect, {
       command: 'walkforward',
-      actions: ['RUN r', 'ASK a', ': cmd'],
+      actions: ['RUN r', ': cmd'],
     });
     drawWindows(ctx, midCol);
     if (railW > 0) drawVerdict(ctx, rightCol);

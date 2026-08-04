@@ -29,12 +29,6 @@ the piner engine. Of particular interest:
   schema by construction, and it redacts them from the command line it echoes and
   from `.pinetop/session.jsonl`. A way to get a key onto that screen or into that
   file is in scope.
-- **What the AI layer sends** — `pinetop`'s Ask drawer is opt-in and is supposed
-  to send derived report metrics and the flags only: never OHLCV bars, never Pine
-  source, never credentials. A path that widens that payload is in scope. A
-  proposal it returns can only change a Pine `input()` the loaded script actually
-  declares, and only after a keypress; a way to mutate the config or start a run
-  without one is in scope.
 - **Untrusted Pine source** — `pinerun` compiles and runs arbitrary Pine
   scripts via piner. Ways a crafted script can escape piner's sandbox, exhaust
   resources, or reach the host through the orchestration layer (workers,

@@ -81,6 +81,69 @@ without being announced as a release.
   synchronization guard. Opting out takes an explicit
   `requireExecutionSafety: false`.
 
+## [0.9.3] - 2026-08-04
+
+`pinetop` only — no `pinerun`, `pinery`, or `pinelive` behaviour changes, and no
+`--json` contract moves.
+
+### Added
+
+- **The shell column's width is adjustable.** In `ctrl-t` mode, `>` and `<` grow
+  and shrink the pane four columns at a time and `=` returns it to the
+  responsive default. The choice lasts for the pinetop session, and growth is
+  clamped so the source buffer never drops below the 45 columns it would have
+  had when the pane first fit.
+
+- **EDITOR's FILES pane now includes a project tree, Markdown, and Git state.**
+  Lowercase `.pine` and `.md` files are grouped into expandable folder rows;
+  `j`/`k` moves through visible rows, `↵` toggles folders or opens files, and
+  `←`/`→` navigates parents and children. Markdown is rendered as plain text and
+  remains excluded from runnable strategy and `input()` discovery. In a Git
+  worktree, FILES shows a changed count plus per-path `M` / `A` / `D` / `R` / `?`
+  / `U` badges; a collapsed folder retains a dot and hidden-change count, while
+  the existing final `+` continues to mean an unwritten in-memory buffer. Git
+  detection is asynchronous, bounded, and disappears cleanly outside
+  repositories; full hunks remain available in the adjacent shell via
+  `git diff`.
+
+- **FILES and every command-page STRATEGIES picker are searchable in place.** An
+  always-visible row accepts `/`, live case-insensitive file-name or relative-path
+  filtering, `ctrl-u` to clear, `↵` to keep the filter, and `esc` to remove it.
+  Matching FILES ancestors open temporarily without changing collapsed-folder
+  state, while the Pine-only STRATEGIES query follows the user across all six
+  command pages. STRATEGIES is one row taller so the new field does not reduce
+  the useful script list.
+
+### Removed
+
+- **The unused Ask drawer and global `a` binding are gone.** The packaged CLI
+  never configured an Ask provider, so the drawer could only open a dead prompt.
+  Interactive assistants now run in the editor's shell pane instead; shared
+  pending config edits and `ctrl-x` rollback remain available.
+
+### Fixed
+
+- **The shell pane can no longer trap focus inside a full-screen CLI.** Claude,
+  Codex, Kiro, vim and similar programs keep their own `esc` and plain `tab`,
+  while `ctrl-t` then `tab` now moves to the next Pinetop pane and `ctrl-t` then
+  `shift-tab` moves to the previous one. The border, hint strip and help now show
+  the complete sequence instead of implying that `ctrl-t` or plain `tab` leaves.
+
+- **Scrolling a full-screen program in the shell pane now scrolls the program.**
+  The alternate screen keeps no terminal history, so SCROLL mode's keys used to
+  do nothing under `claude`, `vim` or `htop`. When the child negotiated SGR
+  mouse tracking, `k`/`j`/`u`/`d` in `ctrl-t` mode are now delivered as the
+  wheel gestures it asked for, and the program moves through the history it
+  owns — the border reads `APP SCROLL` and the hint strip swaps to `app line` /
+  `app page`. A full-screen child without mouse tracking shows `CONTROL`
+  instead: the width keys and the exits still work, and everything else resumes
+  the child.
+
+- **A program in the shell pane no longer shares pinetop's controlling
+  terminal.** The child is now spawned into its own session, so a nested
+  `ctrl-c` can no longer trip job control on the outer terminal and stop both
+  the shell and the program it was running.
+
 ## [0.9.2] - 2026-08-04
 
 `pinetop` only — no `pinerun`, `pinery`, or `pinelive` behaviour changes, and no
@@ -700,7 +763,8 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
-[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.1...HEAD
+[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/heyphat/pinestack/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/heyphat/pinestack/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/heyphat/pinestack/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/heyphat/pinestack/compare/v0.8.0...v0.9.0

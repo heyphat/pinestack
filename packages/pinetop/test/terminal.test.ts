@@ -31,8 +31,11 @@ import {
 } from '../src/term/pane.js';
 
 /** A Terminal that renders nowhere: the App only needs size and the hooks. */
-function stubTerminal(cols = 168, rows = 46): Terminal {
+type StubTerminal = Terminal & { emitRaw(chunk: string): boolean };
+
+function stubTerminal(cols = 168, rows = 46): StubTerminal {
   const keyHandlers = new Set<(key: Key) => void>();
+  const rawHandlers = new Set<(chunk: string) => boolean>();
   return {
     size: { cols, rows } as TerminalSize,
     isTTY: true,
@@ -43,13 +46,20 @@ function stubTerminal(cols = 168, rows = 46): Terminal {
       keyHandlers.add(handler);
       return () => keyHandlers.delete(handler);
     },
-    onRaw() {
-      return () => {};
+    onRaw(handler: (chunk: string) => boolean) {
+      rawHandlers.add(handler);
+      return () => rawHandlers.delete(handler);
+    },
+    emitRaw(chunk: string) {
+      for (const handler of rawHandlers) {
+        if (handler(chunk)) return true;
+      }
+      return false;
     },
     onResizeEvent() {
       return () => {};
     },
-  } as unknown as Terminal;
+  } as unknown as StubTerminal;
 }
 
 /** A session stand-in for the routing tests, which care about three booleans. */
@@ -83,7 +93,7 @@ describe('who owns a keystroke in the shell pane', () => {
     for (const altScreen of [false, true]) {
       const { pane, sent } = fakePane({ altScreen });
       expect(routeRawKey(pane, '\x14')).toEqual({ kind: 'pane' });
-      expect(routeRawKey(pane, '\t')).toEqual({ kind: 'leave', reason: 'hatch' });
+      expect(routeRawKey(pane, '\t')).toEqual({ kind: 'leave', reason: 'hatch', direction: 1 });
       // The child must never see either, or a program binding them could make the
       // pane inescapable.
       expect(sent).toEqual([]);
@@ -106,12 +116,12 @@ describe('who owns a keystroke in the shell pane', () => {
 
   test('the keys the app normally binds all go to the child', () => {
     const { pane, sent } = fakePane();
-    // ctrl-c is quit, tab is focus-next, space is the page prefix, ctrl-p is the
-    // palette, and `t` is the key that opened this pane. A shell needs every one.
-    for (const chunk of ['\x03', '\t', ' ', '\x10', 'q', '1', 'j', 't']) {
+    // ctrl-c is quit, tab/shift-tab move focus, space is the page prefix, ctrl-p
+    // is the palette, and `t` is the key that opened this pane. A shell needs all.
+    for (const chunk of ['\x03', '\t', '\x1b[Z', ' ', '\x10', 'q', '1', 'j', 't']) {
       expect(routeRawKey(pane, chunk)).toEqual({ kind: 'sent' });
     }
-    expect(sent).toEqual(['\x03', '\t', ' ', '\x10', 'q', '1', 'j', 't']);
+    expect(sent).toEqual(['\x03', '\t', '\x1b[Z', ' ', '\x10', 'q', '1', 'j', 't']);
   });
 
   test('an escape sequence is forwarded whole, not read as a bare esc', () => {
@@ -127,7 +137,7 @@ describe('who owns a keystroke in the shell pane', () => {
     expect(routeRawKey(pane, 'x')).toEqual({ kind: 'ignored' });
     expect(sent).toEqual([]);
     routeRawKey(pane, '\x14');
-    expect(routeRawKey(pane, '\t')).toEqual({ kind: 'leave', reason: 'hatch' });
+    expect(routeRawKey(pane, '\t')).toEqual({ kind: 'leave', reason: 'hatch', direction: 1 });
   });
 
   test('no session means nothing is routed', () => {
@@ -582,8 +592,8 @@ describe.if(ptyWorks)('a real child on a real pty', () => {
  * symptom is "the shortcuts stopped working on the editor page", and the cause is
  * two panes away from it.
  */
-describe('leaving the shell returns focus where it came from', () => {
-  function appOn(focus: string, cols = 168): { app: App; state: AppState } {
+describe('leaving or navigating away from the shell', () => {
+  function appOn(focus: string, cols = 168): { app: App; state: AppState; terminal: StubTerminal } {
     const state = initialState();
     state.page = 'editor';
     state.panes.editor.focus = focus;
@@ -607,54 +617,56 @@ describe('leaving the shell returns focus where it came from', () => {
         dispose() {},
       } as never,
     };
-    const app = new App({ terminal: stubTerminal(cols), state, cwd: '/tmp/pinetop-test' });
-    return { app, state };
+    const terminal = stubTerminal(cols);
+    const app = new App({ terminal, state, cwd: '/tmp/pinetop-test' });
+    app.start();
+    return { app, state, terminal };
   }
 
-  test('from FILES, t goes to the shell and back to FILES', () => {
-    const { app, state } = appOn('files');
+  test('from FILES, ctrl-t then tab wraps to FILES through the raw path', () => {
+    const { app, state, terminal } = appOn('files');
     app.onKey({ name: 't', text: 't' });
     expect(state.panes.editor.focus).toBe(TERMINAL_PANE);
-    app.onKey({ name: 'ctrl-t' });
+    expect(terminal.emitRaw('\x14\t')).toBe(true);
     // Not 'editor': landing in the buffer is what broke every other shortcut.
     expect(state.panes.editor.focus).toBe('files');
   });
 
-  test('from INPUTS, it returns to INPUTS', () => {
-    const { app, state } = appOn('inputs');
+  test('from the terminal, ctrl-t then shift-tab moves backward to INPUTS', () => {
+    const { app, state, terminal } = appOn('inputs');
     app.onKey({ name: 't', text: 't' });
     expect(state.panes.editor.focus).toBe(TERMINAL_PANE);
-    app.onKey({ name: 'ctrl-t' });
+    expect(terminal.emitRaw('\x14\x1b[Z')).toBe(true);
     expect(state.panes.editor.focus).toBe('inputs');
   });
 
-  test('from the buffer it does return to the buffer — that entry was deliberate', () => {
-    const { app, state } = appOn('editor');
+  test('prompt esc still returns to the pane that deliberately opened the shell', () => {
+    const { app, state, terminal } = appOn('editor');
     // `ctrl-t`, because a bare `t` in the buffer is the till motion.
     app.onKey({ name: 'ctrl-t' });
     expect(state.panes.editor.focus).toBe(TERMINAL_PANE);
-    app.onKey({ name: 'ctrl-t' });
+    expect(terminal.emitRaw('\x1b')).toBe(true);
     expect(state.panes.editor.focus).toBe('editor');
   });
 
-  test('a second ctrl-t inside the shell cannot make the shell its own exit', () => {
-    const { app, state } = appOn('files');
+  test('prefix navigation cannot make the shell its own return target', () => {
+    const { app, state, terminal } = appOn('files');
     app.onKey({ name: 't', text: 't' });
     expect(state.terminal.returnTo).toBe('files');
     // Leave and re-enter twice; the remembered pane must not drift to 'terminal'.
-    app.onKey({ name: 'ctrl-t' });
+    terminal.emitRaw('\x14\t');
     app.onKey({ name: 't', text: 't' });
     expect(state.terminal.returnTo).toBe('files');
-    app.onKey({ name: 'ctrl-t' });
+    terminal.emitRaw('\x14\t');
     expect(state.panes.editor.focus).toBe('files');
   });
 
-  test('pane accelerators work again after leaving', () => {
+  test('pane accelerators work again after prefix navigation', () => {
     // The user-visible symptom, end to end: leave the shell, then press the
     // INPUTS accelerator and land on INPUTS rather than typing into the buffer.
-    const { app, state } = appOn('files');
+    const { app, state, terminal } = appOn('files');
     app.onKey({ name: 't', text: 't' });
-    app.onKey({ name: 'ctrl-t' });
+    terminal.emitRaw('\x14\t');
     app.onKey({ name: 'i', text: 'i' });
     expect(state.panes.editor.focus).toBe('inputs');
     // And the buffer is untouched — nothing was typed into the Pine source.
@@ -845,14 +857,18 @@ describe('SCROLL mode', () => {
   test('tab leaves the pane, which is what tab means everywhere else', () => {
     const { pane } = fakePane({ altScreen: true });
     routeRawKey(pane, PREFIX);
-    expect(routeRawKey(pane, '\t')).toEqual({ kind: 'leave', reason: 'hatch' });
+    expect(routeRawKey(pane, '\t')).toEqual({ kind: 'leave', reason: 'hatch', direction: 1 });
     expect(pane.scrolling).toBe(false);
   });
 
   test('shift-tab is one key, not esc followed by letters', () => {
     const { pane, sent } = fakePane();
     routeRawKey(pane, PREFIX);
-    expect(routeRawKey(pane, '\x1b[Z')).toEqual({ kind: 'leave', reason: 'hatch' });
+    expect(routeRawKey(pane, '\x1b[Z')).toEqual({
+      kind: 'leave',
+      reason: 'hatch',
+      direction: -1,
+    });
     expect(sent).toEqual([]);
   });
 

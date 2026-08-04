@@ -10,30 +10,33 @@
  * the rule every other pane follows. A shell needs `ctrl-c`, `tab`, `space` and
  * `ctrl-p` — all four of which the app binds — so a pane that hands any of them
  * back is a pane you cannot use. So this one takes the keyboard completely, and
- * buys back exactly two ways out:
+ * buys back one reserved control prefix plus a prompt-only shortcut:
  *
- *  - **`ctrl-t`** enters SCROLL mode and is reserved — the child never sees it. The
- *    mode is sticky rather than a one-shot prefix, because scrolling is repetitive
- *    by nature and re-arming a prefix for every line is the kind of friction that
- *    stops people using the scrollback at all. Inside it `k j u d g G` move through
- *    the history as often as you like, `tab` leaves the pane, and `esc` or `ctrl-t`
- *    hands the keyboard back to the child.
+ *  - **`ctrl-t`** enters SCROLL/CONTROL mode and is reserved — the child never
+ *    sees it. The mode is sticky rather than a one-shot prefix, because scrolling
+ *    is repetitive by nature and re-arming a prefix for every line is the kind of
+ *    friction that stops people using the scrollback at all. At a shell prompt
+ *    `k j u d g G` move through xterm's retained history. A full-screen program
+ *    has no such terminal history, so if it negotiated SGR mouse tracking
+ *    `k j u d` become wheel gestures and the program scrolls its own content.
+ *    `tab` advances to the next Pinetop pane, `shift-tab` moves to the previous
+ *    pane, and `esc` or a second `ctrl-t` hands the keyboard back to the child.
  *
- *    A mode is a promise that keys mean something different, so it is stated on the
- *    border for as long as it lasts. It also falls out of the way: any key it does
- *    not define ends it *and reaches the child*, so resuming work costs nothing and
- *    no keystroke is lost — type `ls` while scrolled and you get `ls`, not `s`. The
- *    accepted cost is that a mistyped key ends the mode silently, which is the right
- *    way round for something you are in for a few seconds at a time.
+ *    A mode is a promise that keys mean something different, so it is stated on
+ *    the border for as long as it lasts. It also falls out of the way: any key it
+ *    does not define ends it *and reaches the child*, so resuming work costs
+ *    nothing and no keystroke is lost — type `ls` while scrolled and you get `ls`,
+ *    not `s`. The accepted cost is that a mistyped key ends the mode silently,
+ *    which is the right way round for something you are in briefly.
  *  - **`esc`** returns to the frame too, *unless* the child is on the alternate
  *    screen — which is the signal that a full-screen program (vim, htop, less)
  *    is running and wants `esc` for itself. Without that carve-out `esc` would be
  *    swallowed before vim ever saw it; with it, the cheap exit still works at a
  *    shell prompt where `esc` does nothing anyway.
  *
- * The pane is *entered* with a bare `t` from anywhere in the frame; `ctrl-t` is
- * the same toggle for the two places a letter cannot reach (the EDITOR buffer,
- * and this pane).
+ * The pane is entered with a bare `t` from the frame, or `ctrl-t` from the EDITOR
+ * buffer where `t` is a motion. Once the shell has focus, `ctrl-t` is the control
+ * prefix; `ctrl-t` then `tab`/`shift-tab` is the guaranteed path back to Pinetop.
  */
 
 import { drawPane, type Rect, type Screen } from '../render/screen.js';
@@ -44,7 +47,7 @@ import type { TermSession } from './session.js';
 /** The pane's id in the focus ring and the layout. */
 export const TERMINAL_PANE = 'terminal';
 
-/** The key that always gets you out, even mid-vim. Reserved from the child. */
+/** The prefix that always reclaims the keyboard, even mid-full-screen app. */
 export const ESCAPE_HATCH = 'ctrl-t';
 
 /** The key that opens the pane from the frame, where a bare letter is free. */
@@ -54,7 +57,7 @@ export const TERMINAL_KEY = 't';
 const ESCAPE_HATCH_BYTE = '\x14';
 const ESC = '\x1b';
 
-/** `tab`, which leaves the pane from SCROLL mode — the focus-ring key everywhere else. */
+/** Focus-ring navigation, available after the reserved `ctrl-t` prefix. */
 const TAB = '\t';
 const SHIFT_TAB = '\x1b[Z';
 
@@ -70,6 +73,30 @@ const SCROLL_KEYS: Readonly<Record<string, (session: TermSession) => boolean>> =
   g: (s) => s.scrollToTop(),
   G: (s) => s.scrollToBottom(),
 };
+
+/**
+ * Alternate-screen programs have no emulator scrollback; when one negotiated SGR
+ * mouse tracking, these commands become wheel gestures owned by the program.
+ */
+const APPLICATION_SCROLL_KEYS: Readonly<Record<string, (session: TermSession) => boolean>> = {
+  k: (s) => s.scrollApplication(-1),
+  j: (s) => s.scrollApplication(1),
+  // A wheel detent commonly moves three rows. Send enough for approximately one
+  // pane while leaving the exact movement to the full-screen application.
+  u: (s) => s.scrollApplication(-Math.max(1, Math.ceil((s.rows - 1) / 3))),
+  d: (s) => s.scrollApplication(Math.max(1, Math.ceil((s.rows - 1) / 3))),
+};
+
+/** One width command moves the outer pane by this many terminal columns. */
+const TERMINAL_WIDTH_STEP = 4;
+
+/** Widths computed by the last visible editor layout. */
+export interface TerminalPaneWidth {
+  automatic: number;
+  minimum: number;
+  maximum: number;
+  rendered: number;
+}
 
 export interface TerminalPaneState {
   /**
@@ -87,6 +114,16 @@ export interface TerminalPaneState {
   visible: boolean;
   session: TermSession | null;
   /**
+   * User-selected outer pane width. Absent means the responsive default; keeping
+   * it here makes the choice last for this Pinetop session without persisting it.
+   */
+  preferredWidth?: number;
+  /**
+   * Responsive default, bounds, and effective width from the last visible frame.
+   * Raw input needs all four so coalesced commands behave like separate keypresses.
+   */
+  width?: TerminalPaneWidth;
+  /**
    * The pane that had focus when the shell took it, restored on the way out.
    *
    * Leaving cannot simply go to the buffer. The buffer claims the whole keyboard,
@@ -98,7 +135,8 @@ export interface TerminalPaneState {
    */
   returnTo: string;
   /**
-   * SCROLL mode: the keyboard drives the scrollback instead of the child.
+   * SCROLL mode: the keyboard drives retained shell history, or asks a
+   * mouse-aware full-screen child to move through the history it owns.
    *
    * Kept on the state rather than in a closure so the border can advertise it for as
    * long as it lasts. A mode nobody can see is a keyboard that has silently stopped
@@ -131,7 +169,8 @@ export function initialTerminalPane(): TerminalPaneState {
  */
 export type TerminalKeyVerdict =
   | { kind: 'sent' }
-  | { kind: 'leave'; reason: 'hatch' | 'escape' }
+  | { kind: 'leave'; reason: 'hatch'; direction: 1 | -1 }
+  | { kind: 'leave'; reason: 'escape' }
   /** Taken by the pane itself — arming the prefix, or scrolling. Repaint. */
   | { kind: 'pane' }
   | { kind: 'ignored' };
@@ -156,20 +195,24 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
   let rest = chunk;
   let took = false;
   let sent = false;
-  let leaving: 'hatch' | 'escape' | null = null;
+  let layoutChanged = false;
+  const width = state.width;
+  const clampWidth = (value: number): number =>
+    width == null ? value : Math.min(width.maximum, Math.max(width.minimum, value));
+  let workingWidth = width?.rendered ?? 0;
+  let leaving: { reason: 'hatch'; direction: 1 | -1 } | { reason: 'escape' } | null = null;
 
   while (rest.length > 0 && leaving == null) {
     if (state.scrolling === true) {
       const key = nextKey(rest);
       rest = rest.slice(key.length);
 
-      // `tab` is the way out of the pane from here, which is what `tab` means on
-      // every other pane in the app. It has to be *some* key: `esc` and `ctrl-t`
-      // are spent on leaving the mode, and a full-screen child keeps `esc` for
-      // itself, so without this there would be no exit from a vim in the pane.
+      // Once the prefix has reclaimed the keyboard, Tab follows the same focus-ring
+      // direction as every other pane. Keeping both directions here means a
+      // full-screen child cannot trap focus without losing either Tab for itself.
       if (key === TAB || key === SHIFT_TAB) {
         state.scrolling = false;
-        leaving = 'hatch';
+        leaving = { reason: 'hatch', direction: key === TAB ? 1 : -1 };
         break;
       }
       if (key === ESCAPE_HATCH_BYTE || key === ESC) {
@@ -180,10 +223,39 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
         took = true;
         continue;
       }
+      if (key === '=') {
+        state.preferredWidth = undefined;
+        workingWidth = width?.automatic ?? workingWidth;
+        layoutChanged = true;
+        took = true;
+        continue;
+      }
+      if (key === '<' || key === '>') {
+        // Apply and clamp every byte as though it had rendered separately. Terminal
+        // reads freely coalesce held keys, and chunk boundaries must not change the
+        // final width — especially at a bound or after `=` rebases to the default.
+        if (workingWidth > 0) {
+          const delta = key === '<' ? -TERMINAL_WIDTH_STEP : TERMINAL_WIDTH_STEP;
+          workingWidth = clampWidth(workingWidth + delta);
+          state.preferredWidth = workingWidth;
+        }
+        layoutChanged = true;
+        took = true;
+        continue;
+      }
       const scroll = SCROLL_KEYS[key];
       if (scroll != null) {
-        scroll(session);
-        took = true;
+        const applicationScroll = APPLICATION_SCROLL_KEYS[key];
+        if (session.applicationScrollAvailable === true && applicationScroll != null) {
+          // An alternate buffer has no terminal history to move through. The
+          // full-screen child owns that history, so deliver a wheel gesture and
+          // wait for its redraw instead of repainting the same cells locally.
+          if (applicationScroll(session)) sent = true;
+          else took = true;
+        } else {
+          scroll(session);
+          took = true;
+        }
         continue;
       }
       // Undefined in this mode: the mode ends and the key goes through, so picking
@@ -205,7 +277,7 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
       // A chunk that is *exactly* one escape byte was the Escape key; anything
       // longer is a sequence (an arrow, a function key) the child should get whole.
       if (rest === ESC && !session.altScreen) {
-        leaving = 'escape';
+        leaving = { reason: 'escape' };
         break;
       }
       if (!session.running) return took || sent ? { kind: 'pane' } : { kind: 'ignored' };
@@ -228,7 +300,11 @@ export function routeRawKey(state: TerminalPaneState, chunk: string): TerminalKe
     rest = rest.slice(at + 1);
   }
 
-  if (leaving != null) return { kind: 'leave', reason: leaving };
+  if (leaving != null) return { kind: 'leave', ...leaving };
+  // A width command needs a frame immediately: that frame computes the new layout
+  // and resizes the child. This deliberately outranks sent bytes in a coalesced
+  // chunk; the normal tick will still paint whatever response those bytes produce.
+  if (layoutChanged) return { kind: 'pane' };
   // When bytes also went to the child the tick will paint anyway, so `sent` wins:
   // painting now would draw the grid as it was before the keystroke landed.
   if (sent) return { kind: 'sent' };
@@ -324,10 +400,12 @@ function legendFor(state: TerminalPaneState, focused: boolean): string | undefin
   const exit = session.exitCode;
   if (exit != null) return exit === 0 ? 'exited' : `exited ${exit}`;
 
-  // Scrolled away from the live bottom outranks everything else it could say: a
-  // pane showing old output while the child keeps working looks frozen, and this
-  // line is the only thing that distinguishes the two.
   if (state.scrolling === true) {
+    // Alternate-screen history belongs to the child. A mouse-aware child redraws
+    // after each synthetic wheel report, so there is no local line count to show.
+    if (session.applicationScrollAvailable === true) return 'APP SCROLL';
+    if (session.altScreen) return 'CONTROL';
+
     // Terse on purpose. The legend competes with the pane title for the top border
     // and is *dropped entirely* when it will not fit (`drawPane`), which for a mode
     // indicator is the worst possible failure — it disappears exactly when it is
@@ -336,9 +414,15 @@ function legendFor(state: TerminalPaneState, focused: boolean): string | undefin
     return `SCROLL ${back > 0 ? `↑ ${back}` : 'live'}`;
   }
 
+  // Scrolled away from the live bottom outranks everything else it could say: a
+  // pane showing old output while the child keeps working looks frozen, and this
+  // line is the only thing that distinguishes the two.
   const back = session.scrolledLines;
   if (back > 0) return `↑ ${back} · ${ESCAPE_HATCH} to scroll`;
 
   if (!focused) return `${session.cols}×${session.rows}`;
-  return session.altScreen ? `${ESCAPE_HATCH} scroll · tab leaves` : `esc leaves`;
+  if (!session.altScreen) return `esc leaves · ${ESCAPE_HATCH} then tab panes`;
+  return session.applicationScrollAvailable === true
+    ? `${ESCAPE_HATCH} app scroll · then tab panes`
+    : `${ESCAPE_HATCH} control · then tab panes`;
 }

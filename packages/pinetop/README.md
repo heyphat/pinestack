@@ -119,7 +119,7 @@ One tab per command, numbered in workflow order.
 
 | #   | Page        | Command                     | Purpose                                            |
 | --- | ----------- | --------------------------- | -------------------------------------------------- |
-| 1   | EDITOR      | (the `.pine` source)        | Write — the script itself, vim keys                |
+| 1   | EDITOR      | (project text files)        | Write — Pine source and Markdown notes, vim keys   |
 | 2   | BACKTEST    | `pinerun backtest`          | Analyze — one strategy, one symbol, full tearsheet |
 | 3   | SWEEP       | `pinerun sweep`             | Optimize — one script's input grid                 |
 | 4   | WALKFORWARD | `pinerun walkforward`       | Validate — does the swept edge survive OOS         |
@@ -154,6 +154,13 @@ loads the selected script into that page's command. `compare` takes two, so it
 marks them `A` and `B`, and `↵` fills the first free slot before it starts
 replacing A. LOGS has no picker: it has no command of its own.
 
+STRATEGIES keeps an always-visible search row and a little more height so the
+field does not crowd out the scripts. Focus the pane, press `/`, and type to
+filter case-insensitively by file name or relative path. `ctrl-u` clears what you
+have typed, `↵` closes the field but keeps the filter (press `↵` again to load the
+selected match), and `esc` clears it. The query is shared by STRATEGIES on all six
+command pages, just as the underlying Pine-only list is shared.
+
 The workflow between them is navigation, not documentation: `:` then **carry the
 sweep grid into walkforward** takes SWEEP's axes, symbol and span over to
 WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed inputs, `↵` on
@@ -175,19 +182,21 @@ ordinals. `:` and `?` list them all.
 | the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS          |
 | `j` / `k`, `↓` / `↑` | Move selection                                                         |
 | `g` / `G`            | First / last row                                                       |
-| `↵`                  | Edit the focused config flag · load selection · apply pending proposal |
+| `↵`                  | Edit the focused config flag · load selection                          |
 | `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)           |
 | `e`                  | Edit this page's script in `$EDITOR`, then reload it                   |
-| `t` / `ctrl-t`       | Shell pane on the editor page — and the way back out of it             |
-| `/`                  | Filter fills                                                           |
+| `t` / `ctrl-t`       | Open shell; inside it, `ctrl-t` then `tab`/`shift-tab` changes pane    |
+| `/`                  | Search focused FILES/STRATEGIES (or Vim buffer) · filter fills on LOGS |
 | `.`                  | Show / hide the advanced flags                                         |
-| `ctrl-u`             | Clear the field being edited                                           |
-| `a`                  | Ask (prompt drawer)                                                    |
+| `ctrl-u`             | Clear the field or search being edited                                 |
 | `:` or `ctrl-p`      | Command palette                                                        |
 | `?`                  | Keybinding overlay                                                     |
-| `esc`                | Dismiss overlay · clear filter · unscope log                           |
-| `ctrl-x`             | Reject pending proposal · revert pending edits                         |
+| `esc`                | Dismiss overlay · clear focused search/filter · unscope log            |
+| `ctrl-x`             | Revert pending edits                                                   |
 | `q`                  | Quit                                                                   |
+
+`/` does not enter text mode on INPUTS, CONFIG, HISTORY, or report panes; focus
+FILES or STRATEGIES to search, or switch to LOGS to filter fills.
 
 `?` is generated from the keymap table, so it always documents the real
 bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
@@ -225,14 +234,39 @@ there shows both keyboards side by side.
 
 ## The editor
 
-Page 1 is a vim-modal editor for the `.pine` itself: the project's scripts and
-the open one's `input()` titles in the sidebar, the buffer in the wide middle
-with a line-number gutter and Pine syntax colouring from your terminal's palette.
+Page 1 is a vim-modal editor for the project's lowercase `.pine` and `.md` files:
+the FILES sidebar, the open Pine file's `input()` titles, and the buffer in the
+wide middle with a line-number gutter. Pine files get syntax colouring from your
+terminal's palette; Markdown stays plain text rather than being mis-coloured as
+Pine.
 
 ![The EDITOR page: project scripts and the open script's inputs in the sidebar, the .pine buffer with vim-modal editing in the middle](../../docs/assets/pinetop-editor.png)
 
-It opens on the strategy you already have loaded. `tab` (or `↵` on a file in
-FILES) enters the buffer; from there it is vim:
+Runnable strategies remain Pine-only: Markdown appears in FILES but never enters
+STRATEGIES, `pinerun` arguments, or the INPUTS parser. FILES mirrors the project's
+folder hierarchy, folders first and expanded by default. `j`/`k` moves through
+visible rows, `↵` expands/collapses a folder or opens a file, and `←`/`→` moves to
+a parent or expands into a child.
+
+FILES also keeps an always-visible search row. Focus FILES, press `/`, and type to
+filter case-insensitively by file name or relative path; matching ancestors are
+temporarily forced open without changing your saved folder expansion. `ctrl-u`
+clears the active field, `↵` closes it but keeps the matches, and `esc` clears it.
+Clear the search before collapsing folders; a second `↵` on a matching file opens
+it.
+
+In a Git working tree, FILES shows a changed-file count and a badge on each
+affected path: `M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked,
+and `U` conflicted. A collapsed folder containing changed files keeps a `•` at
+the right edge and reports the hidden change count in its footer. These are
+working-tree/index status markers, not patch hunks; open the adjacent shell with
+`t` and run `git diff` (or `git diff --staged`) for the complete patch. The final
+`+` cell is separate and means the in-memory editor buffer has not been written.
+Outside a Git repository the Git count and badges simply disappear.
+
+It opens on the Pine strategy you already have loaded, then the first Pine file,
+then the first Markdown file if the project has no Pine source. `tab` (or `↵` on
+a file in FILES) enters the buffer; from there it is vim:
 
 |                     |                                                             |
 | ------------------- | ----------------------------------------------------------- |
@@ -280,12 +314,12 @@ argument, so `f<space>` finds a space and `r<space>` writes one.
   discarding an unwritten buffer. Quitting on a stray `q` would throw away
   edits, which is the one thing this page must not do.
 
-Nothing is written except by `:w`. The INPUTS outline is read from the buffer
-rather than from disk, so a renamed `input()` title shows up there before you
-save — and that is the same list `--input NAME` is checked against. The buffer is
-not persisted between sessions, for the same reason pending parameter edits are
-not: a restored unwritten buffer would be an unexplained divergence from the file
-on disk.
+Nothing is written except by `:w`. For Pine buffers, the INPUTS outline is read
+from the buffer rather than from disk, so a renamed `input()` title shows up there
+before you save — and that is the same list `--input NAME` is checked against.
+Markdown does not produce INPUTS. The buffer is not persisted between sessions,
+for the same reason pending parameter edits are not: a restored unwritten buffer
+would be an unexplained divergence from the file on disk.
 
 `.` (repeat), macros, marks, named registers, visual block and regex search are
 not implemented. `?` lists exactly what is bound, so an unbound key does nothing
@@ -329,52 +363,57 @@ buffer, shell. It is your `$SHELL`, interactive, started in the project
 directory — so `git diff`, a `pinerun` invocation you want to type by hand, or
 `vim` itself all run there with the source still on screen.
 
-`t` is the everyday key. `ctrl-t` is the same toggle for the two places a bare
-letter cannot reach: inside the editor buffer, where `t` is vim's till motion, and
-inside the shell pane itself.
+`t` is the everyday key. `ctrl-t` opens the same pane from the editor buffer,
+where `t` is vim's till motion. Once the shell pane has focus, `ctrl-t` becomes a
+reserved control prefix rather than an immediate toggle.
 
 Everything you type goes to the shell, including the keys pinetop normally binds:
-`ctrl-c` interrupts the child rather than quitting pinetop, `tab` completes,
-`space` is a space, `t` is a `t`. Two keys get you back out:
+`ctrl-c` interrupts the child rather than quitting pinetop, plain `tab` completes,
+`space` is a space, and `t` is a `t`. These sequences always reclaim pane
+navigation, even while Claude, Codex, Kiro, vim, or another full-screen app owns
+its terminal:
 
-| Key      | Leaves the pane                                                    |
-| -------- | ------------------------------------------------------------------ |
-| `ctrl-t` | Always — whatever the child is doing. This is the guaranteed exit  |
-| `esc`    | At a shell prompt only. A full-screen program in the pane keeps it |
+| Sequence                   | Pinetop action                                   |
+| -------------------------- | ------------------------------------------------ |
+| `ctrl-t`, then `tab`       | Move to the next pane                            |
+| `ctrl-t`, then `shift-tab` | Move to the previous pane                        |
+| `esc`                      | Return to the opening pane, but only at a prompt |
 
-`ctrl-t` is a **prefix**, the way `tmux` uses one: it is reserved from the child, and
-the key after it belongs to the pane. That is what pays for scrollback without taking
-`PageUp` — or any other key — away from the program running inside.
+`ctrl-t` is a **prefix**, the way `tmux` uses one: it is reserved from the child,
+and the key after it belongs to the pane. That pays for scrollback and navigation
+without taking `PageUp`, plain `tab`, or any other key away from the running
+program.
 
-| After `ctrl-t` |                                                |
-| -------------- | ---------------------------------------------- |
-| `k` / `j`      | Back / forward one line                        |
-| `u` / `d`      | Back / forward one page                        |
-| `g` / `G`      | Top of history / back to the live view         |
-| `ctrl-t`       | Leave the pane                                 |
-| anything else  | Abandons the prefix; the key reaches the child |
+| After `ctrl-t`   | Pinetop action                                  |
+| ---------------- | ----------------------------------------------- |
+| `k` / `j`        | Back / forward one line                         |
+| `u` / `d`        | Back / forward one page                         |
+| `g` / `G`        | Top of history / back to the live view          |
+| `tab`            | Next pane                                       |
+| `shift-tab`      | Previous pane                                   |
+| `ctrl-t` / `esc` | Resume the child without leaving the shell pane |
+| anything else    | Abandon the prefix; the key reaches the child   |
 
-1000 lines of history are kept. While you are scrolled the border reads `↑ 47 ·
-ctrl-t G to follow`, because a pane showing old output while the child keeps working
-would otherwise look frozen — and typing anything returns to the live view, since
-input you cannot see the result of is worse than losing your place.
+1000 lines of normal-screen history are kept. While you are scrolled the border
+reads `SCROLL ↑ 47`, and the hint strip shows `G live`; typing anything returns
+to the live view, since input whose result you cannot see is worse than losing
+your place.
 
-Scrollback is a normal-screen thing. On the alternate screen — `vim`, `htop`, `less` —
-there is no history to show and the scroll keys do nothing, which is what a real
-terminal does too.
+On the alternate screen — used by `vim`, `htop`, `less`, and interactive agent
+CLIs — the application owns its history. If it negotiated mouse scrolling,
+`k`/`j`/`u`/`d` in `ctrl-t` mode become wheel gestures and the border reads
+`APP SCROLL`; otherwise the border reads `CONTROL`. Width controls and the two
+pane-navigation sequences work in both modes.
 
-That `esc` split is deliberate. At a prompt `esc` does nothing, so it is a cheap
-way out; but once the child switches to the alternate screen — vim, `htop`,
-`less` — `esc` is the key that program most needs, so it goes to the child and
-`ctrl-t` becomes the only exit. The pane's border says which is which: it reads
-`esc / ctrl-t leaves` at a prompt and `ctrl-t leaves` when a full-screen app has
-taken over.
+The `esc` split is deliberate. At a prompt `esc` does nothing, so it is a cheap
+way back to the pane that opened the shell. Once a child switches to the alternate
+screen, `esc` is the key that program most needs, so it goes to the child and the
+`ctrl-t` prefix is the guaranteed route back to Pinetop.
 
-Leaving does not kill the shell — focus returns to the pane you came from and the
-session keeps running, so `t` comes back to the same prompt with your history and
-working directory intact. (It returns you to the _buffer_ only if that is where you
-opened it from; landing in the buffer by accident would turn every shortcut into a
-vim command.)
+Changing panes does not kill the shell. `ctrl-t` then `tab`/`shift-tab` follows
+the normal focus-ring direction; prompt-level `esc` returns to the pane that
+opened the shell. The session keeps running, so `t` comes back to the same prompt
+with its history and working directory intact.
 
 **To close it completely, end the shell: `ctrl-d`, or `exit`.** The column
 disappears the moment the child does — there is nothing left to look at — and focus
@@ -385,8 +424,8 @@ the shell, so a `claude` or `vim` in the pane does not survive as an orphan.
 The column needs the width to be worth having: below 108 columns of body it is
 dropped entirely rather than squeezing the source into nothing.
 
-**The buffer follows the file.** Change the open `.pine` from the shell — `sed -i`,
-`git checkout`, a formatter — and the editor pane reloads it, keeping your cursor
+**The buffer follows the file.** Change the open `.pine` or `.md` from the shell —
+`git checkout`, a formatter, another editor — and the editor pane reloads it, keeping your cursor
 where it was. An _unwritten_ buffer is never overwritten: it says
 `changed on disk — :e! to reload, :w to overwrite` and leaves your edits alone. A
 file deleted underneath you keeps its buffer, marked new, so `:w` puts it back.
@@ -440,37 +479,6 @@ compiled binary.
   Everything else uses the terminal's ANSI palette, so it respects your theme
   (§4.7).
 
-## The Ask drawer
-
-`a` opens a prompt over the bottom of the frame. The model answers in prose
-grounded in the loaded run; if a parameter change is warranted it comes back
-_additionally_, as a reviewable diff:
-
-```jsonc
-{
-  "answer": "…prose grounded in the run…",
-  "proposal": {
-    "effect": "est. Sharpe 1.42 → 1.51 · max DD −17.2% → −12.8%",
-    "note": "Tighter stop plus a hard time exit; entry logic untouched.",
-    "edits": [{ "input": "stopAtr", "from": "2.4", "to": "1.8", "display": "2.4 ATR → 1.8 ATR" }],
-  },
-  "action": { "label": "open parameter sweep", "key": "s" }, // when no edit is warranted
-}
-```
-
-`↵` applies, `ctrl-x` rejects — nothing is ever applied silently. Applied edits
-show as pending with a marker and raise a "not yet re-run" banner until you press
-`r`, because for a backtester an unexplained parameter change invalidates every
-number on screen.
-
-`edits[].input` must be a real Pine `input()` title and `to` a bare value; a
-proposal that fails either check is refused before it can reach argv, with the
-reason shown.
-
-The layer is opt-in: pass an `AskProvider` to the `App`. It sends the report
-summary and the flags — never OHLCV bars, never script source, never
-credentials — and the drawer states when the model runs remotely.
-
 ## Privacy
 
 Provider keys stay in the environment (`ALPACA_API_KEY_ID`,
@@ -502,6 +510,6 @@ pinetop --check-flags
 ## Development
 
 ```sh
-bun test packages/pinetop/    # 289 tests
+bun test packages/pinetop/    # Pinetop tests
 bunx tsc -b                   # typecheck
 ```

@@ -13,26 +13,41 @@
  * writes bytes and colours tokens. Whether the script compiles is `piner`'s
  * answer, and you get it by running it.
  *
- * Layout follows §4.4 — the sidebar is the left column (the project's scripts,
- * and the `input()` titles of the open one), the buffer is the wide middle. The
- * one deliberate departure is documented on `scrollIntoView` in `editor/vim.ts`:
- * the buffer scrolls, because a text cursor defines its own viewport.
+ * Layout follows §4.4 — the sidebar is the left column (the project's file
+ * tree and the `input()` titles of the open Pine file), the buffer is the wide
+ * middle. The one deliberate departure is documented on `scrollIntoView` in
+ * `editor/vim.ts`: the buffer scrolls, because a text cursor defines its own
+ * viewport.
  */
 
 import { inputTitles } from '../flags/pine-inputs.js';
+import type { GitFileStatus } from '../git-status.js';
 import { HINTS } from '../keymap.js';
 import { int } from '../render/format.js';
 import { displayWidth, drawPane, truncate, type Rect } from '../render/screen.js';
 import { STYLE, type Style } from '../render/theme.js';
-import { cachedScripts, refreshScripts, scriptLabel } from '../scripts.js';
+import {
+  cachedEditorFiles,
+  editorFileLabel,
+  refreshScripts,
+  type EditorFileEntry,
+} from '../scripts.js';
 import type { AppState } from '../state.js';
 import { bufferText, orderCursors, type Cursor } from '../editor/buffer.js';
 import { highlight } from '../editor/syntax.js';
 import { modeLabel, type EditorState } from '../editor/state.js';
 import { handleKey, openFile } from '../editor/vim.js';
 import { drawInputsPane } from './inputs-pane.js';
-import { drawTerminal, TERMINAL_PANE, ESCAPE_HATCH } from '../term/pane.js';
-import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
+import { drawTerminal, TERMINAL_PANE, ESCAPE_HATCH, type TerminalPaneWidth } from '../term/pane.js';
+import {
+  clampCursor,
+  columns,
+  drawListSearchRow,
+  rows,
+  windowFor,
+  type Page,
+  type PageContext,
+} from './page.js';
 
 /**
  * Focus ring order, which is not the layout order on purpose: `tab` from FILES
@@ -41,17 +56,37 @@ import { clampCursor, columns, rows, windowFor, type Page, type PageContext } fr
  */
 const PANES = ['files', 'editor', 'inputs'] as const;
 
+/** Narrowest useful terminal pane and widest automatic terminal pane. */
+const TERMINAL_MIN_WIDTH = 32;
+const TERMINAL_AUTO_MAX_WIDTH = 80;
+
+/**
+ * The narrowest source pane the adjustable terminal may leave behind. This is the
+ * 45-column source width produced by the existing automatic layout exactly where
+ * the terminal first becomes visible, so manual growth never makes the editor less
+ * usable than opening the unadjusted pane already could.
+ */
+const TERMINAL_MIN_EDITOR_WIDTH = 45;
+
 /**
  * Width of the shell column when it is open.
  *
- * Sized generously — 80 columns is what a shell's own output is written for, and
- * a terminal narrower than that wraps `git status` and every compiler error into
- * unreadable ribbons. It gives way before the buffer does, though: below
- * `TERMINAL_MIN_BODY` the column is dropped entirely rather than squeezing the
- * source into nothing.
+ * The responsive default is unchanged: 38%, bounded to 32–80 columns. An explicit
+ * preference may grow beyond 80 when the outer terminal has room, but it is always
+ * clamped before layout so the editor retains its established minimum width.
  */
-function terminalWidth(bodyW: number): number {
-  return Math.min(80, Math.max(32, Math.floor(bodyW * 0.38)));
+function terminalWidths(
+  bodyW: number,
+  sidebarW: number,
+  preferredWidth?: number,
+): TerminalPaneWidth {
+  const automatic = Math.min(
+    TERMINAL_AUTO_MAX_WIDTH,
+    Math.max(TERMINAL_MIN_WIDTH, Math.floor(bodyW * 0.38)),
+  );
+  const maximum = bodyW - sidebarW - TERMINAL_MIN_EDITOR_WIDTH;
+  const rendered = Math.min(maximum, Math.max(TERMINAL_MIN_WIDTH, preferredWidth ?? automatic));
+  return { automatic, minimum: TERMINAL_MIN_WIDTH, maximum, rendered };
 }
 
 /**
@@ -77,68 +112,483 @@ export function terminalVisible(state: AppState, bodyW: number): boolean {
  * puzzle, not a blank slate. The loaded strategy wins; failing that, the first
  * script in the project.
  */
-export function ensureEditorFile(state: AppState): void {
+export function ensureEditorFile(state: AppState, cwd = process.cwd()): void {
   if (state.editor.buffer != null) return;
-  const path = state.flags.backtest.scripts[0] ?? cachedScripts()[0]?.path;
+  const files = cachedEditorFiles(cwd);
+  const configured = state.flags.backtest.scripts.find((path) => path.endsWith('.pine'));
+  const fallback = files.find((entry) => entry.kind === 'pine') ?? files[0];
+  const path = configured ?? fallback?.path;
   if (path == null) return;
   openFile(state.editor, path);
+
+  const discovered = files.find((entry) => entry.path === path);
+  if (discovered != null) selectEditorTreeFile(state, discovered, files);
 }
 
-/** The `input()` titles of the buffer as it stands — not of the file on disk. */
+function isPinePath(path: string): boolean {
+  return path.endsWith('.pine');
+}
+
+/** The `input()` titles of a Pine buffer as it stands — not of the file on disk. */
 export function bufferInputs(editor: EditorState): string[] {
-  if (editor.buffer == null) return [];
+  if (editor.buffer == null || !isPinePath(editor.buffer.path)) return [];
   return inputTitles(bufferText(editor.buffer));
 }
 
 // ————————————————————————————————————————————————————————————— the sidebar
 
+export interface EditorFolderTreeRow {
+  kind: 'folder';
+  id: string;
+  path: string;
+  label: string;
+  depth: number;
+  parentId?: string;
+  expanded: boolean;
+  /** Exact caller paths used by the Git snapshot for every supported leaf. */
+  descendantPaths: readonly string[];
+}
+
+export interface EditorFileTreeRow {
+  kind: 'file';
+  id: string;
+  path: string;
+  label: string;
+  depth: number;
+  parentId?: string;
+  entry: EditorFileEntry;
+}
+
+export type EditorTreeRow = EditorFolderTreeRow | EditorFileTreeRow;
+
+interface EditorTreeFolderNode {
+  name: string;
+  path: string;
+  parentId?: string;
+  depth: number;
+  folders: Map<string, EditorTreeFolderNode>;
+  files: EditorTreeFileNode[];
+  descendantPaths: string[];
+}
+
+interface EditorTreeFileNode {
+  name: string;
+  id: string;
+  parentId?: string;
+  depth: number;
+  entry: EditorFileEntry;
+}
+
+function folderTreeId(path: string): string {
+  return `folder:${path}`;
+}
+
+function fileTreeId(entry: EditorFileEntry): string {
+  return `file:${entry.label}`;
+}
+
+function editorPathParts(entry: EditorFileEntry): string[] {
+  const parts = entry.label.split('/').filter((part) => part !== '' && part !== '.');
+  return parts.length > 0 ? parts : [editorFileLabel(entry.path)];
+}
+
+/** Project files projected into visible VS Code-style folder and leaf rows. */
+export function editorTreeRows(
+  files: readonly EditorFileEntry[],
+  collapsed: Readonly<Record<string, true>>,
+): EditorTreeRow[] {
+  const root: EditorTreeFolderNode = {
+    name: '',
+    path: '',
+    depth: -1,
+    folders: new Map(),
+    files: [],
+    descendantPaths: [],
+  };
+
+  for (const entry of files) {
+    const parts = editorPathParts(entry);
+    let folder = root;
+
+    for (let depth = 0; depth < parts.length - 1; depth++) {
+      const name = parts[depth]!;
+      let child = folder.folders.get(name);
+      if (child == null) {
+        const path = folder.path === '' ? name : `${folder.path}/${name}`;
+        child = {
+          name,
+          path,
+          parentId: folder.path === '' ? undefined : folderTreeId(folder.path),
+          depth,
+          folders: new Map(),
+          files: [],
+          descendantPaths: [],
+        };
+        folder.folders.set(name, child);
+      }
+      child.descendantPaths.push(entry.path);
+      folder = child;
+    }
+
+    folder.files.push({
+      name: parts[parts.length - 1]!,
+      id: fileTreeId(entry),
+      parentId: folder.path === '' ? undefined : folderTreeId(folder.path),
+      depth: parts.length - 1,
+      entry,
+    });
+  }
+
+  const rows: EditorTreeRow[] = [];
+  const byName = (a: { name: string }, b: { name: string }): number => a.name.localeCompare(b.name);
+
+  const append = (folder: EditorTreeFolderNode): void => {
+    for (const child of [...folder.folders.values()].sort(byName)) {
+      const id = folderTreeId(child.path);
+      const expanded = collapsed[id] !== true;
+      rows.push({
+        kind: 'folder',
+        id,
+        path: child.path,
+        label: child.name,
+        depth: child.depth,
+        parentId: child.parentId,
+        expanded,
+        descendantPaths: child.descendantPaths,
+      });
+      if (expanded) append(child);
+    }
+    for (const file of [...folder.files].sort(byName)) {
+      rows.push({
+        kind: 'file',
+        id: file.id,
+        path: file.entry.path,
+        label: file.name,
+        depth: file.depth,
+        parentId: file.parentId,
+        entry: file.entry,
+      });
+    }
+  };
+
+  append(root);
+  return rows;
+}
+
+function selectEditorTreeRow(
+  state: AppState,
+  rows: readonly EditorTreeRow[],
+  index: number,
+): number {
+  if (rows.length === 0) {
+    state.panes.editor.cursor['files'] = 0;
+    state.editorTree.selectedId = undefined;
+    return 0;
+  }
+  const selected = clampCursor(index, rows.length);
+  state.panes.editor.cursor['files'] = selected;
+  state.editorTree.selectedId = rows[selected]!.id;
+  return selected;
+}
+
+function parentTreePath(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash < 0 ? '' : path.slice(0, slash);
+}
+
+function reconcileEditorTreeSelection(state: AppState, rows: readonly EditorTreeRow[]): number {
+  if (rows.length === 0) return selectEditorTreeRow(state, rows, 0);
+
+  const selectedId = state.editorTree.selectedId;
+  if (selectedId != null) {
+    const exact = rows.findIndex((row) => row.id === selectedId);
+    if (exact >= 0) {
+      state.panes.editor.cursor['files'] = exact;
+      return exact;
+    }
+
+    const separator = selectedId.indexOf(':');
+    let ancestor = parentTreePath(separator < 0 ? '' : selectedId.slice(separator + 1));
+    while (ancestor !== '') {
+      const index = rows.findIndex((row) => row.id === folderTreeId(ancestor));
+      if (index >= 0) return selectEditorTreeRow(state, rows, index);
+      ancestor = parentTreePath(ancestor);
+    }
+  }
+
+  return selectEditorTreeRow(state, rows, state.panes.editor.cursor['files'] ?? 0);
+}
+
+export function visibleEditorFiles(
+  state: AppState,
+  files: readonly EditorFileEntry[] = cachedEditorFiles(),
+): EditorFileEntry[] {
+  const query = state.listSearch.files.trim().toLowerCase();
+  if (query === '') return [...files];
+  return files.filter(
+    (entry) =>
+      entry.label.toLowerCase().includes(query) || entry.path.toLowerCase().includes(query),
+  );
+}
+
+function reconcileFilteredEditorTreeSelection(
+  state: AppState,
+  rows: readonly EditorTreeRow[],
+): number {
+  if (rows.length === 0) {
+    // Keep the stable unfiltered id so clearing a no-result query restores it.
+    state.panes.editor.cursor['files'] = 0;
+    return 0;
+  }
+
+  const selectedId = state.editorTree.selectedId;
+  const exact = selectedId == null ? -1 : rows.findIndex((row) => row.id === selectedId);
+  if (exact >= 0) {
+    state.panes.editor.cursor['files'] = exact;
+    return exact;
+  }
+
+  const firstFile = rows.findIndex((row) => row.kind === 'file');
+  return selectEditorTreeRow(state, rows, firstFile >= 0 ? firstFile : 0);
+}
+
+function visibleEditorTree(state: AppState): { rows: EditorTreeRow[]; cursor: number } {
+  const filtering = state.listSearch.files.trim() !== '';
+  const rows = editorTreeRows(
+    visibleEditorFiles(state),
+    filtering ? {} : state.editorTree.collapsed,
+  );
+  return {
+    rows,
+    cursor: filtering
+      ? reconcileFilteredEditorTreeSelection(state, rows)
+      : reconcileEditorTreeSelection(state, rows),
+  };
+}
+
+function selectEditorTreeFile(
+  state: AppState,
+  entry: EditorFileEntry,
+  files = cachedEditorFiles(),
+): void {
+  const parts = editorPathParts(entry);
+  let path = '';
+  for (const part of parts.slice(0, -1)) {
+    path = path === '' ? part : `${path}/${part}`;
+    delete state.editorTree.collapsed[folderTreeId(path)];
+  }
+  const rows = editorTreeRows(files, state.editorTree.collapsed);
+  const index = rows.findIndex((row) => row.id === fileTreeId(entry));
+  if (index >= 0) selectEditorTreeRow(state, rows, index);
+}
+
+function handleFilesKey(state: AppState, name: string): boolean {
+  const filtering = state.listSearch.files.trim() !== '';
+  const { rows, cursor } = visibleEditorTree(state);
+  const row = rows[cursor];
+  if (row == null) return false;
+
+  switch (name) {
+    case 'j':
+    case 'down':
+      selectEditorTreeRow(state, rows, cursor + 1);
+      return true;
+    case 'k':
+    case 'up':
+      selectEditorTreeRow(state, rows, cursor - 1);
+      return true;
+    case 'g':
+      selectEditorTreeRow(state, rows, 0);
+      return true;
+    case 'G':
+      selectEditorTreeRow(state, rows, rows.length - 1);
+      return true;
+    case 'right':
+      if (row.kind !== 'folder') return true;
+      if (!row.expanded) {
+        delete state.editorTree.collapsed[row.id];
+        state.editorTree.selectedId = row.id;
+        return true;
+      }
+      if (rows[cursor + 1]?.parentId === row.id) {
+        selectEditorTreeRow(state, rows, cursor + 1);
+      }
+      return true;
+    case 'left':
+      if (filtering) {
+        if (row.parentId != null) {
+          const parent = rows.findIndex((candidate) => candidate.id === row.parentId);
+          if (parent >= 0) selectEditorTreeRow(state, rows, parent);
+        } else {
+          state.status = 'clear the FILES search to collapse folders';
+        }
+        return true;
+      }
+      if (row.kind === 'folder' && row.expanded) {
+        state.editorTree.collapsed[row.id] = true;
+        state.editorTree.selectedId = row.id;
+        return true;
+      }
+      if (row.parentId != null) {
+        const parent = rows.findIndex((candidate) => candidate.id === row.parentId);
+        if (parent >= 0) selectEditorTreeRow(state, rows, parent);
+      }
+      return true;
+    default:
+      return false;
+  }
+}
+
+function gitStatusStyle(status: GitFileStatus): Style {
+  if (status === 'U') return STYLE.error;
+  if (status === '?') return STYLE.accent;
+  return STYLE.pending;
+}
+
+function folderGitSummary(
+  row: EditorFolderTreeRow,
+  statuses: Readonly<Record<string, GitFileStatus>>,
+): { count: number; conflicted: boolean } {
+  let count = 0;
+  let conflicted = false;
+  for (const path of row.descendantPaths) {
+    const status = statuses[path];
+    if (status == null) continue;
+    count += 1;
+    if (status === 'U') conflicted = true;
+  }
+  return { count, conflicted };
+}
+
 function drawFiles(ctx: PageContext, rect: Rect): void {
   const { screen, state } = ctx;
-  const list = cachedScripts();
+  const allFiles = cachedEditorFiles();
+  const files = visibleEditorFiles(state, allFiles);
+  const query = state.listSearch.files;
+  const filtering = query.trim() !== '';
   const open = state.editor.buffer?.path;
+  const changed = allFiles.reduce(
+    (count, entry) => count + (state.editorGit.statuses[entry.path] == null ? 0 : 1),
+    0,
+  );
+  const count = filtering ? `${files.length}/${allFiles.length}` : String(allFiles.length);
 
-  const inner = drawPane(screen, rect, {
+  const paneInner = drawPane(screen, rect, {
     title: 'FILES',
     focused: ctx.focus === 'files',
     key: ctx.paneKey('files'),
-    legend: list.length > 0 ? `${list.length} .pine` : undefined,
+    legend:
+      allFiles.length === 0
+        ? undefined
+        : state.editorGit.enabled
+          ? `${count} · git${changed}`
+          : filtering
+            ? count
+            : `${count} files`,
+  });
+  if (paneInner.h <= 0) return;
+
+  const inner = drawListSearchRow(screen, paneInner, {
+    query,
+    active: state.listSearch.active === 'files',
+    placeholder: 'files',
   });
   if (inner.h <= 0) return;
 
-  if (list.length === 0) {
-    screen.text(inner.x, inner.y, 'no .pine found here', STYLE.muted, inner);
-    screen.text(inner.x, inner.y + 1, ':e path.pine creates one', STYLE.muted, inner);
+  if (allFiles.length === 0) {
+    screen.text(inner.x, inner.y, 'no .pine or .md here', STYLE.muted, inner);
+    screen.text(inner.x, inner.y + 1, ':e path creates one', STYLE.muted, inner);
+    return;
+  }
+  if (files.length === 0) {
+    screen.text(inner.x, inner.y, `no files match /${query}`, STYLE.muted, inner);
     return;
   }
 
-  const cursor = clampCursor(ctx.cursor('files'), list.length);
+  const { rows: tree, cursor } = visibleEditorTree(state);
+  if (tree.length === 0) {
+    screen.text(inner.x, inner.y, `no files match /${query}`, STYLE.muted, inner);
+    return;
+  }
   const listRows = Math.max(0, inner.h - 1);
-  const { from, to } = windowFor(cursor, list.length, listRows);
+  const { from, to } = windowFor(cursor, tree.length, listRows);
 
   for (let i = from; i < to; i++) {
-    const entry = list[i]!;
+    const row = tree[i]!;
     const y = inner.y + (i - from);
     const selected = i === cursor && ctx.focus === 'files';
-    const isOpen = entry.path === open;
+    const isOpen = row.kind === 'file' && row.path === open;
+    const gitStatus = row.kind === 'file' ? state.editorGit.statuses[row.path] : undefined;
+    const folderGit =
+      row.kind === 'folder' ? folderGitSummary(row, state.editorGit.statuses) : undefined;
+    const gitMarker =
+      gitStatus ??
+      (row.kind === 'folder' && !row.expanded && folderGit != null && folderGit.count > 0
+        ? '•'
+        : undefined);
 
     if (selected) screen.text(inner.x, y, ' '.repeat(inner.w), STYLE.selected);
     // The open file keeps its bar marker wherever the cursor is, so "which file
     // is in the buffer" never depends on where you last pressed j.
     screen.text(inner.x, y, isOpen ? '▌' : ' ', selected ? STYLE.selected : STYLE.accent);
+
+    const prefix = `${'  '.repeat(row.depth)}${
+      row.kind === 'folder' ? (row.expanded ? '▾ ' : '▸ ') : '  '
+    }`;
+    const prefixWidth = displayWidth(prefix);
     screen.text(
       inner.x + 1,
       y,
-      truncate(entry.label, Math.max(0, inner.w - 3)),
-      selected ? STYLE.selected : isOpen ? STYLE.none : STYLE.muted,
+      prefix,
+      selected ? STYLE.selected : row.kind === 'folder' ? STYLE.accent : STYLE.muted,
+      inner,
     );
-    // An unwritten buffer is marked here too: the FILES list is where you look
-    // before switching away from something you have not saved.
+    screen.text(
+      inner.x + 1 + prefixWidth,
+      y,
+      truncate(row.label, Math.max(0, inner.w - 4 - prefixWidth)),
+      selected
+        ? STYLE.selected
+        : row.kind === 'folder'
+          ? STYLE.none
+          : isOpen
+            ? STYLE.none
+            : STYLE.muted,
+      inner,
+    );
+
+    // Git owns the penultimate cell; the final cell remains the stronger warning
+    // that the open in-memory buffer has not been written anywhere yet.
+    if (gitMarker != null && inner.w >= 2) {
+      const markerStyle =
+        gitStatus != null
+          ? gitStatusStyle(gitStatus)
+          : folderGit?.conflicted === true
+            ? STYLE.error
+            : STYLE.pending;
+      screen.text(inner.x + inner.w - 2, y, gitMarker, selected ? STYLE.selected : markerStyle);
+    }
     if (isOpen && state.editor.buffer?.modified === true) {
       screen.text(inner.x + inner.w - 1, y, '+', selected ? STYLE.selected : STYLE.pending);
     }
   }
 
-  screen.text(inner.x, inner.y + inner.h - 1, 'j/k move · ↵ open', STYLE.muted, inner);
+  const selectedRow = tree[cursor];
+  if (selectedRow == null) return;
+
+  let footer: string;
+  if (selectedRow.kind === 'folder') {
+    const summary = folderGitSummary(selectedRow, state.editorGit.statuses);
+    footer = filtering
+      ? `j/k ←/→ · clear search to collapse${summary.count > 0 ? ` · git${summary.count}` : ''}`
+      : `j/k ←/→ · ↵ ${selectedRow.expanded ? 'collapse' : 'expand'}${
+          summary.count > 0 ? ` · git${summary.count}` : ''
+        }`;
+  } else {
+    const status = state.editorGit.statuses[selectedRow.path];
+    footer = status == null ? 'j/k · ↵ open' : `j/k · ↵ open · git ${status}`;
+  }
+  screen.text(inner.x, inner.y + inner.h - 1, truncate(footer, inner.w), STYLE.muted, inner);
 }
 
 /**
@@ -153,7 +603,12 @@ function drawInputs(ctx: PageContext, rect: Rect): void {
     paneId: 'inputs',
     rows: titles.map((title) => ({ title })),
     legend: titles.length > 0 ? String(titles.length) : undefined,
-    empty: ctx.state.editor.buffer == null ? 'no file open' : 'no input() declared',
+    empty:
+      ctx.state.editor.buffer == null
+        ? 'no file open'
+        : isPinePath(ctx.state.editor.buffer.path)
+          ? 'no input() declared'
+          : 'Pine files only',
   });
 }
 
@@ -201,7 +656,7 @@ function drawBuffer(ctx: PageContext, rect: Rect): void {
         }`;
 
   const inner = drawPane(screen, rect, {
-    title: buffer == null ? 'EDITOR' : truncate(scriptLabel(buffer.path).toUpperCase(), 28),
+    title: buffer == null ? 'EDITOR' : truncate(editorFileLabel(buffer.path).toUpperCase(), 28),
     focused,
     key: ctx.paneKey('editor'),
     legend,
@@ -216,13 +671,7 @@ function drawBuffer(ctx: PageContext, rect: Rect): void {
 
   if (buffer == null) {
     screen.text(inner.x, inner.y, 'no file open', STYLE.muted, inner);
-    screen.text(
-      inner.x,
-      inner.y + 1,
-      'tab to FILES and press ↵, or :e path.pine',
-      STYLE.muted,
-      inner,
-    );
+    screen.text(inner.x, inner.y + 1, 'tab to FILES and press ↵, or :e path', STYLE.muted, inner);
     drawStatus(ctx, inner, statusY);
     return;
   }
@@ -262,11 +711,15 @@ function drawBuffer(ctx: PageContext, rect: Rect): void {
     }
 
     screen.text(textX, y, text.slice(hoff, hoff + textW), STYLE.none, inner);
-    for (const span of highlight(text)) {
-      const from = Math.max(span.start, hoff);
-      const to = Math.min(span.start + span.length, hoff + textW);
-      if (to <= from) continue;
-      screen.text(textX + (from - hoff), y, text.slice(from, to), span.style, inner);
+    // Markdown is intentionally plain text: Pine token colours would make prose,
+    // examples, and numbers look like source syntax they do not have.
+    if (isPinePath(buffer.path)) {
+      for (const span of highlight(text)) {
+        const from = Math.max(span.start, hoff);
+        const to = Math.min(span.start + span.length, hoff + textW);
+        if (to <= from) continue;
+        screen.text(textX + (from - hoff), y, text.slice(from, to), span.style, inner);
+      }
     }
 
     if (sel != null) {
@@ -340,24 +793,56 @@ const EDITOR_HINTS: readonly { key: string; label: string }[] = [
   { key: '?', label: 'help' },
 ];
 
-/**
- * The shell pane's hints. Nothing but the exits: every other key on the strip
- * would be one the child is about to receive, and a hint for a key that reaches
- * the shell instead of the app is worse than no hint.
- */
+/** Shell-prompt hints, where Pinetop owns retained scrollback and Esc can leave. */
 const TERMINAL_HINTS: readonly { key: string; label: string }[] = [
-  { key: ESCAPE_HATCH, label: 'scroll' },
-  { key: 'esc', label: 'leave (not in vim)' },
-  { key: 'tab', label: 'leave' },
+  { key: ESCAPE_HATCH, label: 'scroll / pane keys' },
+  { key: 'then tab/shift-tab', label: 'next / previous pane' },
+  { key: 'esc', label: 'leave' },
 ];
 
-/** SCROLL mode's own strip. Only the keys the mode actually defines. */
+/** A mouse-aware full-screen child owns both the screen and its history. */
+const TERMINAL_APP_HINTS: readonly { key: string; label: string }[] = [
+  { key: ESCAPE_HATCH, label: 'app scroll / pane keys' },
+  { key: 'then tab/shift-tab', label: 'next / previous pane' },
+];
+
+/** A full-screen child without a scroll protocol still needs the escape hatch. */
+const TERMINAL_CONTROL_HINTS: readonly { key: string; label: string }[] = [
+  { key: ESCAPE_HATCH, label: 'control / pane keys' },
+  { key: 'then tab/shift-tab', label: 'next / previous pane' },
+];
+
+/** The escape-hatch mode when no application scroll protocol is available. */
+const TERMINAL_CONTROL_MODE_HINTS: readonly { key: string; label: string }[] = [
+  { key: '</>', label: 'width' },
+  { key: '=', label: 'reset' },
+  { key: ESCAPE_HATCH, label: 'resume' },
+  { key: 'esc', label: 'resume' },
+  { key: 'tab', label: 'next pane' },
+  { key: 'shift-tab', label: 'previous pane' },
+];
+
+/** Normal-buffer SCROLL mode, backed by xterm's retained lines. */
 const TERMINAL_SCROLL_HINTS: readonly { key: string; label: string }[] = [
   { key: 'k/j', label: 'line' },
   { key: 'u/d', label: 'page' },
   { key: 'g/G', label: 'top/live' },
+  { key: '</>', label: 'width' },
+  { key: '=', label: 'reset' },
   { key: 'esc', label: 'resume' },
-  { key: 'tab', label: 'leave' },
+  { key: 'tab', label: 'next pane' },
+  { key: 'shift-tab', label: 'previous pane' },
+];
+
+/** Alternate-screen SCROLL mode, translated into child-owned wheel gestures. */
+const TERMINAL_APP_SCROLL_HINTS: readonly { key: string; label: string }[] = [
+  { key: 'k/j', label: 'app line' },
+  { key: 'u/d', label: 'app page' },
+  { key: '</>', label: 'width' },
+  { key: '=', label: 'reset' },
+  { key: 'esc', label: 'resume' },
+  { key: 'tab', label: 'next pane' },
+  { key: 'shift-tab', label: 'previous pane' },
 ];
 
 export const editorPage: Page = {
@@ -379,7 +864,7 @@ export const editorPage: Page = {
   rowCount: (state, paneId) => {
     switch (paneId) {
       case 'files':
-        return cachedScripts().length;
+        return visibleEditorTree(state).rows.length;
       case 'inputs':
         return bufferInputs(state.editor).length;
       case 'editor':
@@ -394,7 +879,15 @@ export const editorPage: Page = {
   hints: (state) => {
     const focus = state.panes.editor.focus;
     if (focus === TERMINAL_PANE) {
-      return state.terminal.scrolling === true ? TERMINAL_SCROLL_HINTS : TERMINAL_HINTS;
+      const session = state.terminal.session;
+      if (state.terminal.scrolling === true) {
+        if (session?.applicationScrollAvailable === true) return TERMINAL_APP_SCROLL_HINTS;
+        if (session?.altScreen === true) return TERMINAL_CONTROL_MODE_HINTS;
+        return TERMINAL_SCROLL_HINTS;
+      }
+      if (session?.applicationScrollAvailable === true) return TERMINAL_APP_HINTS;
+      if (session?.altScreen === true) return TERMINAL_CONTROL_HINTS;
+      return TERMINAL_HINTS;
     }
     return focus === 'editor' ? EDITOR_HINTS : HINTS;
   },
@@ -419,21 +912,42 @@ export const editorPage: Page = {
     // has focus.
     if (focus === TERMINAL_PANE) return undefined;
 
-    // ↵ on FILES opens the file. It does not load it as the strategy to run —
-    // that is BACKTEST's own ↵, and doing both here would make one keypress
-    // change what the next `r` would spawn.
-    const list = cachedScripts();
-    if (list.length === 0) return 'no .pine here — :e path.pine starts one';
-    const entry = list[clampCursor(state.panes.editor.cursor['files'] ?? 0, list.length)];
-    if (entry == null) return undefined;
+    // ↵ on FILES toggles a folder or opens a file. It never loads a file as the
+    // strategy to run — that remains BACKTEST's own ↵, so navigating project
+    // notes cannot change what the next `r` spawns.
+    if (focus === 'editor') return undefined;
+    const { rows, cursor } = visibleEditorTree(state);
+    if (rows.length === 0) {
+      const query = state.listSearch.files;
+      return query.trim() === ''
+        ? 'no .pine or .md here — :e path starts one'
+        : `no files match /${query}`;
+    }
+    const row = rows[cursor];
+    if (row == null) return undefined;
 
-    if (focus === 'editor' && state.editor.buffer != null) return undefined;
-    if (state.editor.buffer?.modified === true && state.editor.buffer.path !== entry.path) {
+    if (row.kind === 'folder') {
+      if (state.listSearch.files.trim() !== '') {
+        return 'clear the FILES search to collapse folders';
+      }
+      if (row.expanded) state.editorTree.collapsed[row.id] = true;
+      else delete state.editorTree.collapsed[row.id];
+      state.editorTree.selectedId = row.id;
+      return `${row.expanded ? 'collapsed' : 'expanded'} ${row.path}`;
+    }
+
+    // Re-selecting the open file only enters its buffer. Calling openFile here
+    // would reload the disk copy and could silently discard an unwritten edit.
+    if (state.editor.buffer?.path === row.path) {
+      state.panes.editor.focus = 'editor';
+      return `editing ${row.entry.label}`;
+    }
+    if (state.editor.buffer?.modified === true) {
       return 'unwritten changes — :w to write, or :e! to discard';
     }
-    openFile(state.editor, entry.path);
+    openFile(state.editor, row.path);
     state.panes.editor.focus = 'editor';
-    return `editing ${entry.label}.pine — i inserts, :w writes`;
+    return `editing ${row.entry.label} — i inserts, :w writes`;
   },
 
   /**
@@ -451,6 +965,7 @@ export const editorPage: Page = {
   },
 
   onKey: (state, key) => {
+    if (state.panes.editor.focus === 'files' && handleFilesKey(state, key.name)) return true;
     if (state.panes.editor.focus !== 'editor') return false;
     const outcome = handleKey(state.editor, key);
     // A file written for the first time has to appear in FILES, and in the
@@ -468,10 +983,15 @@ export const editorPage: Page = {
     // appends one rect that absorbs the remainder, so the buffer is the absorber
     // in both cases and never has to be measured.
     const showTerminal = terminalVisible(state, body.w);
-    // Published for the focus ring, which cannot measure anything itself. Written
-    // every frame, so a resize is reflected by the time the next key is handled.
+    // Published for the focus ring and raw terminal controls, neither of which can
+    // measure the screen itself. Written every frame so an outer resize is reflected
+    // by the time the next key is handled.
     state.terminal.visible = showTerminal;
-    const termW = showTerminal ? terminalWidth(body.w) : 0;
+    const width = showTerminal
+      ? terminalWidths(body.w, sidebarW, state.terminal.preferredWidth)
+      : undefined;
+    state.terminal.width = width;
+    const termW = width?.rendered ?? 0;
     const [sidebar, main, terminalRect] = (
       showTerminal
         ? columns(body, [sidebarW, body.w - sidebarW - termW])

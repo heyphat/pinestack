@@ -18,6 +18,7 @@ import { COMMANDS } from './flags/schema.js';
 import type { EditorState } from './editor/state.js';
 import { initialEditor } from './editor/state.js';
 import type { LogLine } from './run/spawn.js';
+import type { GitStatusSnapshot } from './git-status.js';
 import { initialTerminalPane, type TerminalPaneState } from './term/pane.js';
 
 export type RunStatus = 'idle' | 'running' | 'ok' | 'failed';
@@ -52,46 +53,6 @@ export interface RunState {
    * of an older one's error — the next failure announces itself.
    */
   errorDismissed?: boolean;
-}
-
-/** One AI turn: what was asked, what came back (§4.5.b). */
-export interface AskTurn {
-  question: string;
-  answer: string;
-  at: number;
-}
-
-export interface ProposalEdit {
-  /** A real Pine `input()` title — never a display string (§4.5.e). */
-  input: string;
-  from: string;
-  /** A bare value: `--input maxHoldH=18`, never `18 h`. */
-  to: string;
-  /** The human string, which never reaches argv. */
-  display: string;
-}
-
-export interface Proposal {
-  effect: string;
-  note: string;
-  edits: ProposalEdit[];
-}
-
-/** Returned instead of edits when a parameter change would be malpractice (§4.5.d). */
-export interface AskAction {
-  label: string;
-  key: string;
-}
-
-export interface AskState {
-  open: boolean;
-  /** What the user is typing right now. */
-  input: string;
-  transcript: AskTurn[];
-  pending: Proposal | null;
-  action: AskAction | null;
-  busy: boolean;
-  error?: string;
 }
 
 export type OverlayKind = 'none' | 'help' | 'run' | 'palette' | 'filter' | 'welcome';
@@ -142,6 +103,23 @@ export interface PaneSelection {
   cursor: Record<string, number>;
 }
 
+/** Transient expansion and stable selection for EDITOR's project tree. */
+export interface EditorTreeState {
+  /** Folder row ids absent from this map are expanded by default. */
+  collapsed: Record<string, true>;
+  /** Stable across insertion, deletion, and collapsing rows above it. */
+  selectedId?: string;
+}
+
+export type ListSearchTarget = 'files' | 'strategies';
+
+/** Session-only live filters for the two project-file pickers. */
+export interface ListSearchState {
+  active: ListSearchTarget | null;
+  files: string;
+  strategies: string;
+}
+
 export interface AppState {
   page: PageId;
   /** Focus ring position and per-pane cursors, kept per page. */
@@ -152,7 +130,6 @@ export interface AppState {
   run: RunState | null;
   /** Past runs this session, newest last, for COMPARE and the run picker. */
   history: RunState[];
-  ask: AskState;
   overlay: Overlay;
   /** The field currently being typed into, in the pane or the dialog (§10.2). */
   edit: EditState | null;
@@ -162,6 +139,12 @@ export interface AppState {
    * file on disk, the same reason overrides are not persisted (§4.5.c).
    */
   editor: EditorState;
+  /** Session-only folder expansion and row identity for the FILES tree. */
+  editorTree: EditorTreeState;
+  /** Visible, session-only queries for FILES and shared STRATEGIES panes. */
+  listSearch: ListSearchState;
+  /** Optional Git working-tree markers for files shown by the editor. */
+  editorGit: GitStatusSnapshot;
   /**
    * The EDITOR page's shell pane. Not persisted, for a stronger reason than the
    * buffer: a session is a live child process, and a "restored" one would be a
@@ -227,10 +210,12 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
     overrides: {},
     run: null,
     history: [],
-    ask: { open: false, input: '', transcript: [], pending: null, action: null, busy: false },
     overlay: { kind: 'none', buffer: '', cursor: 0 },
     edit: null,
     editor: initialEditor(),
+    editorTree: { collapsed: {} },
+    listSearch: { active: null, files: '', strategies: '' },
+    editorGit: { enabled: false, statuses: {} },
     terminal: initialTerminalPane(),
     showAdvanced: false,
     tradeFilter: '',
@@ -249,15 +234,6 @@ export function overridesFor(state: AppState, command: CommandId): Override[] {
   const key = scriptKey(state, command);
   if (key === '') return [];
   return Object.values(state.overrides[key] ?? {});
-}
-
-export function applyProposal(state: AppState, command: CommandId, proposal: Proposal): void {
-  const key = scriptKey(state, command);
-  if (key === '') return;
-  const bucket = (state.overrides[key] ??= {});
-  for (const edit of proposal.edits) {
-    bucket[edit.input] = { input: edit.input, from: edit.from, to: edit.to };
-  }
 }
 
 export function revertOverrides(state: AppState, command: CommandId): void {

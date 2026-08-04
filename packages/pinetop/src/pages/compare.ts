@@ -260,7 +260,7 @@ export const comparePage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'compare');
-    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === STRATEGIES_PANE) return strategyRowCount(state);
     if (paneId === 'config') return configRowCount(state, 'compare');
     if (paneId === 'metrics') {
       const data = report(state);

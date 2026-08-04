@@ -1,11 +1,8 @@
 /**
  * The app: router, event loop, and the one place a run is started.
  *
- * Two rules this file exists to enforce:
- *  - **Nothing runs without an explicit keypress** (§4.6). Editing a flag never
- *    schedules a spawn; `r` then `↵` does.
- *  - **Nothing mutates config without a keypress** (§4.5.c). The Ask layer can
- *    propose; only `↵` applies, and `ctrl-x` rejects.
+ * Nothing runs without an explicit keypress (§4.6). Editing a flag never
+ * schedules a spawn; `r` then `↵` does.
  */
 
 import { handOff } from './editor/handoff.js';
@@ -19,9 +16,15 @@ import {
   type FlagValue,
   type Pair,
 } from './flags/model.js';
-import { readInputTitles } from './flags/pine-inputs.js';
 import { COMMANDS, PAGES, schemaFor, type CommandId, type PageId } from './flags/schema.js';
-import { discoverScripts } from './scripts.js';
+import type { GitStatusReader, GitStatusSnapshot } from './git-status.js';
+import {
+  cachedEditorFiles,
+  discoverScripts,
+  editorFilesVersion,
+  refreshEditorFiles,
+  refreshScripts,
+} from './scripts.js';
 import {
   matchSequence,
   paneAccelerators,
@@ -31,8 +34,6 @@ import {
   type Action,
 } from './keymap.js';
 import {
-  askHeight,
-  drawAsk,
   drawError,
   drawFilter,
   drawHelp,
@@ -53,18 +54,17 @@ import { evictHistory } from './pages/history-pane.js';
 import type { Page } from './pages/page.js';
 import { clampCursor } from './pages/page.js';
 import { portfolioPage } from './pages/portfolio.js';
-import { refreshScripts } from './scripts.js';
 import { scanPage } from './pages/scan.js';
 import { selectedCombo, sweepPage } from './pages/sweep.js';
 import { logsPage } from './pages/logs.js';
+import { STRATEGIES_PANE } from './pages/strategies-pane.js';
 import { walkforwardPage } from './pages/walkforward.js';
 import { saveFlags } from './persist.js';
 import { Screen } from './render/screen.js';
 import { appendSession } from './run/session-log.js';
 import { runPinerun, type SpawnOptions } from './run/spawn.js';
-import type { AppState, EditState, RunState } from './state.js';
-import { applyProposal, nextRunId, overridesFor, revertOverrides } from './state.js';
-import { groundReport, parseAskResponse, type AskProvider } from './ask/protocol.js';
+import type { AppState, EditState, ListSearchTarget, RunState } from './state.js';
+import { nextRunId, overridesFor, revertOverrides } from './state.js';
 import type { Key, Terminal } from './terminal.js';
 
 /**
@@ -96,6 +96,23 @@ const TERMINAL_PAINT_MS = 16;
  * keystroke latency.
  */
 const DISK_CHECK_MS = 300;
+
+/**
+ * How often a repaint may rescan EDITOR's bounded file list and Git markers.
+ *
+ * The scan is synchronous but capped at 200 files/depth 3; Git itself remains
+ * asynchronous and separately bounded by its reader. Cache invalidation from a
+ * write bypasses this delay, so a newly saved file appears immediately.
+ */
+const EDITOR_FILES_CHECK_MS = 750;
+
+function sameGitStatus(a: GitStatusSnapshot, b: GitStatusSnapshot): boolean {
+  if (a.enabled !== b.enabled) return false;
+  const aPaths = Object.keys(a.statuses);
+  const bPaths = Object.keys(b.statuses);
+  if (aPaths.length !== bPaths.length) return false;
+  return aPaths.every((path) => a.statuses[path] === b.statuses[path]);
+}
 
 /** Said once before `q` will discard an unwritten editor buffer. */
 const QUIT_WARNING = 'unwritten changes in the editor — :w to write, or q again to discard';
@@ -158,7 +175,8 @@ export interface AppOptions {
   state: AppState;
   cwd?: string;
   spawn?: SpawnOptions;
-  ask?: AskProvider;
+  /** Optional because Git is decoration and test/headless Apps need no process. */
+  gitStatus?: GitStatusReader;
   /** Test seam: render once and return instead of listening for keys. */
   headless?: boolean;
 }
@@ -168,7 +186,7 @@ export class App {
   private readonly state: AppState;
   private readonly cwd: string;
   private readonly spawnOptions: SpawnOptions;
-  private readonly provider?: AskProvider;
+  private readonly gitStatus?: GitStatusReader;
   private abort?: AbortController;
   private disposers: (() => void)[] = [];
   /** `space` was pressed and the next digit picks a page (§4.2.f). */
@@ -187,13 +205,19 @@ export class App {
   private terminalTick?: ReturnType<typeof setInterval>;
   /** When the open buffer was last compared with the file on disk. */
   private lastDiskCheck = 0;
+  /** Last editor-cache generation incorporated into a FILES discovery. */
+  private knownEditorFilesVersion = editorFilesVersion();
+  private lastEditorFilesCheck = 0;
+  private gitStatusAbort?: AbortController;
+  /** Invalidates readers that settle after a replacement query or shutdown. */
+  private gitStatusGeneration = 0;
 
   constructor(opts: AppOptions) {
     this.terminal = opts.terminal;
     this.state = opts.state;
     this.cwd = opts.cwd ?? process.cwd();
     this.spawnOptions = opts.spawn ?? {};
-    this.provider = opts.ask;
+    this.gitStatus = opts.gitStatus;
   }
 
   get page(): Page {
@@ -206,11 +230,10 @@ export class App {
     const page = this.page;
     this.state.widthWarning = widthWarning(page, cols);
 
-    // Both drawers displace the page rather than covering it: an error you have
+    // Error drawers displace the page rather than covering it: an error you have
     // to move something to read is an error you will misread.
-    const askRows = askHeight(this.state);
     const errorRows = errorHeight(this.state);
-    const body = drawFrame(screen, this.state, page, askRows + errorRows);
+    const body = drawFrame(screen, this.state, page, errorRows);
 
     const focus = this.focusId();
     const paneKeys = this.paneKeys();
@@ -234,16 +257,7 @@ export class App {
       screen.text(1, body.y + body.h - 1, this.state.widthWarning, '33');
     }
 
-    // Above the Ask drawer, which keeps the bottom row it has always had.
-    drawError(screen, this.state, askRows);
-    if (this.state.ask.open) {
-      drawAsk(
-        screen,
-        this.state,
-        this.provider?.label ?? 'no ask provider',
-        this.provider?.remote ?? false,
-      );
-    }
+    drawError(screen, this.state);
 
     switch (this.state.overlay.kind) {
       case 'help':
@@ -272,7 +286,65 @@ export class App {
 
   paint(): void {
     this.checkDisk();
+    this.checkEditorFiles();
     this.terminal.paint(this.render());
+  }
+
+  /**
+   * Refresh the bounded FILES cache and launch one optional, non-blocking Git read.
+   *
+   * A write or external-sync invalidation bypasses the throttle. Periodic checks
+   * also notice files added elsewhere and Git-only transitions such as staging a
+   * file, which do not necessarily change its mtime.
+   */
+  private checkEditorFiles(): void {
+    if (this.state.page !== 'editor') return;
+
+    const now = Date.now();
+    const invalidated = editorFilesVersion() !== this.knownEditorFilesVersion;
+    if (
+      !invalidated &&
+      this.lastEditorFilesCheck !== 0 &&
+      now - this.lastEditorFilesCheck < EDITOR_FILES_CHECK_MS
+    ) {
+      return;
+    }
+
+    if (!invalidated) refreshEditorFiles();
+    const files = cachedEditorFiles(this.cwd);
+    this.knownEditorFilesVersion = editorFilesVersion();
+    this.lastEditorFilesCheck = now;
+    this.startGitStatus(files.map((entry) => entry.path));
+  }
+
+  private startGitStatus(paths: readonly string[]): void {
+    const reader = this.gitStatus;
+    if (reader == null) return;
+
+    this.gitStatusAbort?.abort();
+    const controller = new AbortController();
+    const generation = ++this.gitStatusGeneration;
+    this.gitStatusAbort = controller;
+
+    // Starting through a resolved promise also contains a synchronously throwing
+    // injected reader. Runtime Git failures are decoration failures: the FILES
+    // pane simply behaves as it does outside a repository.
+    void Promise.resolve()
+      .then(() => reader(this.cwd, paths, controller.signal))
+      .catch((): GitStatusSnapshot => ({
+        enabled: false,
+        statuses: {},
+      }))
+      .then((snapshot) => {
+        if (controller.signal.aborted || generation !== this.gitStatusGeneration) return;
+        this.gitStatusAbort = undefined;
+        if (sameGitStatus(this.state.editorGit, snapshot)) return;
+        this.state.editorGit = {
+          enabled: snapshot.enabled,
+          statuses: { ...snapshot.statuses },
+        };
+        this.paint();
+      });
   }
 
   /**
@@ -296,7 +368,7 @@ export class App {
 
   start(): void {
     this.terminal.open();
-    if (this.state.page === 'editor') ensureEditorFile(this.state);
+    if (this.state.page === 'editor') ensureEditorFile(this.state, this.cwd);
     process.stdout.write(`\x1b]2;${windowTitle(this.state)}\x07`);
     // Raw first: while the shell pane has focus the child gets the bytes, and the
     // decode-to-`Key` path never runs at all.
@@ -318,6 +390,9 @@ export class App {
     for (const dispose of this.disposers) dispose();
     this.disposers = [];
     this.abort?.abort();
+    this.gitStatusGeneration += 1;
+    this.gitStatusAbort?.abort();
+    this.gitStatusAbort = undefined;
     // Before the flags are saved, because a shell holding the pty open would keep
     // the process alive past the frame coming down.
     this.closeTerminal();
@@ -338,9 +413,17 @@ export class App {
     const verdict = routeRawKey(this.state.terminal, chunk);
     switch (verdict.kind) {
       case 'leave':
-        this.leaveTerminal();
-        this.state.status =
-          verdict.reason === 'hatch' ? 'left the shell' : 'left the shell — t returns';
+        if (verdict.reason === 'hatch') {
+          // The prefix reclaimed Tab from the child, so preserve the direction it
+          // has everywhere else in the frame instead of always restoring returnTo.
+          this.moveFocus(verdict.direction);
+          this.state.status = verdict.direction > 0 ? 'next pane' : 'previous pane';
+        } else {
+          // Prompt-level Esc is a non-directional exit and returns to the pane that
+          // opened the shell, as it did before directional prefix navigation.
+          this.leaveTerminal();
+          this.state.status = 'left the shell — t returns';
+        }
         this.paint();
         return true;
       case 'pane':
@@ -409,7 +492,7 @@ export class App {
 
     if (pane.session != null) {
       this.enterTerminal();
-      this.state.status = 'shell — ctrl-t leaves, esc leaves unless a full-screen app has it';
+      this.state.status = 'shell — ctrl-t then tab/shift-tab changes pane; esc leaves at a prompt';
     }
   }
 
@@ -583,6 +666,62 @@ export class App {
     this.state.panes[this.state.page].focus = panes[next]!;
   }
 
+  /** The focused pane whose always-visible search row owns `/`, if any. */
+  private focusedListSearchTarget(): ListSearchTarget | null {
+    const focus = this.focusId();
+    if (this.state.page === 'editor' && focus === 'files') return 'files';
+    if (this.page.command != null && focus === STRATEGIES_PANE) return 'strategies';
+    return null;
+  }
+
+  /** Update a live list query and return filtered strategy panes to their first row. */
+  private setListSearchQuery(target: ListSearchTarget, query: string): void {
+    if (this.state.listSearch[target] === query) return;
+    this.state.listSearch[target] = query;
+    if (target === 'files') {
+      this.state.panes.editor.cursor['files'] = 0;
+      return;
+    }
+    // STRATEGIES is one shared query over one shared cache. A cursor from any
+    // command page may now be past the end or point at a different script.
+    for (const command of COMMANDS) {
+      this.state.panes[command].cursor[STRATEGIES_PANE] = 0;
+    }
+  }
+
+  /** Keys while one of the in-pane list search rows is being edited. */
+  private onListSearchKey(key: Key): void {
+    const state = this.state;
+    const target = state.listSearch.active;
+    if (target == null) return;
+
+    if (key.name === 'escape') {
+      this.setListSearchQuery(target, '');
+      state.listSearch.active = null;
+      state.status = `${target.toUpperCase()} search cleared`;
+      return;
+    }
+    if (key.name === 'enter') {
+      state.listSearch.active = null;
+      state.status =
+        state.listSearch[target].trim() === ''
+          ? `${target.toUpperCase()} search closed`
+          : `${target.toUpperCase()} filtered by /${state.listSearch[target]}`;
+      return;
+    }
+    if (key.name === 'backspace') {
+      this.setListSearchQuery(target, state.listSearch[target].slice(0, -1));
+      return;
+    }
+    if (key.name === 'ctrl-u') {
+      this.setListSearchQuery(target, '');
+      return;
+    }
+    if (key.text != null) {
+      this.setListSearchQuery(target, state.listSearch[target] + key.text);
+    }
+  }
+
   /**
    * This page's pane accelerators (§4.2.h) — nothing while the page owns the
    * keyboard, because a badge on a pane whose key the EDITOR buffer is about to
@@ -590,6 +729,7 @@ export class App {
    */
   private paneKeys(): Map<string, string> {
     const page = this.page;
+    if (this.state.listSearch.active != null) return new Map();
     if (page.claimsKeyboard?.(this.state) === true) return new Map();
     return paneAccelerators(page.panes(this.state));
   }
@@ -613,13 +753,16 @@ export class App {
       this.paint();
       return;
     }
-    // Overlays and the Ask prompt own the keyboard while they are open.
+    // Overlays own the keyboard while they are open.
     if (this.state.overlay.kind !== 'none') {
       this.onOverlayKey(key);
       this.paint();
       return;
     }
-    if (this.state.ask.open && this.onAskKey(key)) {
+    // In-pane searches are text inputs too. They come after overlays but before
+    // page prefixes, page-local Vim keys, accelerators, and the global keymap.
+    if (this.state.listSearch.active != null) {
+      this.onListSearchKey(key);
       this.paint();
       return;
     }
@@ -755,7 +898,7 @@ export class App {
         this.paneJump = '';
         // Arriving at EDITOR with nothing open is a blank screen beside a project
         // full of scripts; open the loaded one (see `ensureEditorFile`).
-        if (action.page === 'editor') ensureEditorFile(state);
+        if (action.page === 'editor') ensureEditorFile(state, this.cwd);
         process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
         break;
       case 'page-prefix':
@@ -780,11 +923,6 @@ export class App {
         break;
       }
       case 'confirm': {
-        // A pending proposal is what ↵ means whenever one exists (§4.5.c).
-        if (state.ask.pending != null) {
-          this.applyPending();
-          break;
-        }
         // ↵ on the config pane edits that flag in place (§10.2), so the whole
         // invocation can be built inside the page without a dialog.
         const command = this.page.command;
@@ -817,18 +955,24 @@ export class App {
       case 'toggle-terminal':
         this.toggleTerminal();
         break;
-      case 'filter':
-        state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };
+      case 'filter': {
+        const target = this.focusedListSearchTarget();
+        if (target != null) {
+          state.listSearch.active = target;
+          this.paneJump = '';
+          state.status = `${target.toUpperCase()} search`;
+        } else if (state.page === 'logs') {
+          state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };
+        } else {
+          state.status = '/ searches FILES or STRATEGIES · on LOGS it filters fills';
+        }
         break;
+      }
       case 'toggle-advanced':
         state.showAdvanced = !state.showAdvanced;
         state.status = state.showAdvanced
           ? 'showing every flag — . hides the advanced ones again'
           : 'advanced flags hidden';
-        break;
-      case 'ask':
-        state.ask.open = true;
-        state.ask.error = undefined;
         break;
       case 'palette':
         state.overlay = { kind: 'palette', buffer: '', cursor: 0 };
@@ -839,11 +983,8 @@ export class App {
       case 'escape':
         this.onEscape();
         break;
-      case 'reject-proposal':
-        if (state.ask.pending != null) {
-          state.ask.pending = null;
-          state.status = 'proposal rejected';
-        } else if (this.page.command != null && overridesFor(state, this.page.command).length > 0) {
+      case 'revert-overrides':
+        if (this.page.command != null && overridesFor(state, this.page.command).length > 0) {
           revertOverrides(state, this.page.command);
           state.status = 'pending edits reverted';
         }
@@ -893,15 +1034,17 @@ export class App {
       state.overlay = { kind: 'none', buffer: '', cursor: 0 };
       return;
     }
-    if (state.ask.open) {
-      state.ask.open = false;
-      return;
-    }
     // The failure drawer outranks the filter and the log scope: it is the newest
     // thing on screen and the one `esc` most likely meant.
     if (errorHeight(state) > 0 && state.run != null) {
       state.run.errorDismissed = true;
       state.status = 'dismissed — the engine log is on LOGS';
+      return;
+    }
+    const searchTarget = this.focusedListSearchTarget();
+    if (searchTarget != null && state.listSearch[searchTarget] !== '') {
+      this.setListSearchQuery(searchTarget, '');
+      state.status = `${searchTarget.toUpperCase()} search cleared`;
       return;
     }
     if (state.logScope != null) {
@@ -943,6 +1086,7 @@ export class App {
           return;
         }
         if (key.name === 'backspace') overlay.buffer = overlay.buffer.slice(0, -1);
+        else if (key.name === 'ctrl-u') overlay.buffer = '';
         else if (key.text != null) overlay.buffer += key.text;
         return;
 
@@ -1282,104 +1426,5 @@ export class App {
           : 'carried the sweep grid into WALKFORWARD — press r to validate it';
     }
     state.page = 'walkforward';
-  }
-
-  // ————————————————————————————————————————————————————————————— the drawer
-
-  /** Returns true when the drawer consumed the key. */
-  private onAskKey(key: Key): boolean {
-    const state = this.state;
-
-    if (key.name === 'escape') {
-      state.ask.open = false;
-      return true;
-    }
-    if (key.name === 'ctrl-x') {
-      if (state.ask.pending != null) {
-        state.ask.pending = null;
-        state.status = 'proposal rejected';
-      }
-      return true;
-    }
-    if (key.name === 'enter') {
-      if (state.ask.pending != null) {
-        this.applyPending();
-        return true;
-      }
-      const question = state.ask.input.trim();
-      if (question === '') return true;
-      state.ask.input = '';
-      void this.ask(question);
-      return true;
-    }
-    if (key.name === 'backspace') {
-      state.ask.input = state.ask.input.slice(0, -1);
-      return true;
-    }
-    if (key.text != null) {
-      state.ask.input += key.text;
-      return true;
-    }
-    return false;
-  }
-
-  private applyPending(): void {
-    const state = this.state;
-    const proposal = state.ask.pending;
-    const command = this.page.command;
-    if (proposal == null || command == null) return;
-    applyProposal(state, command, proposal);
-    state.ask.pending = null;
-    state.status = `applied ${proposal.edits.length} edit(s) — not yet re-run`;
-  }
-
-  async ask(question: string): Promise<void> {
-    const state = this.state;
-    if (this.provider == null) {
-      state.ask.error = 'no ask provider configured — pass one to the App (§9: opt-in)';
-      this.paint();
-      return;
-    }
-
-    const command = this.page.command;
-    const model =
-      command == null
-        ? undefined
-        : withOverrides(state.flags[command], overridesFor(state, command));
-    const script = command == null ? undefined : state.flags[command].scripts[0];
-    const titles = script == null ? [] : readInputTitles(script);
-
-    state.ask.busy = true;
-    state.ask.error = undefined;
-    this.paint();
-
-    try {
-      const raw = await this.provider.ask(question, {
-        command: command ?? 'logs',
-        invocation: model == null ? '' : composeArgv(model).join(' '),
-        report: groundReport(state.run?.report),
-        inputTitles: titles,
-      });
-      const parsed = parseAskResponse(raw, titles);
-      state.ask.busy = false;
-
-      if (parsed.error != null || parsed.response == null) {
-        state.ask.error = parsed.error ?? 'ask: empty response';
-        this.paint();
-        return;
-      }
-      state.ask.transcript.push({
-        question,
-        answer: parsed.response.answer,
-        at: Date.now(),
-      });
-      state.ask.pending = parsed.response.proposal ?? null;
-      state.ask.action = parsed.response.action ?? null;
-      if (parsed.warnings.length > 0) state.ask.error = parsed.warnings.join(' · ');
-    } catch (err) {
-      state.ask.busy = false;
-      state.ask.error = `ask failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
-    this.paint();
   }
 }

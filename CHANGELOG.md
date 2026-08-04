@@ -81,6 +81,36 @@ without being announced as a release.
   synchronization guard. Opting out takes an explicit
   `requireExecutionSafety: false`.
 
+## [0.9.3] - 2026-08-04
+
+`pinetop` only — no `pinerun`, `pinery`, or `pinelive` behaviour changes, and no
+`--json` contract moves.
+
+### Added
+
+- **The shell column's width is adjustable.** In `ctrl-t` mode, `>` and `<` grow
+  and shrink the pane four columns at a time and `=` returns it to the
+  responsive default. The choice lasts for the pinetop session, and growth is
+  clamped so the source buffer never drops below the 45 columns it would have
+  had when the pane first fit.
+
+### Fixed
+
+- **Scrolling a full-screen program in the shell pane now scrolls the program.**
+  The alternate screen keeps no terminal history, so SCROLL mode's keys used to
+  do nothing under `claude`, `vim` or `htop`. When the child negotiated SGR
+  mouse tracking, `k`/`j`/`u`/`d` in `ctrl-t` mode are now delivered as the
+  wheel gestures it asked for, and the program moves through the history it
+  owns — the border reads `APP SCROLL` and the hint strip swaps to `app line` /
+  `app page`. A full-screen child without mouse tracking shows `CONTROL`
+  instead: the width keys and the exits still work, and everything else resumes
+  the child.
+
+- **A program in the shell pane no longer shares pinetop's controlling
+  terminal.** The child is now spawned into its own session, so a nested
+  `ctrl-c` can no longer trip job control on the outer terminal and stop both
+  the shell and the program it was running.
+
 ## [0.9.2] - 2026-08-04
 
 `pinetop` only — no `pinerun`, `pinery`, or `pinelive` behaviour changes, and no
@@ -700,7 +730,8 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
-[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.1...HEAD
+[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/heyphat/pinestack/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/heyphat/pinestack/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/heyphat/pinestack/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/heyphat/pinestack/compare/v0.8.0...v0.9.0

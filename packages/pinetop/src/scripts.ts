@@ -1,21 +1,38 @@
 /**
- * Script discovery for the STRATEGIES pane.
+ * Bounded project-file discovery.
  *
- * §3 NG4 — pinetop is not a Pine editor. It finds scripts and reloads them; the
- * user edits them elsewhere. `mtime` is tracked so the pane can mark a script
- * that changed on disk since the loaded run, which is the only honest way to
- * say "this report is stale" without reading the source.
+ * Runnable strategies and editor files deliberately have separate public views:
+ * every strategy is a `.pine`, while the editor may also open project Markdown.
+ * Keeping that distinction here makes it impossible for README.md to leak into a
+ * `pinerun` argv just because both kinds appear in the EDITOR page's FILES pane.
  */
 
 import { readdirSync, statSync, type Dirent } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { readInputTitles } from './flags/pine-inputs.js';
 
 export interface ScriptEntry {
   /** Path as it will appear in argv — relative to cwd when it is below it. */
   path: string;
-  /** Basename without the .pine extension, for the pane. */
+  /** Basename without the .pine extension, for strategy panes. */
   label: string;
+  mtimeMs: number;
+}
+
+export type EditorFileKind = 'pine' | 'markdown';
+
+export interface EditorFileEntry {
+  /** Relative project path, suitable for opening from the process cwd. */
+  path: string;
+  /** Relative path including its extension, so README.md and README.pine differ. */
+  label: string;
+  kind: EditorFileKind;
+  mtimeMs: number;
+}
+
+interface DiscoveredFile {
+  path: string;
+  name: string;
   mtimeMs: number;
 }
 
@@ -31,12 +48,17 @@ const SKIP = new Set([
 ]);
 
 /**
- * Find `.pine` files, breadth-first, to `depth` directory levels. Bounded on
- * purpose: the pane shows a project's strategies, and walking a home directory
- * to find them would make startup unpredictable.
+ * Walk matching project files breadth-first. The bound keeps opening Pinetop in
+ * a large directory predictable, and hidden/build directories stay out of both
+ * the strategy picker and the text-file picker.
  */
-export function discoverScripts(cwd = process.cwd(), depth = 3, limit = 200): ScriptEntry[] {
-  const found: ScriptEntry[] = [];
+function discoverFiles(
+  cwd: string,
+  accepts: (name: string) => boolean,
+  depth: number,
+  limit: number,
+): DiscoveredFile[] {
+  const found: DiscoveredFile[] = [];
   let frontier: { dir: string; level: number }[] = [{ dir: cwd, level: 0 }];
 
   while (frontier.length > 0 && found.length < limit) {
@@ -56,17 +78,17 @@ export function discoverScripts(cwd = process.cwd(), depth = 3, limit = 200): Sc
           next.push({ dir: full, level: level + 1 });
           continue;
         }
-        if (!entry.isFile() || !entry.name.endsWith('.pine')) continue;
+        if (!entry.isFile() || !accepts(entry.name)) continue;
         let mtimeMs = 0;
         try {
           mtimeMs = statSync(full).mtimeMs;
         } catch {
-          // Unreadable stat is not fatal — the path is still runnable.
+          // An unreadable stat does not make a discovered path disappear.
         }
         const rel = relative(cwd, full);
         found.push({
           path: rel === '' || rel.startsWith('..') ? full : rel,
-          label: entry.name.replace(/\.pine$/, ''),
+          name: entry.name,
           mtimeMs,
         });
         if (found.length >= limit) break;
@@ -76,7 +98,39 @@ export function discoverScripts(cwd = process.cwd(), depth = 3, limit = 200): Sc
     frontier = next;
   }
 
-  return found.sort((a, b) => a.label.localeCompare(b.label));
+  return found;
+}
+
+/** Find runnable `.pine` strategies for command pages and bootstrap. */
+export function discoverScripts(cwd = process.cwd(), depth = 3, limit = 200): ScriptEntry[] {
+  return discoverFiles(cwd, (name) => name.endsWith('.pine'), depth, limit)
+    .map((entry) => ({
+      path: entry.path,
+      label: entry.name.replace(/\.pine$/, ''),
+      mtimeMs: entry.mtimeMs,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** Find text files the embedded editor explicitly supports. */
+export function discoverEditorFiles(
+  cwd = process.cwd(),
+  depth = 3,
+  limit = 200,
+): EditorFileEntry[] {
+  return discoverFiles(cwd, (name) => name.endsWith('.pine') || name.endsWith('.md'), depth, limit)
+    .map((entry) => ({
+      path: entry.path,
+      label: entry.path.replaceAll('\\', '/'),
+      kind: entry.name.endsWith('.pine') ? ('pine' as const) : ('markdown' as const),
+      mtimeMs: entry.mtimeMs,
+    }))
+    .sort((a, b) => {
+      // Preserve the old Pine-first starting point while making Markdown
+      // available in the same picker.
+      if (a.kind !== b.kind) return a.kind === 'pine' ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
 }
 
 export function scriptLabel(path: string): string {
@@ -84,26 +138,50 @@ export function scriptLabel(path: string): string {
   return base.replace(/\.pine$/, '');
 }
 
-/**
- * Discovery hits the filesystem, so it is cached for the process lifetime and
- * shared: the STRATEGIES pane and the editor's FILES pane must not disagree
- * about which scripts exist, and `:w` on a new file has to make it appear in
- * both.
- */
-let cache: ScriptEntry[] | undefined;
+/** Basename including extension, for a language-neutral editor title. */
+export function editorFileLabel(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Strategy discovery is cached because every command page asks every frame. */
+let scriptCache: ScriptEntry[] | undefined;
 
 export function cachedScripts(cwd?: string): ScriptEntry[] {
-  cache ??= discoverScripts(cwd);
-  return cache;
+  scriptCache ??= discoverScripts(cwd);
+  return scriptCache;
+}
+
+/** Editor discovery has its own cache so Markdown never enters strategy panes. */
+let editorFileCache: EditorFileEntry[] | undefined;
+let editorFileCacheCwd: string | undefined;
+let editorFileVersion = 0;
+
+export function cachedEditorFiles(cwd?: string): EditorFileEntry[] {
+  if (cwd == null && editorFileCache != null) return editorFileCache;
+  const absoluteCwd = resolve(cwd ?? process.cwd());
+  if (editorFileCache == null || editorFileCacheCwd !== absoluteCwd) {
+    editorFileCache = discoverEditorFiles(absoluteCwd);
+    editorFileCacheCwd = absoluteCwd;
+  }
+  return editorFileCache;
+}
+
+/** Monotonic invalidation token used to refresh optional Git status promptly. */
+export function editorFilesVersion(): number {
+  return editorFileVersion;
+}
+
+export function refreshEditorFiles(): void {
+  editorFileCache = undefined;
+  editorFileCacheCwd = undefined;
+  editorFileVersion += 1;
 }
 
 /**
  * A script's `input()` titles, read once.
  *
  * The INPUTS pane asks for these on every frame, and a synchronous file read per
- * frame is not something a redraw should cost. Cleared with the script list,
- * which covers the two ways the titles change from under us: a `:w` in the
- * editor, and a return from `$EDITOR`.
+ * frame is not something a redraw should cost. Cleared whenever scripts refresh.
  */
 const titles = new Map<string, string[]>();
 
@@ -116,8 +194,9 @@ export function cachedInputTitles(path: string): string[] {
   return found;
 }
 
-/** Drop the caches: a script was added, renamed, or written. */
+/** Drop both file views after a script was added, renamed, or written. */
 export function refreshScripts(): void {
-  cache = undefined;
+  scriptCache = undefined;
   titles.clear();
+  refreshEditorFiles();
 }

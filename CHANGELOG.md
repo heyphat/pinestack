@@ -94,6 +94,18 @@ without being announced as a release.
   clamped so the source buffer never drops below the 45 columns it would have
   had when the pane first fit.
 
+- **EDITOR's FILES pane now includes a project tree, Markdown, and Git state.**
+  Lowercase `.pine` and `.md` files are grouped into expandable folder rows;
+  `j`/`k` moves through visible rows, `↵` toggles folders or opens files, and
+  `←`/`→` navigates parents and children. Markdown is rendered as plain text and
+  remains excluded from runnable strategy and `input()` discovery. In a Git
+  worktree, FILES shows a changed count plus per-path `M` / `A` / `D` / `R` / `?`
+  / `U` badges; a collapsed folder retains a dot and hidden-change count, while
+  the existing final `+` continues to mean an unwritten in-memory buffer. Git
+  detection is asynchronous, bounded, and disappears cleanly outside
+  repositories; full hunks remain available in the adjacent shell via
+  `git diff`.
+
 ### Removed
 
 - **The unused Ask drawer and global `a` binding are gone.** The packaged CLI

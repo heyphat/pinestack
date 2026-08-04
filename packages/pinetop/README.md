@@ -119,7 +119,7 @@ One tab per command, numbered in workflow order.
 
 | #   | Page        | Command                     | Purpose                                            |
 | --- | ----------- | --------------------------- | -------------------------------------------------- |
-| 1   | EDITOR      | (the `.pine` source)        | Write — the script itself, vim keys                |
+| 1   | EDITOR      | (project text files)        | Write — Pine source and Markdown notes, vim keys   |
 | 2   | BACKTEST    | `pinerun backtest`          | Analyze — one strategy, one symbol, full tearsheet |
 | 3   | SWEEP       | `pinerun sweep`             | Optimize — one script's input grid                 |
 | 4   | WALKFORWARD | `pinerun walkforward`       | Validate — does the swept edge survive OOS         |
@@ -224,14 +224,32 @@ there shows both keyboards side by side.
 
 ## The editor
 
-Page 1 is a vim-modal editor for the `.pine` itself: the project's scripts and
-the open one's `input()` titles in the sidebar, the buffer in the wide middle
-with a line-number gutter and Pine syntax colouring from your terminal's palette.
+Page 1 is a vim-modal editor for the project's lowercase `.pine` and `.md` files:
+the FILES sidebar, the open Pine file's `input()` titles, and the buffer in the
+wide middle with a line-number gutter. Pine files get syntax colouring from your
+terminal's palette; Markdown stays plain text rather than being mis-coloured as
+Pine.
 
 ![The EDITOR page: project scripts and the open script's inputs in the sidebar, the .pine buffer with vim-modal editing in the middle](../../docs/assets/pinetop-editor.png)
 
-It opens on the strategy you already have loaded. `tab` (or `↵` on a file in
-FILES) enters the buffer; from there it is vim:
+Runnable strategies remain Pine-only: Markdown appears in FILES but never enters
+STRATEGIES, `pinerun` arguments, or the INPUTS parser. FILES mirrors the project's
+folder hierarchy, folders first and expanded by default. `j`/`k` moves through
+visible rows, `↵` expands/collapses a folder or opens a file, and `←`/`→` moves to
+a parent or expands into a child.
+
+In a Git working tree, FILES shows a changed-file count and a badge on each
+affected path: `M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked,
+and `U` conflicted. A collapsed folder containing changed files keeps a `•` at
+the right edge and reports the hidden change count in its footer. These are
+working-tree/index status markers, not patch hunks; open the adjacent shell with
+`t` and run `git diff` (or `git diff --staged`) for the complete patch. The final
+`+` cell is separate and means the in-memory editor buffer has not been written.
+Outside a Git repository the Git count and badges simply disappear.
+
+It opens on the Pine strategy you already have loaded, then the first Pine file,
+then the first Markdown file if the project has no Pine source. `tab` (or `↵` on
+a file in FILES) enters the buffer; from there it is vim:
 
 |                     |                                                             |
 | ------------------- | ----------------------------------------------------------- |
@@ -279,12 +297,12 @@ argument, so `f<space>` finds a space and `r<space>` writes one.
   discarding an unwritten buffer. Quitting on a stray `q` would throw away
   edits, which is the one thing this page must not do.
 
-Nothing is written except by `:w`. The INPUTS outline is read from the buffer
-rather than from disk, so a renamed `input()` title shows up there before you
-save — and that is the same list `--input NAME` is checked against. The buffer is
-not persisted between sessions, for the same reason pending parameter edits are
-not: a restored unwritten buffer would be an unexplained divergence from the file
-on disk.
+Nothing is written except by `:w`. For Pine buffers, the INPUTS outline is read
+from the buffer rather than from disk, so a renamed `input()` title shows up there
+before you save — and that is the same list `--input NAME` is checked against.
+Markdown does not produce INPUTS. The buffer is not persisted between sessions,
+for the same reason pending parameter edits are not: a restored unwritten buffer
+would be an unexplained divergence from the file on disk.
 
 `.` (repeat), macros, marks, named registers, visual block and regex search are
 not implemented. `?` lists exactly what is bound, so an unbound key does nothing
@@ -389,8 +407,8 @@ the shell, so a `claude` or `vim` in the pane does not survive as an orphan.
 The column needs the width to be worth having: below 108 columns of body it is
 dropped entirely rather than squeezing the source into nothing.
 
-**The buffer follows the file.** Change the open `.pine` from the shell — `sed -i`,
-`git checkout`, a formatter — and the editor pane reloads it, keeping your cursor
+**The buffer follows the file.** Change the open `.pine` or `.md` from the shell —
+`git checkout`, a formatter, another editor — and the editor pane reloads it, keeping your cursor
 where it was. An _unwritten_ buffer is never overwritten: it says
 `changed on disk — :e! to reload, :w to overwrite` and leaves your edits alone. A
 file deleted underneath you keeps its buffer, marked new, so `:w` puts it back.

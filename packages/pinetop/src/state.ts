@@ -18,6 +18,7 @@ import { COMMANDS } from './flags/schema.js';
 import type { EditorState } from './editor/state.js';
 import { initialEditor } from './editor/state.js';
 import type { LogLine } from './run/spawn.js';
+import type { GitStatusSnapshot } from './git-status.js';
 import { initialTerminalPane, type TerminalPaneState } from './term/pane.js';
 
 export type RunStatus = 'idle' | 'running' | 'ok' | 'failed';
@@ -102,6 +103,14 @@ export interface PaneSelection {
   cursor: Record<string, number>;
 }
 
+/** Transient expansion and stable selection for EDITOR's project tree. */
+export interface EditorTreeState {
+  /** Folder row ids absent from this map are expanded by default. */
+  collapsed: Record<string, true>;
+  /** Stable across insertion, deletion, and collapsing rows above it. */
+  selectedId?: string;
+}
+
 export interface AppState {
   page: PageId;
   /** Focus ring position and per-pane cursors, kept per page. */
@@ -121,6 +130,10 @@ export interface AppState {
    * file on disk, the same reason overrides are not persisted (§4.5.c).
    */
   editor: EditorState;
+  /** Session-only folder expansion and row identity for the FILES tree. */
+  editorTree: EditorTreeState;
+  /** Optional Git working-tree markers for files shown by the editor. */
+  editorGit: GitStatusSnapshot;
   /**
    * The EDITOR page's shell pane. Not persisted, for a stronger reason than the
    * buffer: a session is a live child process, and a "restored" one would be a
@@ -189,6 +202,8 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
     overlay: { kind: 'none', buffer: '', cursor: 0 },
     edit: null,
     editor: initialEditor(),
+    editorTree: { collapsed: {} },
+    editorGit: { enabled: false, statuses: {} },
     terminal: initialTerminalPane(),
     showAdvanced: false,
     tradeFilter: '',

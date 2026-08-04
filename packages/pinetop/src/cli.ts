@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { emptyModel, type Pair } from './flags/model.js';
 import { COMMANDS, PAGES, type CommandId, type PageId } from './flags/schema.js';
 import { App, PAGE_MAP, bootstrap } from './app.js';
+import { readGitStatus } from './git-status.js';
 import { loadFlags } from './persist.js';
 import { probePinerun, resolveBin } from './run/spawn.js';
 import { initialState } from './state.js';
@@ -85,7 +86,7 @@ OPTIONS
 
 KEYS
   1–${PAGES.length} pages · tab panes · j/k move · r run · t shell · : palette · ? help · q quit
-  Page 1 is a vim editor for the .pine itself: i inserts, :w writes, tab leaves.
+  Page 1 is a vim editor for .pine and .md files: i inserts, :w writes, tab leaves.
 
 NOTES
   Credentials are never entered here. Provider keys stay in the environment
@@ -321,7 +322,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   // rather than a puzzle: load an unambiguous script and say what to do next.
   state.status = bootstrap(state) ?? state.status;
 
-  const app = new App({ terminal, state, spawn: { bin } });
+  const app = new App({ terminal, state, spawn: { bin }, gitStatus: readGitStatus });
 
   const shutdown = (): void => {
     app.stop();

@@ -17,7 +17,14 @@ import {
   type Pair,
 } from './flags/model.js';
 import { COMMANDS, PAGES, schemaFor, type CommandId, type PageId } from './flags/schema.js';
-import { discoverScripts } from './scripts.js';
+import type { GitStatusReader, GitStatusSnapshot } from './git-status.js';
+import {
+  cachedEditorFiles,
+  discoverScripts,
+  editorFilesVersion,
+  refreshEditorFiles,
+  refreshScripts,
+} from './scripts.js';
 import {
   matchSequence,
   paneAccelerators,
@@ -47,7 +54,6 @@ import { evictHistory } from './pages/history-pane.js';
 import type { Page } from './pages/page.js';
 import { clampCursor } from './pages/page.js';
 import { portfolioPage } from './pages/portfolio.js';
-import { refreshScripts } from './scripts.js';
 import { scanPage } from './pages/scan.js';
 import { selectedCombo, sweepPage } from './pages/sweep.js';
 import { logsPage } from './pages/logs.js';
@@ -89,6 +95,23 @@ const TERMINAL_PAINT_MS = 16;
  * keystroke latency.
  */
 const DISK_CHECK_MS = 300;
+
+/**
+ * How often a repaint may rescan EDITOR's bounded file list and Git markers.
+ *
+ * The scan is synchronous but capped at 200 files/depth 3; Git itself remains
+ * asynchronous and separately bounded by its reader. Cache invalidation from a
+ * write bypasses this delay, so a newly saved file appears immediately.
+ */
+const EDITOR_FILES_CHECK_MS = 750;
+
+function sameGitStatus(a: GitStatusSnapshot, b: GitStatusSnapshot): boolean {
+  if (a.enabled !== b.enabled) return false;
+  const aPaths = Object.keys(a.statuses);
+  const bPaths = Object.keys(b.statuses);
+  if (aPaths.length !== bPaths.length) return false;
+  return aPaths.every((path) => a.statuses[path] === b.statuses[path]);
+}
 
 /** Said once before `q` will discard an unwritten editor buffer. */
 const QUIT_WARNING = 'unwritten changes in the editor — :w to write, or q again to discard';
@@ -151,6 +174,8 @@ export interface AppOptions {
   state: AppState;
   cwd?: string;
   spawn?: SpawnOptions;
+  /** Optional because Git is decoration and test/headless Apps need no process. */
+  gitStatus?: GitStatusReader;
   /** Test seam: render once and return instead of listening for keys. */
   headless?: boolean;
 }
@@ -160,6 +185,7 @@ export class App {
   private readonly state: AppState;
   private readonly cwd: string;
   private readonly spawnOptions: SpawnOptions;
+  private readonly gitStatus?: GitStatusReader;
   private abort?: AbortController;
   private disposers: (() => void)[] = [];
   /** `space` was pressed and the next digit picks a page (§4.2.f). */
@@ -178,12 +204,19 @@ export class App {
   private terminalTick?: ReturnType<typeof setInterval>;
   /** When the open buffer was last compared with the file on disk. */
   private lastDiskCheck = 0;
+  /** Last editor-cache generation incorporated into a FILES discovery. */
+  private knownEditorFilesVersion = editorFilesVersion();
+  private lastEditorFilesCheck = 0;
+  private gitStatusAbort?: AbortController;
+  /** Invalidates readers that settle after a replacement query or shutdown. */
+  private gitStatusGeneration = 0;
 
   constructor(opts: AppOptions) {
     this.terminal = opts.terminal;
     this.state = opts.state;
     this.cwd = opts.cwd ?? process.cwd();
     this.spawnOptions = opts.spawn ?? {};
+    this.gitStatus = opts.gitStatus;
   }
 
   get page(): Page {
@@ -252,7 +285,65 @@ export class App {
 
   paint(): void {
     this.checkDisk();
+    this.checkEditorFiles();
     this.terminal.paint(this.render());
+  }
+
+  /**
+   * Refresh the bounded FILES cache and launch one optional, non-blocking Git read.
+   *
+   * A write or external-sync invalidation bypasses the throttle. Periodic checks
+   * also notice files added elsewhere and Git-only transitions such as staging a
+   * file, which do not necessarily change its mtime.
+   */
+  private checkEditorFiles(): void {
+    if (this.state.page !== 'editor') return;
+
+    const now = Date.now();
+    const invalidated = editorFilesVersion() !== this.knownEditorFilesVersion;
+    if (
+      !invalidated &&
+      this.lastEditorFilesCheck !== 0 &&
+      now - this.lastEditorFilesCheck < EDITOR_FILES_CHECK_MS
+    ) {
+      return;
+    }
+
+    if (!invalidated) refreshEditorFiles();
+    const files = cachedEditorFiles(this.cwd);
+    this.knownEditorFilesVersion = editorFilesVersion();
+    this.lastEditorFilesCheck = now;
+    this.startGitStatus(files.map((entry) => entry.path));
+  }
+
+  private startGitStatus(paths: readonly string[]): void {
+    const reader = this.gitStatus;
+    if (reader == null) return;
+
+    this.gitStatusAbort?.abort();
+    const controller = new AbortController();
+    const generation = ++this.gitStatusGeneration;
+    this.gitStatusAbort = controller;
+
+    // Starting through a resolved promise also contains a synchronously throwing
+    // injected reader. Runtime Git failures are decoration failures: the FILES
+    // pane simply behaves as it does outside a repository.
+    void Promise.resolve()
+      .then(() => reader(this.cwd, paths, controller.signal))
+      .catch((): GitStatusSnapshot => ({
+        enabled: false,
+        statuses: {},
+      }))
+      .then((snapshot) => {
+        if (controller.signal.aborted || generation !== this.gitStatusGeneration) return;
+        this.gitStatusAbort = undefined;
+        if (sameGitStatus(this.state.editorGit, snapshot)) return;
+        this.state.editorGit = {
+          enabled: snapshot.enabled,
+          statuses: { ...snapshot.statuses },
+        };
+        this.paint();
+      });
   }
 
   /**
@@ -276,7 +367,7 @@ export class App {
 
   start(): void {
     this.terminal.open();
-    if (this.state.page === 'editor') ensureEditorFile(this.state);
+    if (this.state.page === 'editor') ensureEditorFile(this.state, this.cwd);
     process.stdout.write(`\x1b]2;${windowTitle(this.state)}\x07`);
     // Raw first: while the shell pane has focus the child gets the bytes, and the
     // decode-to-`Key` path never runs at all.
@@ -298,6 +389,9 @@ export class App {
     for (const dispose of this.disposers) dispose();
     this.disposers = [];
     this.abort?.abort();
+    this.gitStatusGeneration += 1;
+    this.gitStatusAbort?.abort();
+    this.gitStatusAbort = undefined;
     // Before the flags are saved, because a shell holding the pty open would keep
     // the process alive past the frame coming down.
     this.closeTerminal();
@@ -739,7 +833,7 @@ export class App {
         this.paneJump = '';
         // Arriving at EDITOR with nothing open is a blank screen beside a project
         // full of scripts; open the loaded one (see `ensureEditorFile`).
-        if (action.page === 'editor') ensureEditorFile(state);
+        if (action.page === 'editor') ensureEditorFile(state, this.cwd);
         process.stdout.write(`\x1b]2;${windowTitle(state)}\x07`);
         break;
       case 'page-prefix':

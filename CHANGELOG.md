@@ -94,6 +94,13 @@ without being announced as a release.
   clamped so the source buffer never drops below the 45 columns it would have
   had when the pane first fit.
 
+### Removed
+
+- **The unused Ask drawer and global `a` binding are gone.** The packaged CLI
+  never configured an Ask provider, so the drawer could only open a dead prompt.
+  Interactive assistants now run in the editor's shell pane instead; shared
+  pending config edits and `ctrl-x` rollback remain available.
+
 ### Fixed
 
 - **Scrolling a full-screen program in the shell pane now scrolls the program.**

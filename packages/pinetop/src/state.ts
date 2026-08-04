@@ -54,46 +54,6 @@ export interface RunState {
   errorDismissed?: boolean;
 }
 
-/** One AI turn: what was asked, what came back (§4.5.b). */
-export interface AskTurn {
-  question: string;
-  answer: string;
-  at: number;
-}
-
-export interface ProposalEdit {
-  /** A real Pine `input()` title — never a display string (§4.5.e). */
-  input: string;
-  from: string;
-  /** A bare value: `--input maxHoldH=18`, never `18 h`. */
-  to: string;
-  /** The human string, which never reaches argv. */
-  display: string;
-}
-
-export interface Proposal {
-  effect: string;
-  note: string;
-  edits: ProposalEdit[];
-}
-
-/** Returned instead of edits when a parameter change would be malpractice (§4.5.d). */
-export interface AskAction {
-  label: string;
-  key: string;
-}
-
-export interface AskState {
-  open: boolean;
-  /** What the user is typing right now. */
-  input: string;
-  transcript: AskTurn[];
-  pending: Proposal | null;
-  action: AskAction | null;
-  busy: boolean;
-  error?: string;
-}
-
 export type OverlayKind = 'none' | 'help' | 'run' | 'palette' | 'filter' | 'welcome';
 
 export interface Overlay {
@@ -152,7 +112,6 @@ export interface AppState {
   run: RunState | null;
   /** Past runs this session, newest last, for COMPARE and the run picker. */
   history: RunState[];
-  ask: AskState;
   overlay: Overlay;
   /** The field currently being typed into, in the pane or the dialog (§10.2). */
   edit: EditState | null;
@@ -227,7 +186,6 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
     overrides: {},
     run: null,
     history: [],
-    ask: { open: false, input: '', transcript: [], pending: null, action: null, busy: false },
     overlay: { kind: 'none', buffer: '', cursor: 0 },
     edit: null,
     editor: initialEditor(),
@@ -249,15 +207,6 @@ export function overridesFor(state: AppState, command: CommandId): Override[] {
   const key = scriptKey(state, command);
   if (key === '') return [];
   return Object.values(state.overrides[key] ?? {});
-}
-
-export function applyProposal(state: AppState, command: CommandId, proposal: Proposal): void {
-  const key = scriptKey(state, command);
-  if (key === '') return;
-  const bucket = (state.overrides[key] ??= {});
-  for (const edit of proposal.edits) {
-    bucket[edit.input] = { input: edit.input, from: edit.from, to: edit.to };
-  }
 }
 
 export function revertOverrides(state: AppState, command: CommandId): void {

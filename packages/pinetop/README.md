@@ -167,27 +167,26 @@ ordinals. `:` and `?` list them all.
 
 ## Keys
 
-| Key                  | Action                                                                 |
-| -------------------- | ---------------------------------------------------------------------- |
-| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter      |
-| `space` `1`–`8`      | Switch page — also works inside the editor buffer                      |
-| `tab` / `shift-tab`  | Next / previous pane in the focus ring                                 |
-| the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS          |
-| `j` / `k`, `↓` / `↑` | Move selection                                                         |
-| `g` / `G`            | First / last row                                                       |
-| `↵`                  | Edit the focused config flag · load selection · apply pending proposal |
-| `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)           |
-| `e`                  | Edit this page's script in `$EDITOR`, then reload it                   |
-| `t` / `ctrl-t`       | Shell pane on the editor page — and the way back out of it             |
-| `/`                  | Filter fills                                                           |
-| `.`                  | Show / hide the advanced flags                                         |
-| `ctrl-u`             | Clear the field being edited                                           |
-| `a`                  | Ask (prompt drawer)                                                    |
-| `:` or `ctrl-p`      | Command palette                                                        |
-| `?`                  | Keybinding overlay                                                     |
-| `esc`                | Dismiss overlay · clear filter · unscope log                           |
-| `ctrl-x`             | Reject pending proposal · revert pending edits                         |
-| `q`                  | Quit                                                                   |
+| Key                  | Action                                                            |
+| -------------------- | ----------------------------------------------------------------- |
+| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter |
+| `space` `1`–`8`      | Switch page — also works inside the editor buffer                 |
+| `tab` / `shift-tab`  | Next / previous pane in the focus ring                            |
+| the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS     |
+| `j` / `k`, `↓` / `↑` | Move selection                                                    |
+| `g` / `G`            | First / last row                                                  |
+| `↵`                  | Edit the focused config flag · load selection                     |
+| `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)      |
+| `e`                  | Edit this page's script in `$EDITOR`, then reload it              |
+| `t` / `ctrl-t`       | Shell pane on the editor page — and the way back out of it        |
+| `/`                  | Filter fills                                                      |
+| `.`                  | Show / hide the advanced flags                                    |
+| `ctrl-u`             | Clear the field being edited                                      |
+| `:` or `ctrl-p`      | Command palette                                                   |
+| `?`                  | Keybinding overlay                                                |
+| `esc`                | Dismiss overlay · clear filter · unscope log                      |
+| `ctrl-x`             | Revert pending edits                                              |
+| `q`                  | Quit                                                              |
 
 `?` is generated from the keymap table, so it always documents the real
 bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
@@ -440,37 +439,6 @@ compiled binary.
   Everything else uses the terminal's ANSI palette, so it respects your theme
   (§4.7).
 
-## The Ask drawer
-
-`a` opens a prompt over the bottom of the frame. The model answers in prose
-grounded in the loaded run; if a parameter change is warranted it comes back
-_additionally_, as a reviewable diff:
-
-```jsonc
-{
-  "answer": "…prose grounded in the run…",
-  "proposal": {
-    "effect": "est. Sharpe 1.42 → 1.51 · max DD −17.2% → −12.8%",
-    "note": "Tighter stop plus a hard time exit; entry logic untouched.",
-    "edits": [{ "input": "stopAtr", "from": "2.4", "to": "1.8", "display": "2.4 ATR → 1.8 ATR" }],
-  },
-  "action": { "label": "open parameter sweep", "key": "s" }, // when no edit is warranted
-}
-```
-
-`↵` applies, `ctrl-x` rejects — nothing is ever applied silently. Applied edits
-show as pending with a marker and raise a "not yet re-run" banner until you press
-`r`, because for a backtester an unexplained parameter change invalidates every
-number on screen.
-
-`edits[].input` must be a real Pine `input()` title and `to` a bare value; a
-proposal that fails either check is refused before it can reach argv, with the
-reason shown.
-
-The layer is opt-in: pass an `AskProvider` to the `App`. It sends the report
-summary and the flags — never OHLCV bars, never script source, never
-credentials — and the drawer states when the model runs remotely.
-
 ## Privacy
 
 Provider keys stay in the environment (`ALPACA_API_KEY_ID`,
@@ -502,6 +470,6 @@ pinetop --check-flags
 ## Development
 
 ```sh
-bun test packages/pinetop/    # 289 tests
+bun test packages/pinetop/    # Pinetop tests
 bunx tsc -b                   # typecheck
 ```

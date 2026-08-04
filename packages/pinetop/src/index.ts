@@ -2,9 +2,9 @@
  * @heyphat/pinetop — a terminal UI over the `pinerun` CLI.
  *
  * The public surface is the pieces worth reusing or testing: the flag model and
- * argv composition, the report view models, the render primitives, the Ask
- * contract, and the app itself. The engine is not here and never will be —
- * pinetop shells out to `pinerun` and computes no metric of its own (§3 NG1).
+ * argv composition, the report view models, the render primitives, and the app
+ * itself. The engine is not here and never will be — pinetop shells out to
+ * `pinerun` and computes no metric of its own (§3 NG1).
  */
 
 export { App, PAGE_MAP, bootstrap, type AppOptions } from './app.js';
@@ -48,7 +48,7 @@ export {
   withOverrides,
 } from './flags/model.js';
 
-export { checkTitle, inputTitles, readInputTitles } from './flags/pine-inputs.js';
+export { inputTitles, readInputTitles } from './flags/pine-inputs.js';
 
 export type { LogLevel, LogLine, RunOutcome, SpawnOptions } from './run/spawn.js';
 export { classify, probePinerun, resolveBin, runPinerun } from './run/spawn.js';
@@ -57,20 +57,14 @@ export { appendSession, readSession, sessionLogPath, stateDir } from './run/sess
 
 export type {
   AppState,
-  AskAction,
-  AskState,
-  AskTurn,
   EditState,
   Overlay,
   OverlayKind,
   PaneSelection,
-  Proposal,
-  ProposalEdit,
   RunState,
   RunStatus,
 } from './state.js';
 export {
-  applyProposal,
   initialPanes,
   initialState,
   isDirty,
@@ -168,9 +162,6 @@ export {
 export type { Heatmap, HeatmapCell } from './views/heatmap.js';
 export { buildHeatmap, heatmapLegend } from './views/heatmap.js';
 
-export type { AskProvider, AskResponse, Grounding, ParseResult } from './ask/protocol.js';
-export { ASK_CONTRACT, groundReport, parseAskResponse } from './ask/protocol.js';
-
 export type { Page, PageContext } from './pages/page.js';
 export { clampCursor, columns, rows, windowFor } from './pages/page.js';
 
@@ -187,8 +178,6 @@ export { loadFlags, saveFlags } from './persist.js';
 export { drawFrame, pageOrdinal, widthWarning, windowTitle } from './frame.js';
 export type { PaletteItem } from './overlays.js';
 export {
-  askHeight,
-  drawAsk,
   drawError,
   drawFilter,
   drawHelp,

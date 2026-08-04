@@ -37,11 +37,10 @@ export type Action =
   | { kind: 'toggle-terminal' }
   | { kind: 'filter' }
   | { kind: 'toggle-advanced' }
-  | { kind: 'ask' }
   | { kind: 'palette' }
   | { kind: 'help' }
   | { kind: 'escape' }
-  | { kind: 'reject-proposal' }
+  | { kind: 'revert-overrides' }
   | { kind: 'quit' };
 
 export interface Binding {
@@ -126,7 +125,7 @@ export const BINDINGS: Binding[] = [
   {
     keys: ['enter'],
     display: '↵',
-    description: 'Load selection · confirm dialog · apply pending proposal',
+    description: 'Load selection · confirm dialog',
     action: { kind: 'confirm' },
     group: 'act',
   },
@@ -174,13 +173,6 @@ export const BINDINGS: Binding[] = [
     group: 'act',
   },
   {
-    keys: ['a'],
-    display: 'a',
-    description: 'Ask (AI prompt drawer)',
-    action: { kind: 'ask' },
-    group: 'overlay',
-  },
-  {
     keys: [':', 'ctrl-p'],
     display: ': / ctrl-p',
     description: 'Command palette',
@@ -204,8 +196,8 @@ export const BINDINGS: Binding[] = [
   {
     keys: ['ctrl-x'],
     display: 'ctrl-x',
-    description: 'Reject pending AI proposal',
-    action: { kind: 'reject-proposal' },
+    description: 'Revert pending edits',
+    action: { kind: 'revert-overrides' },
     group: 'overlay',
   },
   {
@@ -426,7 +418,6 @@ export const HINTS: readonly { key: string; label: string }[] = [
   { key: 'j/k', label: 'move' },
   { key: 'e', label: 'edit' },
   { key: 'r', label: 'run' },
-  { key: 'a', label: 'ask' },
   // Advertised on every page, not just EDITOR, because that is what the key does:
   // it takes you to the editor page and opens the column. A hint here would be a
   // lie if `t` only worked on one page — it does not.

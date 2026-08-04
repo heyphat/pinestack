@@ -337,7 +337,7 @@ export const walkforwardPage: Page = {
     drawHistoryPane(ctx, histRect, 'walkforward');
     drawConfigPane(ctx, configRect, {
       command: 'walkforward',
-      actions: ['RUN r', 'ASK a', ': cmd'],
+      actions: ['RUN r', ': cmd'],
     });
     drawWindows(ctx, midCol);
     if (railW > 0) drawVerdict(ctx, rightCol);

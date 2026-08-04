@@ -84,7 +84,7 @@ OPTIONS
   -h, --help            This text
 
 KEYS
-  1–${PAGES.length} pages · tab panes · j/k move · r run · a ask · : palette · ? help · q quit
+  1–${PAGES.length} pages · tab panes · j/k move · r run · t shell · : palette · ? help · q quit
   Page 1 is a vim editor for the .pine itself: i inserts, :w writes, tab leaves.
 
 NOTES

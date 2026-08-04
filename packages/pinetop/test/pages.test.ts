@@ -167,7 +167,7 @@ describe('P0 — the shell', () => {
     const text = screenText(app);
     expect(text).toContain('KEYS');
     expect(text).toContain('shift-tab');
-    expect(text).toContain('Reject pending AI proposal');
+    expect(text).toContain('Revert pending edits');
     expect(text).toContain('Command palette');
   });
 
@@ -207,7 +207,9 @@ describe('P0 — the shell', () => {
 
   test('the hint strip lists the real keys', () => {
     const text = screenText(makeApp(state));
-    for (const hint of ['tab', 'pane', 'j/k', 'run', 'ask', 'help']) expect(text).toContain(hint);
+    for (const hint of ['tab', 'pane', 'j/k', 'run', 'shell', 'help']) {
+      expect(text).toContain(hint);
+    }
   });
 
   test('a terminal below the page minimum is warned about, once', () => {
@@ -631,7 +633,7 @@ describe('P4 — LOGS', () => {
   });
 });
 
-describe('P5 — the Ask drawer', () => {
+describe('pending config overrides', () => {
   beforeEach(() => {
     state.run = {
       id: '#418',
@@ -645,60 +647,7 @@ describe('P5 — the Ask drawer', () => {
     };
   });
 
-  test('a opens the drawer over the frame, not beside it', () => {
-    const app = makeApp(state);
-    app.onKey({ name: 'a', text: 'a' });
-    expect(state.ask.open).toBe(true);
-    const lines = app.render(168, 46);
-    expect(lines).toHaveLength(46);
-    expect(stripAnsi(lines.join('\n'))).toContain('ASK PINETOP');
-  });
-
-  test('typing goes into the prompt, not the page keymap', () => {
-    const app = makeApp(state);
-    app.onKey({ name: 'a', text: 'a' });
-    for (const ch of 'is this overfit') app.onKey({ name: ch, text: ch });
-    expect(state.ask.input).toBe('is this overfit');
-    expect(state.page).toBe('backtest');
-  });
-
-  test('a pending proposal is shown as a reviewable diff and applies only on ↵', () => {
-    state.ask.open = true;
-    state.ask.pending = {
-      effect: 'est. Sharpe 1.42 → 1.51',
-      note: 'Tighter stop.',
-      edits: [{ input: 'stopAtr', from: '2.4', to: '1.8', display: '2.4 ATR → 1.8 ATR' }],
-    };
-    const app = makeApp(state);
-    const text = screenText(app);
-    expect(text).toContain('est. Sharpe 1.42 → 1.51');
-    expect(text).toContain('2.4 ATR → 1.8 ATR');
-    expect(text).toContain('↵ apply · ctrl-x reject');
-    expect(state.overrides['strats/mean-rev-btc.pine']).toBeUndefined();
-
-    app.onKey({ name: 'enter' });
-    expect(state.ask.pending).toBeNull();
-    expect(state.overrides['strats/mean-rev-btc.pine']!['stopAtr']).toEqual({
-      input: 'stopAtr',
-      from: '2.4',
-      to: '1.8',
-    });
-  });
-
-  test('ctrl-x rejects without touching config', () => {
-    state.ask.open = true;
-    state.ask.pending = {
-      effect: '',
-      note: '',
-      edits: [{ input: 'stopAtr', from: '2.4', to: '1.8', display: '' }],
-    };
-    const app = makeApp(state);
-    app.onKey({ name: 'ctrl-x' });
-    expect(state.ask.pending).toBeNull();
-    expect(state.overrides['strats/mean-rev-btc.pine']).toBeUndefined();
-  });
-
-  test('an applied edit raises the not-yet-re-run banner and reaches the command line', () => {
+  test('an override raises the not-yet-re-run banner and reaches the command line', () => {
     state.overrides['strats/mean-rev-btc.pine'] = {
       stopAtr: { input: 'stopAtr', from: '2.4', to: '1.8' },
     };
@@ -706,18 +655,6 @@ describe('P5 — the Ask drawer', () => {
     expect(text).toContain('not yet re-run');
     expect(text).toContain('stopAtr 2.4→1.8');
     expect(text).toContain('--input stopAtr=1.8');
-  });
-
-  test('an action is offered when the model declines to propose', () => {
-    state.ask.open = true;
-    state.ask.action = { label: 'open parameter sweep', key: 's' };
-    expect(screenText(makeApp(state))).toContain('open parameter sweep');
-  });
-
-  test('with no provider the drawer says so rather than failing silently', async () => {
-    const app = makeApp(state);
-    await app.ask('anything');
-    expect(state.ask.error).toContain('no ask provider');
   });
 });
 
@@ -850,12 +787,11 @@ describe('flags are editable in the page itself (§10.2)', () => {
     state.panes.backtest.cursor['config'] = 1;
     app.onKey({ name: 'enter' });
     for (let i = 0; i < 12; i++) app.onKey({ name: 'backspace' });
-    // j, k, r, a, 2 would all be actions outside a field.
-    for (const ch of 'jkra2') app.onKey({ name: ch, text: ch });
-    expect(state.edit?.buffer).toBe('jkra2');
+    // j, k, r, t, 2 would all be actions outside a field.
+    for (const ch of 'jkrt2') app.onKey({ name: ch, text: ch });
+    expect(state.edit?.buffer).toBe('jkrt2');
     expect(state.page).toBe('backtest');
     expect(state.run).toBeNull();
-    expect(state.ask.open).toBe(false);
   });
 
   test('esc abandons the edit and leaves the old value', () => {

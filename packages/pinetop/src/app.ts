@@ -1,11 +1,8 @@
 /**
  * The app: router, event loop, and the one place a run is started.
  *
- * Two rules this file exists to enforce:
- *  - **Nothing runs without an explicit keypress** (§4.6). Editing a flag never
- *    schedules a spawn; `r` then `↵` does.
- *  - **Nothing mutates config without a keypress** (§4.5.c). The Ask layer can
- *    propose; only `↵` applies, and `ctrl-x` rejects.
+ * Nothing runs without an explicit keypress (§4.6). Editing a flag never
+ * schedules a spawn; `r` then `↵` does.
  */
 
 import { handOff } from './editor/handoff.js';
@@ -19,7 +16,6 @@ import {
   type FlagValue,
   type Pair,
 } from './flags/model.js';
-import { readInputTitles } from './flags/pine-inputs.js';
 import { COMMANDS, PAGES, schemaFor, type CommandId, type PageId } from './flags/schema.js';
 import { discoverScripts } from './scripts.js';
 import {
@@ -31,8 +27,6 @@ import {
   type Action,
 } from './keymap.js';
 import {
-  askHeight,
-  drawAsk,
   drawError,
   drawFilter,
   drawHelp,
@@ -63,8 +57,7 @@ import { Screen } from './render/screen.js';
 import { appendSession } from './run/session-log.js';
 import { runPinerun, type SpawnOptions } from './run/spawn.js';
 import type { AppState, EditState, RunState } from './state.js';
-import { applyProposal, nextRunId, overridesFor, revertOverrides } from './state.js';
-import { groundReport, parseAskResponse, type AskProvider } from './ask/protocol.js';
+import { nextRunId, overridesFor, revertOverrides } from './state.js';
 import type { Key, Terminal } from './terminal.js';
 
 /**
@@ -158,7 +151,6 @@ export interface AppOptions {
   state: AppState;
   cwd?: string;
   spawn?: SpawnOptions;
-  ask?: AskProvider;
   /** Test seam: render once and return instead of listening for keys. */
   headless?: boolean;
 }
@@ -168,7 +160,6 @@ export class App {
   private readonly state: AppState;
   private readonly cwd: string;
   private readonly spawnOptions: SpawnOptions;
-  private readonly provider?: AskProvider;
   private abort?: AbortController;
   private disposers: (() => void)[] = [];
   /** `space` was pressed and the next digit picks a page (§4.2.f). */
@@ -193,7 +184,6 @@ export class App {
     this.state = opts.state;
     this.cwd = opts.cwd ?? process.cwd();
     this.spawnOptions = opts.spawn ?? {};
-    this.provider = opts.ask;
   }
 
   get page(): Page {
@@ -206,11 +196,10 @@ export class App {
     const page = this.page;
     this.state.widthWarning = widthWarning(page, cols);
 
-    // Both drawers displace the page rather than covering it: an error you have
+    // Error drawers displace the page rather than covering it: an error you have
     // to move something to read is an error you will misread.
-    const askRows = askHeight(this.state);
     const errorRows = errorHeight(this.state);
-    const body = drawFrame(screen, this.state, page, askRows + errorRows);
+    const body = drawFrame(screen, this.state, page, errorRows);
 
     const focus = this.focusId();
     const paneKeys = this.paneKeys();
@@ -234,16 +223,7 @@ export class App {
       screen.text(1, body.y + body.h - 1, this.state.widthWarning, '33');
     }
 
-    // Above the Ask drawer, which keeps the bottom row it has always had.
-    drawError(screen, this.state, askRows);
-    if (this.state.ask.open) {
-      drawAsk(
-        screen,
-        this.state,
-        this.provider?.label ?? 'no ask provider',
-        this.provider?.remote ?? false,
-      );
-    }
+    drawError(screen, this.state);
 
     switch (this.state.overlay.kind) {
       case 'help':
@@ -613,13 +593,9 @@ export class App {
       this.paint();
       return;
     }
-    // Overlays and the Ask prompt own the keyboard while they are open.
+    // Overlays own the keyboard while they are open.
     if (this.state.overlay.kind !== 'none') {
       this.onOverlayKey(key);
-      this.paint();
-      return;
-    }
-    if (this.state.ask.open && this.onAskKey(key)) {
       this.paint();
       return;
     }
@@ -780,11 +756,6 @@ export class App {
         break;
       }
       case 'confirm': {
-        // A pending proposal is what ↵ means whenever one exists (§4.5.c).
-        if (state.ask.pending != null) {
-          this.applyPending();
-          break;
-        }
         // ↵ on the config pane edits that flag in place (§10.2), so the whole
         // invocation can be built inside the page without a dialog.
         const command = this.page.command;
@@ -826,10 +797,6 @@ export class App {
           ? 'showing every flag — . hides the advanced ones again'
           : 'advanced flags hidden';
         break;
-      case 'ask':
-        state.ask.open = true;
-        state.ask.error = undefined;
-        break;
       case 'palette':
         state.overlay = { kind: 'palette', buffer: '', cursor: 0 };
         break;
@@ -839,11 +806,8 @@ export class App {
       case 'escape':
         this.onEscape();
         break;
-      case 'reject-proposal':
-        if (state.ask.pending != null) {
-          state.ask.pending = null;
-          state.status = 'proposal rejected';
-        } else if (this.page.command != null && overridesFor(state, this.page.command).length > 0) {
+      case 'revert-overrides':
+        if (this.page.command != null && overridesFor(state, this.page.command).length > 0) {
           revertOverrides(state, this.page.command);
           state.status = 'pending edits reverted';
         }
@@ -891,10 +855,6 @@ export class App {
     }
     if (state.overlay.kind !== 'none') {
       state.overlay = { kind: 'none', buffer: '', cursor: 0 };
-      return;
-    }
-    if (state.ask.open) {
-      state.ask.open = false;
       return;
     }
     // The failure drawer outranks the filter and the log scope: it is the newest
@@ -1282,104 +1242,5 @@ export class App {
           : 'carried the sweep grid into WALKFORWARD — press r to validate it';
     }
     state.page = 'walkforward';
-  }
-
-  // ————————————————————————————————————————————————————————————— the drawer
-
-  /** Returns true when the drawer consumed the key. */
-  private onAskKey(key: Key): boolean {
-    const state = this.state;
-
-    if (key.name === 'escape') {
-      state.ask.open = false;
-      return true;
-    }
-    if (key.name === 'ctrl-x') {
-      if (state.ask.pending != null) {
-        state.ask.pending = null;
-        state.status = 'proposal rejected';
-      }
-      return true;
-    }
-    if (key.name === 'enter') {
-      if (state.ask.pending != null) {
-        this.applyPending();
-        return true;
-      }
-      const question = state.ask.input.trim();
-      if (question === '') return true;
-      state.ask.input = '';
-      void this.ask(question);
-      return true;
-    }
-    if (key.name === 'backspace') {
-      state.ask.input = state.ask.input.slice(0, -1);
-      return true;
-    }
-    if (key.text != null) {
-      state.ask.input += key.text;
-      return true;
-    }
-    return false;
-  }
-
-  private applyPending(): void {
-    const state = this.state;
-    const proposal = state.ask.pending;
-    const command = this.page.command;
-    if (proposal == null || command == null) return;
-    applyProposal(state, command, proposal);
-    state.ask.pending = null;
-    state.status = `applied ${proposal.edits.length} edit(s) — not yet re-run`;
-  }
-
-  async ask(question: string): Promise<void> {
-    const state = this.state;
-    if (this.provider == null) {
-      state.ask.error = 'no ask provider configured — pass one to the App (§9: opt-in)';
-      this.paint();
-      return;
-    }
-
-    const command = this.page.command;
-    const model =
-      command == null
-        ? undefined
-        : withOverrides(state.flags[command], overridesFor(state, command));
-    const script = command == null ? undefined : state.flags[command].scripts[0];
-    const titles = script == null ? [] : readInputTitles(script);
-
-    state.ask.busy = true;
-    state.ask.error = undefined;
-    this.paint();
-
-    try {
-      const raw = await this.provider.ask(question, {
-        command: command ?? 'logs',
-        invocation: model == null ? '' : composeArgv(model).join(' '),
-        report: groundReport(state.run?.report),
-        inputTitles: titles,
-      });
-      const parsed = parseAskResponse(raw, titles);
-      state.ask.busy = false;
-
-      if (parsed.error != null || parsed.response == null) {
-        state.ask.error = parsed.error ?? 'ask: empty response';
-        this.paint();
-        return;
-      }
-      state.ask.transcript.push({
-        question,
-        answer: parsed.response.answer,
-        at: Date.now(),
-      });
-      state.ask.pending = parsed.response.proposal ?? null;
-      state.ask.action = parsed.response.action ?? null;
-      if (parsed.warnings.length > 0) state.ask.error = parsed.warnings.join(' · ');
-    } catch (err) {
-      state.ask.busy = false;
-      state.ask.error = `ask failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
-    this.paint();
   }
 }

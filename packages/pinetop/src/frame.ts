@@ -173,10 +173,10 @@ function drawHints(screen: Screen, state: AppState, page: Page, y: number): void
 /**
  * Draw the chrome and return the body rectangle the page may use.
  *
- * `askRows` reserves space at the bottom for the Ask drawer, which overlays the
- * frame rather than displacing the page (§4.5.a).
+ * `reservedRows` leaves room above the command and hint lines for a bottom
+ * drawer, currently the run-error drawer.
  */
-export function drawFrame(screen: Screen, state: AppState, page: Page, askRows = 0): Rect {
+export function drawFrame(screen: Screen, state: AppState, page: Page, reservedRows = 0): Rect {
   const tabsY = 0;
   const crumbY = 1;
   const hintsY = screen.rows - 1;
@@ -189,7 +189,7 @@ export function drawFrame(screen: Screen, state: AppState, page: Page, askRows =
   drawHints(screen, state, page, hintsY);
 
   const bodyTop = crumbY + 1;
-  const bodyBottom = cmdY - askRows;
+  const bodyBottom = cmdY - reservedRows;
   return {
     x: 0,
     y: bodyTop,

@@ -315,7 +315,7 @@ export const sweepPage: Page = {
     drawAxisPane(ctx, inputsRect, 'sweep');
     // `WF w` was here until the walkforward hand-off moved into the palette
     // (§4.2.i): the chips name real keys, so it names the palette instead.
-    drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', 'ASK a', ': WF'] });
+    drawConfigPane(ctx, configRect, { command: 'sweep', actions: ['RUN r', ': WF'] });
     drawHistoryPane(ctx, histRect, 'sweep');
     drawRanked(ctx, rankedCol);
     if (heatH > 0) drawHeatmap(ctx, surfaceRect);

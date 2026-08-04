@@ -161,7 +161,7 @@ export const BINDINGS: Binding[] = [
   {
     keys: ['/'],
     display: '/',
-    description: 'Filter fills',
+    description: 'Search FILES/STRATEGIES · LOGS filter',
     action: { kind: 'filter' },
     group: 'act',
   },

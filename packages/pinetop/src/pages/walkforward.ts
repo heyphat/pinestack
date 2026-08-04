@@ -258,7 +258,7 @@ export const walkforwardPage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'walkforward');
-    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === STRATEGIES_PANE) return strategyRowCount(state);
     if (paneId === 'inputs') return axisRows(state, 'walkforward').length;
     if (paneId === 'config') return configRowCount(state, 'walkforward');
     if (paneId === 'windows') return windowRows(state).length;

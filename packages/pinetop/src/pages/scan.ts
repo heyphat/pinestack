@@ -213,7 +213,7 @@ export const scanPage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'scan');
-    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === STRATEGIES_PANE) return strategyRowCount(state);
     if (paneId === 'config') return configRowCount(state, 'scan');
     if (paneId === 'universe') return rankedRows(state).length;
     if (paneId === 'errors') return failures(state).length;

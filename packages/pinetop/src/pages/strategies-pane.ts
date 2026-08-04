@@ -19,7 +19,7 @@ import { drawPane, truncate, type Rect } from '../render/screen.js';
 import { STYLE } from '../render/theme.js';
 import { cachedScripts, type ScriptEntry } from '../scripts.js';
 import type { AppState } from '../state.js';
-import { clampCursor, windowFor, type PageContext } from './page.js';
+import { clampCursor, drawListSearchRow, windowFor, type PageContext } from './page.js';
 
 /** The pane id every command page uses, so the focus ring reads the same. */
 export const STRATEGIES_PANE = 'strategies';
@@ -34,8 +34,18 @@ export interface StrategiesPaneOptions {
   rail?: (entry: ScriptEntry, loaded: boolean) => string | undefined;
 }
 
-export function strategyRowCount(): number {
-  return cachedScripts().length;
+export function visibleStrategies(state?: AppState): ScriptEntry[] {
+  const list = cachedScripts();
+  const query = state?.listSearch.strategies.trim().toLowerCase() ?? '';
+  if (query === '') return list;
+  return list.filter(
+    (entry) =>
+      entry.label.toLowerCase().includes(query) || entry.path.toLowerCase().includes(query),
+  );
+}
+
+export function strategyRowCount(state?: AppState): number {
+  return visibleStrategies(state).length;
 }
 
 /**
@@ -43,10 +53,9 @@ export function strategyRowCount(): number {
  * being the same shape everywhere is most of what makes it read as one thing.
  */
 export function strategiesHeight(available: number): number {
-  // The floor is 5 — two borders, a title-less row for the hint, and two scripts.
-  // Below that the pane can show one script, which is indistinguishable from
-  // being broken. SWEEP is the binding case: it puts three panes in this column.
-  return Math.min(8, Math.max(5, Math.floor(available * 0.36)));
+  // One row taller than the original 5..8 allocation: the search field gets its
+  // own row without reducing how many strategy names remain visible.
+  return Math.min(9, Math.max(6, Math.floor(available * 0.36) + 1));
 }
 
 /**
@@ -66,23 +75,42 @@ export function drawStrategiesPane(
 ): void {
   const { screen, state } = ctx;
   const paneId = opts.paneId ?? STRATEGIES_PANE;
-  const list = cachedScripts();
+  const all = cachedScripts();
+  const list = visibleStrategies(state);
+  const query = state.listSearch.strategies;
+  const filtering = query.trim() !== '';
   const model = state.flags[opts.command];
   const slots = schemaFor(opts.command).scripts;
   const focused = ctx.focus === paneId;
+  const count = filtering
+    ? `${list.length}/${all.length}`
+    : all.length > Math.max(0, rect.h - 3)
+      ? String(all.length)
+      : undefined;
+  const legend = slots === 2 ? (count == null ? 'A vs B' : `A/B · ${count}`) : count;
 
-  const interior = Math.max(0, rect.h - 2);
-  const inner = drawPane(screen, rect, {
+  const paneInner = drawPane(screen, rect, {
     title: 'STRATEGIES',
     focused,
     key: ctx.paneKey(paneId),
-    legend: slots === 2 ? 'A vs B' : list.length > interior ? String(list.length) : undefined,
+    legend,
+  });
+  if (paneInner.h <= 0) return;
+
+  const inner = drawListSearchRow(screen, paneInner, {
+    query,
+    active: state.listSearch.active === 'strategies',
+    placeholder: 'strategies',
   });
   if (inner.h <= 0) return;
 
-  if (list.length === 0) {
+  if (all.length === 0) {
     screen.text(inner.x, inner.y, 'no .pine found here', STYLE.muted, inner);
     screen.text(inner.x, inner.y + 1, '1 EDITOR · :e path.pine', STYLE.muted, inner);
+    return;
+  }
+  if (list.length === 0) {
+    screen.text(inner.x, inner.y, `no strategies match /${query}`, STYLE.muted, inner);
     return;
   }
 
@@ -90,6 +118,7 @@ export function drawStrategiesPane(
   // `↵ load` is a row not spent showing a script, and the key is in `?` anyway.
   const hint = inner.h >= 3;
   const cursor = clampCursor(ctx.cursor(paneId), list.length);
+  state.panes[state.page].cursor[paneId] = cursor;
   const listRows = Math.max(1, inner.h - (hint ? 1 : 0));
   const { from, to } = windowFor(cursor, list.length, listRows);
 
@@ -141,10 +170,13 @@ export function drawStrategiesPane(
  * pane can still set either slot directly (§10.2).
  */
 export function loadStrategy(state: AppState, command: CommandId): string | undefined {
-  const list = cachedScripts();
-  if (list.length === 0) return 'no .pine here — 1 EDITOR, then :e path.pine';
+  const all = cachedScripts();
+  const list = visibleStrategies(state);
+  if (all.length === 0) return 'no .pine here — 1 EDITOR, then :e path.pine';
+  if (list.length === 0) return `no strategies match /${state.listSearch.strategies}`;
 
   const cursor = clampCursor(state.panes[command].cursor[STRATEGIES_PANE] ?? 0, list.length);
+  state.panes[command].cursor[STRATEGIES_PANE] = cursor;
   const entry = list[cursor];
   if (entry == null) return undefined;
 

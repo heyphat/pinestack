@@ -106,6 +106,14 @@ without being announced as a release.
   repositories; full hunks remain available in the adjacent shell via
   `git diff`.
 
+- **FILES and every command-page STRATEGIES picker are searchable in place.** An
+  always-visible row accepts `/`, live case-insensitive file-name or relative-path
+  filtering, `ctrl-u` to clear, `↵` to keep the filter, and `esc` to remove it.
+  Matching FILES ancestors open temporarily without changing collapsed-folder
+  state, while the Pine-only STRATEGIES query follows the user across all six
+  command pages. STRATEGIES is one row taller so the new field does not reduce
+  the useful script list.
+
 ### Removed
 
 - **The unused Ask drawer and global `a` binding are gone.** The packaged CLI

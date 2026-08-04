@@ -410,7 +410,7 @@ export const backtestPage: Page = {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'backtest');
     switch (paneId) {
       case 'strategies':
-        return strategyRowCount();
+        return strategyRowCount(state);
       case 'config':
         return configRowCount(state, 'backtest');
       case 'monthly':

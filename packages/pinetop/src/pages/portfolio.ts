@@ -252,7 +252,7 @@ export const portfolioPage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'portfolio');
-    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === STRATEGIES_PANE) return strategyRowCount(state);
     if (paneId === 'config') return configRowCount(state, 'portfolio');
     if (paneId === 'sleeves') return sleeves(state).length;
     return 0;

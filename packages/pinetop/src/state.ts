@@ -111,6 +111,15 @@ export interface EditorTreeState {
   selectedId?: string;
 }
 
+export type ListSearchTarget = 'files' | 'strategies';
+
+/** Session-only live filters for the two project-file pickers. */
+export interface ListSearchState {
+  active: ListSearchTarget | null;
+  files: string;
+  strategies: string;
+}
+
 export interface AppState {
   page: PageId;
   /** Focus ring position and per-pane cursors, kept per page. */
@@ -132,6 +141,8 @@ export interface AppState {
   editor: EditorState;
   /** Session-only folder expansion and row identity for the FILES tree. */
   editorTree: EditorTreeState;
+  /** Visible, session-only queries for FILES and shared STRATEGIES panes. */
+  listSearch: ListSearchState;
   /** Optional Git working-tree markers for files shown by the editor. */
   editorGit: GitStatusSnapshot;
   /**
@@ -203,6 +214,7 @@ export function initialState(flags?: Partial<Record<CommandId, FlagModel>>): App
     edit: null,
     editor: initialEditor(),
     editorTree: { collapsed: {} },
+    listSearch: { active: null, files: '', strategies: '' },
     editorGit: { enabled: false, statuses: {} },
     terminal: initialTerminalPane(),
     showAdvanced: false,

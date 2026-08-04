@@ -237,7 +237,7 @@ export const sweepPage: Page = {
 
   rowCount: (state, paneId) => {
     if (paneId === HISTORY_PANE) return historyRowCount(state, 'sweep');
-    if (paneId === STRATEGIES_PANE) return strategyRowCount();
+    if (paneId === STRATEGIES_PANE) return strategyRowCount(state);
     if (paneId === 'inputs') return axisRows(state, 'sweep').length;
     if (paneId === 'config') return configRowCount(state, 'sweep');
     if (paneId === 'ranked') return rankedRows(state).length;

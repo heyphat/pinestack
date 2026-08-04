@@ -154,6 +154,13 @@ loads the selected script into that page's command. `compare` takes two, so it
 marks them `A` and `B`, and `↵` fills the first free slot before it starts
 replacing A. LOGS has no picker: it has no command of its own.
 
+STRATEGIES keeps an always-visible search row and a little more height so the
+field does not crowd out the scripts. Focus the pane, press `/`, and type to
+filter case-insensitively by file name or relative path. `ctrl-u` clears what you
+have typed, `↵` closes the field but keeps the filter (press `↵` again to load the
+selected match), and `esc` clears it. The query is shared by STRATEGIES on all six
+command pages, just as the underlying Pine-only list is shared.
+
 The workflow between them is navigation, not documentation: `:` then **carry the
 sweep grid into walkforward** takes SWEEP's axes, symbol and span over to
 WALKFORWARD, `↵` on a ranked combo loads it into BACKTEST as fixed inputs, `↵` on
@@ -167,26 +174,29 @@ ordinals. `:` and `?` list them all.
 
 ## Keys
 
-| Key                  | Action                                                              |
-| -------------------- | ------------------------------------------------------------------- |
-| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter   |
-| `space` `1`–`8`      | Switch page — also works inside the editor buffer                   |
-| `tab` / `shift-tab`  | Next / previous pane in the focus ring                              |
-| the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS       |
-| `j` / `k`, `↓` / `↑` | Move selection                                                      |
-| `g` / `G`            | First / last row                                                    |
-| `↵`                  | Edit the focused config flag · load selection                       |
-| `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)        |
-| `e`                  | Edit this page's script in `$EDITOR`, then reload it                |
-| `t` / `ctrl-t`       | Open shell; inside it, `ctrl-t` then `tab`/`shift-tab` changes pane |
-| `/`                  | Filter fills                                                        |
-| `.`                  | Show / hide the advanced flags                                      |
-| `ctrl-u`             | Clear the field being edited                                        |
-| `:` or `ctrl-p`      | Command palette                                                     |
-| `?`                  | Keybinding overlay                                                  |
-| `esc`                | Dismiss overlay · clear filter · unscope log                        |
-| `ctrl-x`             | Revert pending edits                                                |
-| `q`                  | Quit                                                                |
+| Key                  | Action                                                                 |
+| -------------------- | ---------------------------------------------------------------------- |
+| `1`–`8`              | Switch page — a page is reached by its ordinal, never by a letter      |
+| `space` `1`–`8`      | Switch page — also works inside the editor buffer                      |
+| `tab` / `shift-tab`  | Next / previous pane in the focus ring                                 |
+| the key on a pane    | Focus that pane directly — `[h]` on HISTORY, `[ch]` on CHARTS          |
+| `j` / `k`, `↓` / `↑` | Move selection                                                         |
+| `g` / `G`            | First / last row                                                       |
+| `↵`                  | Edit the focused config flag · load selection                          |
+| `r`                  | Run dialog for this page's command (`↵` on its RUN row runs)           |
+| `e`                  | Edit this page's script in `$EDITOR`, then reload it                   |
+| `t` / `ctrl-t`       | Open shell; inside it, `ctrl-t` then `tab`/`shift-tab` changes pane    |
+| `/`                  | Search focused FILES/STRATEGIES (or Vim buffer) · filter fills on LOGS |
+| `.`                  | Show / hide the advanced flags                                         |
+| `ctrl-u`             | Clear the field or search being edited                                 |
+| `:` or `ctrl-p`      | Command palette                                                        |
+| `?`                  | Keybinding overlay                                                     |
+| `esc`                | Dismiss overlay · clear focused search/filter · unscope log            |
+| `ctrl-x`             | Revert pending edits                                                   |
+| `q`                  | Quit                                                                   |
+
+`/` does not enter text mode on INPUTS, CONFIG, HISTORY, or report panes; focus
+FILES or STRATEGIES to search, or switch to LOGS to filter fills.
 
 `?` is generated from the keymap table, so it always documents the real
 bindings. (The design names `⌘K` for the palette; a terminal cannot see it, so
@@ -237,6 +247,13 @@ STRATEGIES, `pinerun` arguments, or the INPUTS parser. FILES mirrors the project
 folder hierarchy, folders first and expanded by default. `j`/`k` moves through
 visible rows, `↵` expands/collapses a folder or opens a file, and `←`/`→` moves to
 a parent or expands into a child.
+
+FILES also keeps an always-visible search row. Focus FILES, press `/`, and type to
+filter case-insensitively by file name or relative path; matching ancestors are
+temporarily forced open without changing your saved folder expansion. `ctrl-u`
+clears the active field, `↵` closes it but keeps the matches, and `esc` clears it.
+Clear the search before collapsing folders; a second `↵` on a matching file opens
+it.
 
 In a Git working tree, FILES shows a changed-file count and a badge on each
 affected path: `M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked,

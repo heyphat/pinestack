@@ -39,7 +39,15 @@ import { modeLabel, type EditorState } from '../editor/state.js';
 import { handleKey, openFile } from '../editor/vim.js';
 import { drawInputsPane } from './inputs-pane.js';
 import { drawTerminal, TERMINAL_PANE, ESCAPE_HATCH, type TerminalPaneWidth } from '../term/pane.js';
-import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
+import {
+  clampCursor,
+  columns,
+  drawListSearchRow,
+  rows,
+  windowFor,
+  type Page,
+  type PageContext,
+} from './page.js';
 
 /**
  * Focus ring order, which is not the layout order on purpose: `tab` from FILES
@@ -311,9 +319,51 @@ function reconcileEditorTreeSelection(state: AppState, rows: readonly EditorTree
   return selectEditorTreeRow(state, rows, state.panes.editor.cursor['files'] ?? 0);
 }
 
+export function visibleEditorFiles(
+  state: AppState,
+  files: readonly EditorFileEntry[] = cachedEditorFiles(),
+): EditorFileEntry[] {
+  const query = state.listSearch.files.trim().toLowerCase();
+  if (query === '') return [...files];
+  return files.filter(
+    (entry) =>
+      entry.label.toLowerCase().includes(query) || entry.path.toLowerCase().includes(query),
+  );
+}
+
+function reconcileFilteredEditorTreeSelection(
+  state: AppState,
+  rows: readonly EditorTreeRow[],
+): number {
+  if (rows.length === 0) {
+    // Keep the stable unfiltered id so clearing a no-result query restores it.
+    state.panes.editor.cursor['files'] = 0;
+    return 0;
+  }
+
+  const selectedId = state.editorTree.selectedId;
+  const exact = selectedId == null ? -1 : rows.findIndex((row) => row.id === selectedId);
+  if (exact >= 0) {
+    state.panes.editor.cursor['files'] = exact;
+    return exact;
+  }
+
+  const firstFile = rows.findIndex((row) => row.kind === 'file');
+  return selectEditorTreeRow(state, rows, firstFile >= 0 ? firstFile : 0);
+}
+
 function visibleEditorTree(state: AppState): { rows: EditorTreeRow[]; cursor: number } {
-  const rows = editorTreeRows(cachedEditorFiles(), state.editorTree.collapsed);
-  return { rows, cursor: reconcileEditorTreeSelection(state, rows) };
+  const filtering = state.listSearch.files.trim() !== '';
+  const rows = editorTreeRows(
+    visibleEditorFiles(state),
+    filtering ? {} : state.editorTree.collapsed,
+  );
+  return {
+    rows,
+    cursor: filtering
+      ? reconcileFilteredEditorTreeSelection(state, rows)
+      : reconcileEditorTreeSelection(state, rows),
+  };
 }
 
 function selectEditorTreeFile(
@@ -333,6 +383,7 @@ function selectEditorTreeFile(
 }
 
 function handleFilesKey(state: AppState, name: string): boolean {
+  const filtering = state.listSearch.files.trim() !== '';
   const { rows, cursor } = visibleEditorTree(state);
   const row = rows[cursor];
   if (row == null) return false;
@@ -364,6 +415,15 @@ function handleFilesKey(state: AppState, name: string): boolean {
       }
       return true;
     case 'left':
+      if (filtering) {
+        if (row.parentId != null) {
+          const parent = rows.findIndex((candidate) => candidate.id === row.parentId);
+          if (parent >= 0) selectEditorTreeRow(state, rows, parent);
+        } else {
+          state.status = 'clear the FILES search to collapse folders';
+        }
+        return true;
+      }
       if (row.kind === 'folder' && row.expanded) {
         state.editorTree.collapsed[row.id] = true;
         state.editorTree.selectedId = row.id;
@@ -402,33 +462,54 @@ function folderGitSummary(
 
 function drawFiles(ctx: PageContext, rect: Rect): void {
   const { screen, state } = ctx;
-  const files = cachedEditorFiles();
+  const allFiles = cachedEditorFiles();
+  const files = visibleEditorFiles(state, allFiles);
+  const query = state.listSearch.files;
+  const filtering = query.trim() !== '';
   const open = state.editor.buffer?.path;
-  const changed = files.reduce(
+  const changed = allFiles.reduce(
     (count, entry) => count + (state.editorGit.statuses[entry.path] == null ? 0 : 1),
     0,
   );
+  const count = filtering ? `${files.length}/${allFiles.length}` : String(allFiles.length);
 
-  const inner = drawPane(screen, rect, {
+  const paneInner = drawPane(screen, rect, {
     title: 'FILES',
     focused: ctx.focus === 'files',
     key: ctx.paneKey('files'),
     legend:
-      files.length === 0
+      allFiles.length === 0
         ? undefined
         : state.editorGit.enabled
-          ? `${files.length} · git${changed}`
-          : `${files.length} files`,
+          ? `${count} · git${changed}`
+          : filtering
+            ? count
+            : `${count} files`,
+  });
+  if (paneInner.h <= 0) return;
+
+  const inner = drawListSearchRow(screen, paneInner, {
+    query,
+    active: state.listSearch.active === 'files',
+    placeholder: 'files',
   });
   if (inner.h <= 0) return;
 
-  if (files.length === 0) {
+  if (allFiles.length === 0) {
     screen.text(inner.x, inner.y, 'no .pine or .md here', STYLE.muted, inner);
     screen.text(inner.x, inner.y + 1, ':e path creates one', STYLE.muted, inner);
     return;
   }
+  if (files.length === 0) {
+    screen.text(inner.x, inner.y, `no files match /${query}`, STYLE.muted, inner);
+    return;
+  }
 
   const { rows: tree, cursor } = visibleEditorTree(state);
+  if (tree.length === 0) {
+    screen.text(inner.x, inner.y, `no files match /${query}`, STYLE.muted, inner);
+    return;
+  }
   const listRows = Math.max(0, inner.h - 1);
   const { from, to } = windowFor(cursor, tree.length, listRows);
 
@@ -492,13 +573,17 @@ function drawFiles(ctx: PageContext, rect: Rect): void {
     }
   }
 
-  const selectedRow = tree[cursor]!;
+  const selectedRow = tree[cursor];
+  if (selectedRow == null) return;
+
   let footer: string;
   if (selectedRow.kind === 'folder') {
     const summary = folderGitSummary(selectedRow, state.editorGit.statuses);
-    footer = `j/k ←/→ · ↵ ${selectedRow.expanded ? 'collapse' : 'expand'}${
-      summary.count > 0 ? ` · git${summary.count}` : ''
-    }`;
+    footer = filtering
+      ? `j/k ←/→ · clear search to collapse${summary.count > 0 ? ` · git${summary.count}` : ''}`
+      : `j/k ←/→ · ↵ ${selectedRow.expanded ? 'collapse' : 'expand'}${
+          summary.count > 0 ? ` · git${summary.count}` : ''
+        }`;
   } else {
     const status = state.editorGit.statuses[selectedRow.path];
     footer = status == null ? 'j/k · ↵ open' : `j/k · ↵ open · git ${status}`;
@@ -832,11 +917,19 @@ export const editorPage: Page = {
     // notes cannot change what the next `r` spawns.
     if (focus === 'editor') return undefined;
     const { rows, cursor } = visibleEditorTree(state);
-    if (rows.length === 0) return 'no .pine or .md here — :e path starts one';
+    if (rows.length === 0) {
+      const query = state.listSearch.files;
+      return query.trim() === ''
+        ? 'no .pine or .md here — :e path starts one'
+        : `no files match /${query}`;
+    }
     const row = rows[cursor];
     if (row == null) return undefined;
 
     if (row.kind === 'folder') {
+      if (state.listSearch.files.trim() !== '') {
+        return 'clear the FILES search to collapse folders';
+      }
       if (row.expanded) state.editorTree.collapsed[row.id] = true;
       else delete state.editorTree.collapsed[row.id];
       state.editorTree.selectedId = row.id;

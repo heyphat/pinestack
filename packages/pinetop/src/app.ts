@@ -57,12 +57,13 @@ import { portfolioPage } from './pages/portfolio.js';
 import { scanPage } from './pages/scan.js';
 import { selectedCombo, sweepPage } from './pages/sweep.js';
 import { logsPage } from './pages/logs.js';
+import { STRATEGIES_PANE } from './pages/strategies-pane.js';
 import { walkforwardPage } from './pages/walkforward.js';
 import { saveFlags } from './persist.js';
 import { Screen } from './render/screen.js';
 import { appendSession } from './run/session-log.js';
 import { runPinerun, type SpawnOptions } from './run/spawn.js';
-import type { AppState, EditState, RunState } from './state.js';
+import type { AppState, EditState, ListSearchTarget, RunState } from './state.js';
 import { nextRunId, overridesFor, revertOverrides } from './state.js';
 import type { Key, Terminal } from './terminal.js';
 
@@ -665,6 +666,62 @@ export class App {
     this.state.panes[this.state.page].focus = panes[next]!;
   }
 
+  /** The focused pane whose always-visible search row owns `/`, if any. */
+  private focusedListSearchTarget(): ListSearchTarget | null {
+    const focus = this.focusId();
+    if (this.state.page === 'editor' && focus === 'files') return 'files';
+    if (this.page.command != null && focus === STRATEGIES_PANE) return 'strategies';
+    return null;
+  }
+
+  /** Update a live list query and return filtered strategy panes to their first row. */
+  private setListSearchQuery(target: ListSearchTarget, query: string): void {
+    if (this.state.listSearch[target] === query) return;
+    this.state.listSearch[target] = query;
+    if (target === 'files') {
+      this.state.panes.editor.cursor['files'] = 0;
+      return;
+    }
+    // STRATEGIES is one shared query over one shared cache. A cursor from any
+    // command page may now be past the end or point at a different script.
+    for (const command of COMMANDS) {
+      this.state.panes[command].cursor[STRATEGIES_PANE] = 0;
+    }
+  }
+
+  /** Keys while one of the in-pane list search rows is being edited. */
+  private onListSearchKey(key: Key): void {
+    const state = this.state;
+    const target = state.listSearch.active;
+    if (target == null) return;
+
+    if (key.name === 'escape') {
+      this.setListSearchQuery(target, '');
+      state.listSearch.active = null;
+      state.status = `${target.toUpperCase()} search cleared`;
+      return;
+    }
+    if (key.name === 'enter') {
+      state.listSearch.active = null;
+      state.status =
+        state.listSearch[target].trim() === ''
+          ? `${target.toUpperCase()} search closed`
+          : `${target.toUpperCase()} filtered by /${state.listSearch[target]}`;
+      return;
+    }
+    if (key.name === 'backspace') {
+      this.setListSearchQuery(target, state.listSearch[target].slice(0, -1));
+      return;
+    }
+    if (key.name === 'ctrl-u') {
+      this.setListSearchQuery(target, '');
+      return;
+    }
+    if (key.text != null) {
+      this.setListSearchQuery(target, state.listSearch[target] + key.text);
+    }
+  }
+
   /**
    * This page's pane accelerators (§4.2.h) — nothing while the page owns the
    * keyboard, because a badge on a pane whose key the EDITOR buffer is about to
@@ -672,6 +729,7 @@ export class App {
    */
   private paneKeys(): Map<string, string> {
     const page = this.page;
+    if (this.state.listSearch.active != null) return new Map();
     if (page.claimsKeyboard?.(this.state) === true) return new Map();
     return paneAccelerators(page.panes(this.state));
   }
@@ -698,6 +756,13 @@ export class App {
     // Overlays own the keyboard while they are open.
     if (this.state.overlay.kind !== 'none') {
       this.onOverlayKey(key);
+      this.paint();
+      return;
+    }
+    // In-pane searches are text inputs too. They come after overlays but before
+    // page prefixes, page-local Vim keys, accelerators, and the global keymap.
+    if (this.state.listSearch.active != null) {
+      this.onListSearchKey(key);
       this.paint();
       return;
     }
@@ -890,9 +955,19 @@ export class App {
       case 'toggle-terminal':
         this.toggleTerminal();
         break;
-      case 'filter':
-        state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };
+      case 'filter': {
+        const target = this.focusedListSearchTarget();
+        if (target != null) {
+          state.listSearch.active = target;
+          this.paneJump = '';
+          state.status = `${target.toUpperCase()} search`;
+        } else if (state.page === 'logs') {
+          state.overlay = { kind: 'filter', buffer: state.tradeFilter, cursor: 0 };
+        } else {
+          state.status = '/ searches FILES or STRATEGIES · on LOGS it filters fills';
+        }
         break;
+      }
       case 'toggle-advanced':
         state.showAdvanced = !state.showAdvanced;
         state.status = state.showAdvanced
@@ -966,6 +1041,12 @@ export class App {
       state.status = 'dismissed — the engine log is on LOGS';
       return;
     }
+    const searchTarget = this.focusedListSearchTarget();
+    if (searchTarget != null && state.listSearch[searchTarget] !== '') {
+      this.setListSearchQuery(searchTarget, '');
+      state.status = `${searchTarget.toUpperCase()} search cleared`;
+      return;
+    }
     if (state.logScope != null) {
       state.logScope = null;
       state.status = 'log unscoped';
@@ -1005,6 +1086,7 @@ export class App {
           return;
         }
         if (key.name === 'backspace') overlay.buffer = overlay.buffer.slice(0, -1);
+        else if (key.name === 'ctrl-u') overlay.buffer = '';
         else if (key.text != null) overlay.buffer += key.text;
         return;
 

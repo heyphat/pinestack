@@ -7,7 +7,8 @@
  * cannot accidentally invent its own chrome.
  */
 
-import type { PaneKey, Rect, Screen } from '../render/screen.js';
+import { truncate, type PaneKey, type Rect, type Screen } from '../render/screen.js';
+import { STYLE } from '../render/theme.js';
 import type { AppState } from '../state.js';
 import type { CommandId, PageId } from '../flags/schema.js';
 import type { Key } from '../terminal.js';
@@ -114,6 +115,31 @@ export function rows(rect: Rect, heights: readonly number[]): Rect[] {
   }
   out.push({ x: rect.x, y, w: rect.w, h: Math.max(0, rect.y + rect.h - y) });
   return out;
+}
+
+export interface ListSearchRowOptions {
+  query: string;
+  active: boolean;
+  placeholder: string;
+}
+
+/** Draw one always-visible, non-selectable search row and return list space. */
+export function drawListSearchRow(screen: Screen, rect: Rect, opts: ListSearchRowOptions): Rect {
+  const [search, content] = rows(rect, [1]) as [Rect, Rect];
+  if (search.h <= 0) return content;
+
+  const value =
+    opts.active || opts.query !== ''
+      ? `/${opts.query}${opts.active ? '█' : ''}`
+      : `/ search ${opts.placeholder}`;
+  screen.text(
+    search.x,
+    search.y,
+    truncate(`[ ${value} ]`, search.w),
+    opts.active ? STYLE.accentBold : opts.query !== '' ? STYLE.accent : STYLE.muted,
+    search,
+  );
+  return content;
 }
 
 /** Clamp a cursor into `[0, count)`, returning 0 for an empty pane. */

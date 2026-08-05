@@ -11,11 +11,18 @@
  */
 
 import {
+  adaptiveRollingSharpeWindow,
   drawdownChartAscii,
+  durationReturnAscii,
   equityChartAscii,
+  maeMfeAscii,
   monthlyReturnsAscii,
   monthlyTradesAscii,
   priceChartAscii,
+  profitHistogramAscii,
+  rollingSharpeAscii,
+  topDrawdownsAscii,
+  tradeOutcomeSequenceAscii,
 } from '@heyphat/pinerun';
 import { isSet } from '../flags/model.js';
 import { schemaFor } from '../flags/schema.js';
@@ -63,6 +70,9 @@ export function report(state: AppState): BacktestJson | undefined {
 }
 
 const PANES = ['strategies', 'config', 'charts', 'metrics', 'monthly', HISTORY_PANE] as const;
+
+/** The risk-chart slot views, in `j`/`k` order while CHARTS is focused. */
+export const CHART_VIEWS = ['drawdown', 'rolling-sharpe'] as const;
 
 /** Style for a signed metric: losses never read as accent (§4.7 deviation 2). */
 function signStyleOf(sign: number): Style {
@@ -120,7 +130,7 @@ function drawCharts(ctx: PageContext, rect: Rect): void {
   // builder, so the width handed over leaves room for both.
   const chartW = Math.max(16, inner.w - 12);
   const panels = rows(inner, [Math.floor((inner.h - 2) * 0.42), Math.floor((inner.h - 2) * 0.34)]);
-  const [priceRect, equityRect, ddRect] = panels as [Rect, Rect, Rect];
+  const [priceRect, equityRect, riskRect] = panels as [Rect, Rect, Rect];
 
   screen.text(priceRect.x, priceRect.y, 'PRICE', STYLE.title, inner);
   screen.text(
@@ -165,17 +175,59 @@ function drawCharts(ctx: PageContext, rect: Rect): void {
     );
   }
 
-  screen.text(ddRect.x, ddRect.y, 'DRAWDOWN', STYLE.title, inner);
-  screen.text(ddRect.x + 9, ddRect.y, '(close-to-close)', STYLE.muted, inner);
-  if (equity.length >= 2) {
+  const riskView = CHART_VIEWS[clampCursor(ctx.cursor('charts'), CHART_VIEWS.length)]!;
+  const showingDrawdown = riskView === 'drawdown';
+  const periodsPerYear = data.strategy?.metrics?.periodsPerYear;
+  const rollingWindow = adaptiveRollingSharpeWindow(equity, periodsPerYear);
+
+  screen.text(
+    riskRect.x,
+    riskRect.y,
+    showingDrawdown ? 'DRAWDOWN' : 'ROLLING SHARPE',
+    STYLE.title,
+    inner,
+  );
+  screen.text(
+    riskRect.x + (showingDrawdown ? 9 : 16),
+    riskRect.y,
+    showingDrawdown
+      ? '(close-to-close · j/k → Sharpe)'
+      : `(${rollingWindow == null ? 'needs 15+ returns' : `${rollingWindow}-bar · annualized`} · j/k → DD)`,
+    STYLE.muted,
+    inner,
+  );
+
+  if (showingDrawdown && equity.length >= 2) {
     // §4.3.e — 0% at the top, magnitude increasing downward. The builder owns
     // that orientation; pinetop must not flip it.
     screen.block(
-      ddRect.x,
-      ddRect.y + 1,
-      drawdownChartAscii(equity, { width: chartW, height: Math.max(2, ddRect.h - 2) }),
+      riskRect.x,
+      riskRect.y + 1,
+      drawdownChartAscii(equity, { width: chartW, height: Math.max(2, riskRect.h - 2) }),
       STYLE.negative,
-      ddRect,
+      riskRect,
+    );
+  } else if (rollingWindow != null) {
+    screen.block(
+      riskRect.x,
+      riskRect.y + 1,
+      rollingSharpeAscii(equity, {
+        width: chartW,
+        height: Math.max(2, riskRect.h - 2),
+        times,
+        window: rollingWindow,
+        periodsPerYear,
+      }),
+      STYLE.none,
+      riskRect,
+    );
+  } else {
+    screen.text(
+      riskRect.x,
+      riskRect.y + 1,
+      'needs at least 15 contiguous equity returns',
+      STYLE.muted,
+      riskRect,
     );
   }
 }
@@ -204,41 +256,127 @@ export function railLines(strategy: BacktestJson['strategy']): RailLine[] {
   return out;
 }
 
-function drawMetrics(ctx: PageContext, rect: Rect): void {
-  const { screen, state } = ctx;
-  const data = report(state);
-  const focused = ctx.focus === 'metrics';
+const METRIC_RAIL_COLS = 38;
+const METRIC_GAP_COLS = 1;
+const DISTRIBUTION_MIN_COLS = 28;
+const TOP_DRAWDOWNS_COLS = 56;
+/** Outer pane width needed for two full scalar-metric columns. */
+const STRUCTURED_TEARSHEET_COLS = METRIC_RAIL_COLS * 2 + METRIC_GAP_COLS + 2;
 
-  const lines = railLines(data?.strategy);
-  // One compact footer line, not four: every row it costs is a metric that
-  // would otherwise be pushed onto a second page.
-  // Bars and timeframe already sit in the CHARTS legend and the breadcrumb, so
-  // the footer carries only what has no other home.
-  const footer = tearsheetFooter(data?.strategy).join(' · ');
+/** Fit pinerun's histogram bars to the available rail width without changing its buckets. */
+function profitDistribution(profits: number[], width: number): string {
+  const initialBarWidth = Math.max(8, width - 8);
+  const uncoloured = profitHistogramAscii(profits, { width: initialBarWidth });
+  if (uncoloured === '') return '';
+  const longest = Math.max(...uncoloured.split('\n').map((line) => line.length));
+  const barWidth = Math.max(8, initialBarWidth - Math.max(0, longest - width));
+  return profitHistogramAscii(profits, { width: barWidth, color: true });
+}
 
-  const interiorH = Math.max(0, rect.h - 2);
-  const listRows = Math.max(1, interiorH - (footer === '' ? 0 : 1));
-  const cursor = clampCursor(ctx.cursor('metrics'), lines.length);
-  const { from, to } = windowFor(cursor, lines.length, listRows);
-  const paged = lines.length > listRows;
+/** Render full-width trade diagnostics in strict reading order. */
+function drawTradeAnalysis(ctx: PageContext, rect: Rect, data: BacktestJson): number {
+  const { screen } = ctx;
+  if (rect.w < DISTRIBUTION_MIN_COLS || rect.h <= 1) return rect.y;
 
-  const inner = drawPane(screen, rect, {
-    title: 'TEARSHEET',
-    focused,
-    key: ctx.paneKey('metrics'),
-    legend: paged
-      ? `${Math.floor(cursor / listRows) + 1}/${Math.ceil(lines.length / listRows)} · j/k`
-      : fillModelNote(data?.strategy),
+  const trades = data.trades ?? [];
+  const profits = trades.map((trade) => trade.profit);
+  const outcomes = tradeOutcomeSequenceAscii(trades, {
+    width: rect.w,
+    height: 7,
+    color: true,
   });
-  if (inner.h <= 0) return;
+  const distribution = profitDistribution(profits, rect.w);
+  const bottom = rect.y + rect.h;
+  let y = rect.y;
 
-  if (data?.strategy == null) {
-    screen.text(inner.x, inner.y, 'no run loaded', STYLE.muted, inner);
-    return;
+  const drawChart = (title: string, chart: string, emptyMessage?: string): boolean => {
+    const body = chart === '' ? emptyMessage : chart;
+    if (body == null) return true;
+
+    const rows = body.split('\n').length;
+    const sectionY = y + (y > rect.y ? 1 : 0);
+    // Never draw a title without its complete plot or clip an axis. A section
+    // that does not fit belongs on a taller terminal, not as a partial claim.
+    if (sectionY + 1 + rows > bottom) return false;
+
+    y = sectionY;
+    screen.text(rect.x, y, title, STYLE.title, rect);
+    y += 1;
+    if (chart === '') screen.text(rect.x, y, body, STYLE.muted, rect);
+    else screen.styledBlock(rect.x, y, body, STYLE.none, rect);
+    y += rows;
+    return true;
+  };
+
+  if (!drawChart('OUTCOMES & STREAKS', outcomes)) return y;
+  if (!drawChart('TRADE P/L DISTRIBUTION', distribution, 'no closed trades in this report')) {
+    return y;
   }
 
+  const diagnostics = [
+    {
+      title: 'RETURN BY HOLD',
+      chart: durationReturnAscii(trades, { width: rect.w, height: 6, color: true }),
+    },
+    {
+      title: 'MFE / MAE DENSITY',
+      chart: maeMfeAscii(trades, { width: rect.w, height: 9, color: true }),
+    },
+  ];
+  for (const diagnostic of diagnostics) {
+    if (!drawChart(diagnostic.title, diagnostic.chart)) break;
+  }
+  return y;
+}
+
+/** Render TOP DRAWDOWNS at `y` and return the first unused row. */
+function drawTopDrawdowns(ctx: PageContext, rect: Rect, data: BacktestJson, y = rect.y): number {
+  const { screen } = ctx;
+  if (rect.w < TOP_DRAWDOWNS_COLS || y < rect.y || y >= rect.y + rect.h) return y;
+
+  const drawdowns = topDrawdownsAscii(data.equityCurve ?? [], data.barTimes ?? [], { top: 5 });
+  const drawdownRows = drawdowns === '' ? 1 : drawdowns.split('\n').length;
+  if (y + 1 + drawdownRows > rect.y + rect.h) return y;
+
+  screen.text(rect.x, y, 'TOP DRAWDOWNS', STYLE.title, rect);
+  if (drawdowns === '') {
+    screen.text(rect.x, y + 1, 'no drawdown periods in this report', STYLE.muted, rect);
+  } else {
+    screen.block(rect.x, y + 1, drawdowns, STYLE.none, rect);
+  }
+  return y + 1 + drawdownRows;
+}
+
+type MetricSection = ReturnType<typeof tearsheetSections>[number];
+
+/**
+ * Rows one reading track costs: a title plus its metrics per section, and one
+ * blank line between adjacent sections. This is what decides whether the
+ * structured layout fits, so it must count exactly what `drawMetricSection`
+ * draws.
+ */
+function trackRows(sections: (MetricSection | undefined)[]): number {
+  const present = sections.filter((section): section is MetricSection => section != null);
+  const body = present.reduce((sum, section) => sum + 1 + section.rows.length, 0);
+  return body + Math.max(0, present.length - 1);
+}
+
+/**
+ * The pre-structured fallback: the flattened rail, paged by `j`/`k`. §4.3.a
+ * forbids a scrolling viewport, but a metric no key can reach is worse — so a
+ * pane too short for the tracks pages every metric instead of cutting the
+ * bottom of one off silently.
+ */
+function drawPagedRail(
+  screen: PageContext['screen'],
+  inner: Rect,
+  lines: RailLine[],
+  window: { from: number; to: number },
+  listRows: number,
+  footer: string,
+): void {
   let y = inner.y;
-  for (let i = from; i < to; i++) {
+  for (let i = window.from; i < window.to; i++) {
     if (y >= inner.y + listRows) break;
     const line = lines[i]!;
     if (line.kind === 'blank') {
@@ -255,12 +393,134 @@ function drawMetrics(ctx: PageContext, rect: Rect): void {
   }
 
   if (footer !== '') {
-    // Sit one line under the last row rather than pinned to the pane floor: a
-    // short history leaves the rail with slack, and a footer stranded six blank
-    // rows below the metrics reads as belonging to something else.
     const footerY = Math.min(y + 1, inner.y + inner.h - 1);
     screen.text(inner.x, footerY, truncate(footer, inner.w), STYLE.muted, inner);
   }
+}
+
+function drawMetricSection(
+  screen: PageContext['screen'],
+  rect: Rect,
+  section: MetricSection | undefined,
+  y: number,
+): number {
+  if (section == null || y >= rect.y + rect.h) return y;
+
+  screen.text(rect.x, y, section.title, STYLE.title, rect);
+  y += 1;
+  for (const row of section.rows) {
+    if (y >= rect.y + rect.h) break;
+    drawRailRow(screen, rect, y, row);
+    y += 1;
+  }
+  return y;
+}
+
+function drawMetrics(ctx: PageContext, rect: Rect): void {
+  const { screen, state } = ctx;
+  const data = report(state);
+  const focused = ctx.focus === 'metrics';
+  const footer = tearsheetFooter(data?.strategy).join(' · ');
+
+  const sections = tearsheetSections(data?.strategy);
+  const returns = sections.find((section) => section.title === 'RETURNS');
+  const risk = sections.find((section) => section.title === 'RISK');
+  const trades = sections.find((section) => section.title === 'TRADES');
+
+  // Decided before the border is drawn, because the legend has to say whether
+  // the pane pages. `drawPane` insets one column and row on each side.
+  const innerW = Math.max(0, rect.w - 2);
+  const twoColumn = innerW >= DISTRIBUTION_MIN_COLS * 2 + METRIC_GAP_COLS;
+  const requiredRows = twoColumn
+    ? Math.max(trackRows([returns, risk]), trackRows([trades]))
+    : trackRows([returns, trades, risk]);
+  const interiorH = Math.max(0, rect.h - 2);
+  const listRows = Math.max(1, interiorH - (footer === '' ? 0 : 1));
+  const lines = railLines(data?.strategy);
+  const paged = data?.strategy != null && requiredRows > listRows;
+  const cursor = clampCursor(ctx.cursor('metrics'), lines.length);
+
+  const inner = drawPane(screen, rect, {
+    title: 'TEARSHEET',
+    focused,
+    key: ctx.paneKey('metrics'),
+    legend: paged
+      ? `${Math.floor(cursor / listRows) + 1}/${Math.ceil(lines.length / listRows)} · j/k`
+      : fillModelNote(data?.strategy),
+  });
+  if (inner.h <= 0) return;
+
+  if (data?.strategy == null) {
+    screen.text(inner.x, inner.y, 'no run loaded', STYLE.muted, inner);
+    return;
+  }
+
+  if (paged) {
+    drawPagedRail(
+      screen,
+      inner,
+      lines,
+      windowFor(cursor, lines.length, listRows),
+      listRows,
+      footer,
+    );
+    return;
+  }
+
+  const bottom = inner.y + inner.h;
+  let metricsEndY: number;
+
+  if (twoColumn) {
+    // RETURNS and RISK form the left reading track; the taller TRADES section
+    // occupies the right. Both tracks finish before diagnostics take the full
+    // pane width below them.
+    const leftW = Math.min(METRIC_RAIL_COLS, Math.floor((inner.w - METRIC_GAP_COLS) / 2));
+    const leftRect: Rect = { ...inner, w: leftW };
+    const rightRect: Rect = {
+      x: inner.x + leftW + METRIC_GAP_COLS,
+      y: inner.y,
+      w: inner.w - leftW - METRIC_GAP_COLS,
+      h: inner.h,
+    };
+
+    let leftY = drawMetricSection(screen, leftRect, returns, leftRect.y);
+    if (risk != null && leftY < bottom) leftY += 1;
+    leftY = drawMetricSection(screen, leftRect, risk, leftY);
+    const rightY = drawMetricSection(screen, rightRect, trades, rightRect.y);
+    metricsEndY = Math.max(leftY, rightY);
+  } else {
+    // Extremely narrow panes cannot sustain two readable value columns. Keep
+    // the same semantic order in one track instead of clipping both columns.
+    let y = drawMetricSection(screen, inner, returns, inner.y);
+    if (trades != null && y < bottom) y += 1;
+    y = drawMetricSection(screen, inner, trades, y);
+    if (risk != null && y < bottom) y += 1;
+    metricsEndY = drawMetricSection(screen, inner, risk, y);
+  }
+
+  if (footer !== '' && metricsEndY + 1 < bottom) {
+    metricsEndY += 1;
+    screen.text(inner.x, metricsEndY, truncate(footer, inner.w), STYLE.muted, inner);
+    metricsEndY += 1;
+  }
+
+  // Every diagnostic below the metric header owns the complete TEARSHEET
+  // width, in the requested order. Stop if TOP DRAWDOWNS cannot fit so a later
+  // section never jumps ahead of it.
+  const drawdownsY = metricsEndY + (metricsEndY < bottom ? 1 : 0);
+  const drawdownsEndY = drawTopDrawdowns(ctx, inner, data, drawdownsY);
+  if (drawdownsEndY <= drawdownsY) return;
+
+  const analysisY = drawdownsEndY + 1;
+  drawTradeAnalysis(
+    ctx,
+    {
+      ...inner,
+      y: analysisY,
+      h: Math.max(0, bottom - analysisY),
+    },
+    data,
+  );
 }
 
 /**
@@ -413,6 +673,9 @@ export const backtestPage: Page = {
         return strategyRowCount(state);
       case 'config':
         return configRowCount(state, 'backtest');
+      case 'charts':
+        // Risk views share the third chart slot; j/k cycles through them.
+        return CHART_VIEWS.length;
       case 'monthly':
         // Two "rows": the two grids, so j/k swaps which one the strip shows.
         return MONTHLY_VIEWS.length;
@@ -423,6 +686,10 @@ export const backtestPage: Page = {
         return 0;
     }
   },
+
+  // CHARTS is a view carousel, not a list: moving past either end continues at
+  // the other. Other BACKTEST panes retain normal clamped list navigation.
+  wrapCursor: (_state, paneId) => paneId === 'charts',
 
   breadcrumb: (state) => {
     const model = state.flags.backtest;
@@ -454,12 +721,17 @@ export const backtestPage: Page = {
     const { body, screen, state } = ctx;
     const narrow = screen.cols < backtestPage.minCols;
 
-    // Degrade by dropping the right rail before truncating any table (§6).
-    // The rail carries the CLI's widest tearsheet row — `largest win / loss`
-    // against `484.12 / 0.0000` — so it needs ~36 interior columns or those
-    // values get cut.
-    const railW = narrow ? 0 : Math.min(40, Math.max(30, Math.floor(screen.cols * 0.24)));
     const leftW = Math.min(32, Math.max(24, Math.floor(screen.cols * 0.21)));
+    // Prefer two full 38-column metric tracks while retaining a useful center.
+    // Smaller terminals keep the prior responsive rail and stack only if even
+    // two compact metric columns cannot be read honestly.
+    const baseRailW = Math.min(102, Math.max(70, Math.floor(screen.cols * 0.46)));
+    const canFitStructuredTearsheet = screen.cols - leftW - STRUCTURED_TEARSHEET_COLS >= 32;
+    const railW = narrow
+      ? 0
+      : canFitStructuredTearsheet
+        ? Math.max(baseRailW, STRUCTURED_TEARSHEET_COLS)
+        : baseRailW;
     // Size the monthly strip to what it actually has to show — one header row
     // plus a row per year — instead of a fixed slab. A one-year backtest then
     // hands six rows back to the tearsheet rail, which is what lets all three

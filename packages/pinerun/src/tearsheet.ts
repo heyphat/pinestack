@@ -233,6 +233,160 @@ export function monthlyTradesAscii(
   return lines.join('\n');
 }
 
+export interface TradeOutcomeSequenceOptions {
+  /** Visible output width (default 64, minimum 28). */
+  width?: number;
+  /** Maximum total rows: outcome strip, histogram header, and bins (default 7, minimum 3). */
+  height?: number;
+  /** Paint wins green and losses red. Default false. */
+  color?: boolean;
+}
+
+type TradeOutcome = 'W' | 'L' | 'E';
+
+interface OutcomeRun {
+  outcome: TradeOutcome;
+  length: number;
+}
+
+interface StreakHistogramBin {
+  label: string;
+  wins: number;
+  losses: number;
+}
+
+/**
+ * Shared-scale diverging histogram of complete win/loss run frequencies. Loss
+ * bars extend left and win bars right from a common axis. When distinct streak
+ * lengths exceed the row budget, the longest tail is aggregated into an
+ * explicit `N+` bin.
+ */
+function streakHistogramAscii(
+  runs: OutcomeRun[],
+  width: number,
+  rows: number,
+  color: boolean,
+): string {
+  const wins = new Map<number, number>();
+  const losses = new Map<number, number>();
+  for (const run of runs) {
+    const frequencies = run.outcome === 'W' ? wins : run.outcome === 'L' ? losses : undefined;
+    if (frequencies != null) {
+      frequencies.set(run.length, (frequencies.get(run.length) ?? 0) + 1);
+    }
+  }
+
+  const lengths = [...new Set([...wins.keys(), ...losses.keys()])].sort((a, b) => a - b);
+  if (lengths.length === 0) return 'no W/L streaks';
+
+  const binRows = Math.max(1, rows);
+  const bins: StreakHistogramBin[] = [];
+  const exactRows = lengths.length > binRows ? binRows - 1 : lengths.length;
+  for (const length of lengths.slice(0, exactRows)) {
+    bins.push({
+      label: compactNumber(length),
+      wins: wins.get(length) ?? 0,
+      losses: losses.get(length) ?? 0,
+    });
+  }
+  if (exactRows < lengths.length) {
+    const tail = lengths.slice(exactRows);
+    bins.push({
+      label: `${compactNumber(tail[0]!)}+`,
+      wins: tail.reduce((sum, length) => sum + (wins.get(length) ?? 0), 0),
+      losses: tail.reduce((sum, length) => sum + (losses.get(length) ?? 0), 0),
+    });
+  }
+
+  const labelW = Math.max(3, ...bins.map((bin) => bin.label.length));
+  const count = (value: number): string => compactNumber(value);
+  const countW = Math.max(
+    1,
+    ...bins.flatMap((bin) => [count(bin.wins).length, count(bin.losses).length]),
+  );
+  // LEN + gap + loss bar/count + axis + win count/bar. Both sides use the
+  // same width and scale, so visual area is directly comparable.
+  const fixedWidth = labelW + countW * 2 + 4;
+  const barW = Math.max(1, Math.floor((width - fixedWidth) / 2));
+  const maxFrequency = Math.max(...bins.flatMap((bin) => [bin.wins, bin.losses]));
+  const barLength = (frequency: number): number =>
+    frequency === 0 ? 0 : Math.max(1, Math.round((frequency / maxFrequency) * barW));
+
+  const leftW = barW + 1 + countW;
+  const rightW = countW + 1 + barW;
+  const lines = [`${'LEN'.padStart(labelW)} ${'LOSS ←'.padStart(leftW)}│${'→ WIN'.padEnd(rightW)}`];
+  for (const bin of bins) {
+    const lossLength = barLength(bin.losses);
+    const winLength = barLength(bin.wins);
+    const lossBar =
+      ' '.repeat(barW - lossLength) + paint('█'.repeat(lossLength), RED, color && lossLength > 0);
+    const winBar =
+      paint('█'.repeat(winLength), GREEN, color && winLength > 0) + ' '.repeat(barW - winLength);
+    lines.push(
+      `${bin.label.padStart(labelW)} ${lossBar} ${count(bin.losses).padStart(countW)}│${count(bin.wins).padEnd(countW)} ${winBar}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Chronological closed-trade outcome strip plus a full-history streak-length
+ * histogram. Input order is authoritative: finite profits become W/L/E without
+ * sorting or reconstructing position state. Even trades break win/loss streaks.
+ * When the strip is wider than `width`, the most recent outcomes remain visible
+ * and the omitted older count is explicit; histogram counts still cover the
+ * complete sequence. Returns '' when no trade has a finite profit.
+ */
+export function tradeOutcomeSequenceAscii(
+  trades: readonly { profit: number }[],
+  opts: TradeOutcomeSequenceOptions = {},
+): string {
+  const width = Math.max(28, Math.floor(opts.width ?? 64));
+  const height = Math.max(3, Math.floor(opts.height ?? 7));
+  const outcomes: TradeOutcome[] = [];
+  for (const trade of trades) {
+    if (!Number.isFinite(trade.profit)) continue;
+    outcomes.push(trade.profit > 0 ? 'W' : trade.profit < 0 ? 'L' : 'E');
+  }
+  if (outcomes.length === 0) return '';
+
+  const runs: OutcomeRun[] = [];
+  for (const outcome of outcomes) {
+    const current = runs[runs.length - 1];
+    if (current?.outcome === outcome) current.length += 1;
+    else runs.push({ outcome, length: 1 });
+  }
+
+  const suffix = ' newest';
+  let prefix = 'oldest ';
+  let visibleCount = width - prefix.length - suffix.length;
+  if (outcomes.length > visibleCount) {
+    // The omitted count changes the prefix width, so converge after its digit
+    // count changes rather than estimating and risking a one-column overflow.
+    let omitted = outcomes.length - Math.max(1, visibleCount);
+    for (let i = 0; i < 4; i++) {
+      prefix = `…${omitted} older `;
+      visibleCount = Math.max(1, width - prefix.length - suffix.length);
+      const next = outcomes.length - visibleCount;
+      if (next === omitted) break;
+      omitted = next;
+    }
+  }
+  const visible = outcomes.slice(-Math.max(1, visibleCount));
+  const painted = visible
+    .map((outcome) =>
+      outcome === 'W'
+        ? paint(outcome, GREEN, opts.color === true)
+        : outcome === 'L'
+          ? paint(outcome, RED, opts.color === true)
+          : outcome,
+    )
+    .join('');
+  const strip = `${prefix}${painted}${suffix}`;
+  const histogram = streakHistogramAscii(runs, width, height - 2, opts.color === true);
+  return `${strip}\n${histogram}`;
+}
+
 export interface DrawdownEpisode {
   /** Peak → trough loss, percent (negative). */
   depthPercent: number;
@@ -411,4 +565,309 @@ export function correlationMatrixAscii(items: { label: string; series: number[] 
     return `  ${a.label.padEnd(labelW)}${cells.join('')}`;
   });
   return [header, ...rows].join('\n');
+}
+
+export interface TradeDiagnosticOptions {
+  /** Total output width (default 40, minimum 28). */
+  width?: number;
+  /** Requested output rows (default 5 for buckets, 9 for density; density minimum 6). */
+  height?: number;
+  /** Paint positive/negative outcomes green/red. Default false. */
+  color?: boolean;
+}
+
+/** Compact number for bucket boundaries and counts. */
+function compactNumber(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1_000_000)
+    return `${(value / 1_000_000).toFixed(magnitude < 10_000_000 ? 1 : 0)}m`;
+  if (magnitude >= 1_000) return `${(value / 1_000).toFixed(magnitude < 10_000 ? 1 : 0)}k`;
+  return String(Math.round(value));
+}
+
+/** Compact deterministic percentage, optionally showing a positive sign. */
+function diagnosticPercent(value: number, signed = false): string {
+  const normalized = Math.abs(value) < 0.005 ? 0 : value;
+  const magnitude = Math.abs(normalized);
+  let number: string;
+  if (magnitude >= 1_000) number = `${(magnitude / 1_000).toFixed(magnitude < 10_000 ? 1 : 0)}k`;
+  else number = magnitude.toFixed(magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : 2);
+  const sign = normalized < 0 ? '-' : signed && normalized > 0 ? '+' : '';
+  return `${sign}${number}%`;
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1]! + sorted[middle]!) / 2 : sorted[middle]!;
+}
+
+function percentile(values: number[], quantile: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.floor((sorted.length - 1) * Math.max(0, Math.min(1, quantile)));
+  return sorted[index]!;
+}
+
+/**
+ * Holding-time quantile buckets with median realized return, win rate, sample
+ * count, and a median-magnitude bar. Equal durations are never split between
+ * buckets, and the final open-ended bucket prevents one very long trade from
+ * stretching an axis. Returns '' when no trade has finite duration and return.
+ */
+export function durationReturnAscii(
+  trades: readonly {
+    entryPrice: number;
+    qty: number;
+    entryBar: number;
+    exitBar: number;
+    profit: number;
+  }[],
+  opts: TradeDiagnosticOptions = {},
+): string {
+  const observations: { duration: number; returnPercent: number; profit: number }[] = [];
+  for (const trade of trades) {
+    const notional = Math.abs(trade.entryPrice * trade.qty);
+    const duration = trade.exitBar - trade.entryBar;
+    if (
+      !Number.isFinite(notional) ||
+      notional <= 0 ||
+      !Number.isFinite(duration) ||
+      duration < 0 ||
+      !Number.isFinite(trade.profit)
+    ) {
+      continue;
+    }
+    observations.push({
+      duration,
+      returnPercent: (trade.profit / notional) * 100,
+      profit: trade.profit,
+    });
+  }
+  if (observations.length === 0) return '';
+  observations.sort((a, b) => a.duration - b.duration);
+
+  const width = Math.max(28, Math.floor(opts.width ?? 40));
+  const wanted = Math.min(5, Math.max(1, Math.floor(opts.height ?? 5)), observations.length);
+  const cuts: number[] = [];
+  for (let i = 1; i <= wanted; i++) {
+    const index = Math.min(
+      observations.length - 1,
+      Math.ceil((i * observations.length) / wanted) - 1,
+    );
+    const cut = observations[index]!.duration;
+    if (cuts[cuts.length - 1] !== cut) cuts.push(cut);
+  }
+
+  const buckets = cuts.map(() => [] as typeof observations);
+  for (const observation of observations) {
+    let bucket = cuts.findIndex((cut) => observation.duration <= cut);
+    if (bucket < 0) bucket = cuts.length - 1;
+    buckets[bucket]!.push(observation);
+  }
+
+  const rows = buckets.map((bucket, index) => {
+    const previous = index === 0 ? undefined : cuts[index - 1]!;
+    const lower = bucket[0]!.duration;
+    const upper = cuts[index]!;
+    let label: string;
+    if (cuts.length === 1) label = `${compactNumber(lower)}+`;
+    else if (index === cuts.length - 1) label = `>${compactNumber(previous!)}`;
+    else if (lower === upper) label = compactNumber(upper);
+    else label = `${compactNumber(lower)}–${compactNumber(upper)}`;
+    if (label.length > 8)
+      label = index === 0 ? `≤${compactNumber(upper)}` : `>${compactNumber(previous!)}`;
+
+    const med = median(bucket.map((item) => item.returnPercent));
+    const wins = bucket.filter((item) => item.profit > 0).length;
+    return {
+      label,
+      median: med,
+      returnText: diagnosticPercent(med, true),
+      winText: `${Math.round((wins / bucket.length) * 100)}%`,
+      countText: `n${compactNumber(bucket.length)}`,
+    };
+  });
+  // Display duration as a vertical magnitude axis: longest holds at the top,
+  // shortest at the bottom, matching the tearsheet's top-to-bottom ordering.
+  rows.reverse();
+
+  const labelW = Math.max(...rows.map((row) => row.label.length));
+  const returnW = Math.max(...rows.map((row) => row.returnText.length));
+  const winW = Math.max(...rows.map((row) => row.winText.length));
+  const countW = Math.max(...rows.map((row) => row.countText.length));
+  const fixedWidth = labelW + returnW + winW + countW + 4;
+  const barW = Math.max(0, width - fixedWidth);
+  const maxMedian = Math.max(...rows.map((row) => Math.abs(row.median)));
+
+  return rows
+    .map((row) => {
+      const barLength =
+        barW === 0 || row.median === 0 || maxMedian === 0
+          ? 0
+          : Math.max(1, Math.round((Math.abs(row.median) / maxMedian) * barW));
+      const ansi = row.median >= 0 ? GREEN : RED;
+      const returnCell = paint(
+        row.returnText.padStart(returnW),
+        ansi,
+        opts.color === true && row.median !== 0,
+      );
+      const barCell = paint(
+        '▇'.repeat(barLength).padEnd(barW),
+        ansi,
+        opts.color === true && row.median !== 0 && barW > 0,
+      );
+      return `${row.label.padStart(labelW)} ${returnCell} ${barCell} ${row.winText.padStart(winW)} ${row.countText.padStart(countW)}`;
+    })
+    .join('\n');
+}
+
+interface DensityCell {
+  count: number;
+  wins: number;
+  losses: number;
+}
+
+/**
+ * MAE/MFE density heatmap. Both axes are percentages of absolute entry
+ * notional and clamp at their 95th percentile, so rare excursions accumulate
+ * in edge cells instead of flattening the useful population. `░▒▓█` encodes
+ * log-scaled density; color shows the cell's majority realized outcome.
+ */
+export function maeMfeAscii(
+  trades: readonly {
+    entryPrice: number;
+    qty: number;
+    profit: number;
+    maxRunup: number;
+    maxDrawdown: number;
+  }[],
+  opts: TradeDiagnosticOptions = {},
+): string {
+  const observations: { mae: number; mfe: number; profit: number }[] = [];
+  for (const trade of trades) {
+    const notional = Math.abs(trade.entryPrice * trade.qty);
+    if (
+      !Number.isFinite(notional) ||
+      notional <= 0 ||
+      !Number.isFinite(trade.profit) ||
+      !Number.isFinite(trade.maxRunup) ||
+      trade.maxRunup < 0 ||
+      !Number.isFinite(trade.maxDrawdown) ||
+      trade.maxDrawdown < 0
+    ) {
+      continue;
+    }
+    observations.push({
+      mae: (trade.maxDrawdown / notional) * 100,
+      mfe: (trade.maxRunup / notional) * 100,
+      profit: trade.profit,
+    });
+  }
+  if (observations.length === 0) return '';
+
+  const width = Math.max(28, Math.floor(opts.width ?? 40));
+  const height = Math.max(6, Math.floor(opts.height ?? 9));
+  // Three rows belong to the X ticks and two legend lines. The remaining rows
+  // are the heatmap itself, with an explicit numeric MFE value on every row.
+  const plotRows = height - 3;
+  const rawMaeCap = percentile(
+    observations.map((item) => item.mae),
+    0.95,
+  );
+  const rawMfeCap = percentile(
+    observations.map((item) => item.mfe),
+    0.95,
+  );
+  const maeCap = rawMaeCap > 0 ? rawMaeCap : Math.max(1, ...observations.map((item) => item.mae));
+  const mfeCap = rawMfeCap > 0 ? rawMfeCap : Math.max(1, ...observations.map((item) => item.mfe));
+  const yLabels = Array.from({ length: plotRows }, (_, row) =>
+    diagnosticPercent(mfeCap * (1 - row / (plotRows - 1))),
+  );
+  const labelW = Math.max(...yLabels.map((label) => label.length));
+  const plotW = Math.max(8, width - labelW - 1);
+  const grid = Array.from({ length: plotRows }, () =>
+    Array.from({ length: plotW }, (): DensityCell => ({ count: 0, wins: 0, losses: 0 })),
+  );
+
+  for (const observation of observations) {
+    const col = Math.min(
+      plotW - 1,
+      Math.round((Math.min(observation.mae, maeCap) / maeCap) * (plotW - 1)),
+    );
+    const row = Math.min(
+      plotRows - 1,
+      Math.round((1 - Math.min(observation.mfe, mfeCap) / mfeCap) * (plotRows - 1)),
+    );
+    const cell = grid[row]![col]!;
+    cell.count += 1;
+    if (observation.profit > 0) cell.wins += 1;
+    else if (observation.profit < 0) cell.losses += 1;
+  }
+
+  const color = opts.color === true;
+  const maxCount = Math.max(...grid.flat().map((cell) => cell.count));
+  const density = ['░', '▒', '▓', '█'] as const;
+  const lines = grid.map((row, rowIndex) => {
+    const cells = row.map((cell) => {
+      if (cell.count === 0) return ' ';
+      const scaled = Math.log1p(cell.count) / Math.log1p(maxCount);
+      const glyph =
+        density[Math.max(0, Math.min(density.length - 1, Math.ceil(scaled * density.length) - 1))]!;
+      const majority = Math.sign(cell.wins - cell.losses);
+      return paint(glyph, majority >= 0 ? GREEN : RED, color && majority !== 0);
+    });
+    return `${yLabels[rowIndex]!.padStart(labelW)}│${cells.join('')}`;
+  });
+
+  // Numeric MAE ticks at 0, midpoint, and p95. The midpoint is omitted only
+  // when its label would collide with an endpoint at the minimum chart width.
+  const xAxis = new Array<string>(plotW).fill('─');
+  const putTick = (start: number, text: string): void => {
+    for (let i = 0; i < text.length && start + i < xAxis.length; i++) xAxis[start + i] = text[i]!;
+  };
+  const leftTick = diagnosticPercent(0);
+  const middleTick = diagnosticPercent(maeCap / 2);
+  const rightTick = diagnosticPercent(maeCap);
+  const rightStart = Math.max(0, plotW - rightTick.length);
+  const middleStart = Math.max(0, Math.round((plotW - middleTick.length) / 2));
+  putTick(0, leftTick);
+  putTick(rightStart, rightTick);
+  if (middleStart > leftTick.length && middleStart + middleTick.length < rightStart) {
+    putTick(middleStart, middleTick);
+  }
+  lines.push(`${' '.repeat(labelW)}└${xAxis.join('')}`);
+
+  type Legend = { plain: string; rendered: string };
+  const chooseLegend = (variants: Legend[]): Legend =>
+    variants.find((variant) => variant.plain.length <= plotW) ?? variants[variants.length - 1]!;
+  const legendLine = (legend: Legend): string =>
+    `${' '.repeat(labelW + 1)}${legend.rendered}${' '.repeat(Math.max(0, plotW - legend.plain.length))}`;
+
+  const axisLegend = chooseLegend([
+    {
+      plain: 'MAE → adverse · MFE ↑ favorable · values = % entry notional · p95 clipped',
+      rendered: 'MAE → adverse · MFE ↑ favorable · values = % entry notional · p95 clipped',
+    },
+    {
+      plain: 'MAE→ adverse · MFE↑ favorable · % notional · p95 cap',
+      rendered: 'MAE→ adverse · MFE↑ favorable · % notional · p95 cap',
+    },
+    { plain: 'MAE→adv MFE↑fav p95', rendered: 'MAE→adv MFE↑fav p95' },
+  ]);
+  const densityLegend = chooseLegend([
+    {
+      plain: '░▒▓█ log density · green W>L · red L>W · plain tie',
+      rendered: `░▒▓█ log density · ${paint('green W>L', GREEN, color)} · ${paint('red L>W', RED, color)} · plain tie`,
+    },
+    {
+      plain: '░▒▓█ log n · G:W>L · R:L>W · plain tie',
+      rendered: `░▒▓█ log n · ${paint('G:W>L', GREEN, color)} · ${paint('R:L>W', RED, color)} · plain tie`,
+    },
+    {
+      plain: '░█ log n G:W>L R:L>W',
+      rendered: `░█ log n ${paint('G:W>L', GREEN, color)} ${paint('R:L>W', RED, color)}`,
+    },
+  ]);
+  lines.push(legendLine(axisLegend), legendLine(densityLegend));
+  return lines.join('\n');
 }

@@ -184,7 +184,7 @@ pinetop      # 1–8 pages · tab panes · ↵ edit a flag · r ↵ run · ? key
              # page 1: the source, vim keys — i inserts, :w writes, tab leaves
 ```
 
-![The pinetop BACKTEST page: strategies and flags on the left, price/equity/drawdown charts and the tearsheet resident on screen, monthly returns and trades below](docs/assets/pinetop-backtest.png)
+![The pinetop BACKTEST page: strategies and flags on the left, price/equity/drawdown charts and the tearsheet resident on screen, monthly returns and trades below](docs/assets/pinestack-backtest.png)
 
 ## Paper forward replay
 

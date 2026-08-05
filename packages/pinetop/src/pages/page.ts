@@ -38,8 +38,13 @@ export interface Page {
   command?: CommandId;
   /** Focus ring order for `tab` / `shift-tab`. */
   panes: (state: AppState) => string[];
-  /** Selectable rows in a pane, so `j`/`k`/`g`/`G` clamp correctly. */
+  /** Selectable rows in a pane, so `j`/`k`/`g`/`G` stay in bounds. */
   rowCount: (state: AppState, paneId: string) => number;
+  /**
+   * Whether ordinary move keys wrap at this pane's boundaries. Defaults to
+   * false; `g`/`G` still select the first/last row directly.
+   */
+  wrapCursor?: (state: AppState, paneId: string) => boolean;
   render: (ctx: PageContext) => void;
   /** `↵` on the focused pane. Returns a status line, or undefined. */
   confirm?: (state: AppState) => string | undefined;

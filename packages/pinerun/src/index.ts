@@ -90,12 +90,15 @@ export type {
   PriceChartOptions,
   PriceChartTrade,
   OverlayChartOptions,
+  RollingSharpeChartOptions,
 } from './chart.js';
 export {
   equityChartAscii,
   priceChartAscii,
   overlayChartAscii,
   drawdownChartAscii,
+  adaptiveRollingSharpeWindow,
+  rollingSharpeAscii,
   sparkline,
 } from './chart.js';
 export type {
@@ -103,6 +106,8 @@ export type {
   MonthlyTradesOptions,
   TopDrawdownsOptions,
   ProfitHistogramOptions,
+  TradeOutcomeSequenceOptions,
+  TradeDiagnosticOptions,
   DrawdownEpisode,
 } from './tearsheet.js';
 export {
@@ -111,6 +116,9 @@ export {
   topDrawdownsAscii,
   drawdownEpisodes,
   profitHistogramAscii,
+  tradeOutcomeSequenceAscii,
+  durationReturnAscii,
+  maeMfeAscii,
   correlationMatrixAscii,
 } from './tearsheet.js';
 export type { StarterTemplate, ScaffoldOptions } from './scaffold.js';

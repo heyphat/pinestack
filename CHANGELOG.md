@@ -81,6 +81,59 @@ without being announced as a release.
   synchronization guard. Opting out takes an explicit
   `requireExecutionSafety: false`.
 
+## [0.9.4] - 2026-08-05
+
+### Added
+
+- **`pinetop` BACKTEST tearsheet: drawdown, distribution, and trade-quality
+  analysis.** The TEARSHEET pane now reads as scalar metrics first, then
+  full-width diagnostics. RETURNS and RISK form the left metric track and
+  TRADES the right; below them, each diagnostic owns the complete pane width in
+  a fixed order:
+  - **TOP DRAWDOWNS** — the CLI's peak → trough → recovery episode table,
+    now rendered in the TUI whenever the width and height allow.
+  - **OUTCOMES & STREAKS** — the chronological closed-trade W/L/E strip
+    (newest kept visible, the omitted older count stated) above a
+    shared-scale streak histogram: loss runs extend left, win runs right,
+    streak length down the axis, with long tails aggregated into one `N+` row.
+  - **TRADE P/L DISTRIBUTION** — the closed-trade profit histogram, colored
+    green/red per bucket, sized to the available width.
+  - **RETURN BY HOLD** — closed trades grouped into holding-duration
+    quantile buckets (longest at top, shortest at bottom), each row showing
+    median return, a magnitude bar, win rate, and sample count. Buckets never
+    split an equal duration, and the longest bucket is open-ended so a single
+    outlier trade cannot distort the scale.
+  - **MFE / MAE DENSITY** — a density heatmap of each trade's maximum
+    favorable/adverse excursion, clipped at the 95th percentile per axis and
+    colored by each cell's majority realized outcome. Every MFE row carries a
+    numeric label, the MAE baseline carries 0 / midpoint / p95 values, and a
+    two-line legend names the axis directions, the percent-of-entry-notional
+    unit, the p95 clipping, the `░▒▓█` log-density ramp, and the exact color
+    rule (green wins > losses, red losses > wins, plain a tie).
+  - **ROLLING SHARPE** — an annualized risk-adjusted equity-return chart that
+    shares the third CHARTS slot with DRAWDOWN; focus CHARTS and use `j`/`k` to
+    switch views. The window targets one empirical year of returns using the
+    report's annualization factor, capped at one fifth of the longest
+    contiguous history so the chart keeps enough rolling points; without a
+    usable factor it falls back to a compact 14–30 bars. Deriving it from the
+    timeframe is what keeps intraday runs meaningful — a fixed 30-bar window on
+    5-minute data annualizes 150 minutes of returns and swings the axis by
+    hundreds of Sharpe units.
+    All six are read from the existing `pinerun backtest --json` payload; no
+    output-contract change. They degrade by omission (never by clipping a date,
+    duration, or axis) on narrower or shorter terminals, and a pane too short
+    for both metric tracks falls back to the flattened rail paged with `j`/`k`
+    so no metric becomes unreachable.
+- **`pinerun` gains reusable trade-diagnostic and rolling-risk renderers.** New pure,
+  width/height-bounded `durationReturnAscii`, `maeMfeAscii`,
+  `tradeOutcomeSequenceAscii`, and `rollingSharpeAscii` builders are exported
+  alongside the existing `topDrawdownsAscii` and `profitHistogramAscii`,
+  together with `TradeDiagnosticOptions`, `TradeOutcomeSequenceOptions`,
+  `RollingSharpeChartOptions`, and the adaptive window helper
+  (`adaptiveRollingSharpeWindow`, which now accepts the annualization factor).
+  They back the new `pinetop` panels above and are usable directly from
+  `@heyphat/pinerun` by anything building on the library.
+
 ## [0.9.3] - 2026-08-04
 
 `pinetop` only — no `pinerun`, `pinery`, or `pinelive` behaviour changes, and no
@@ -763,7 +816,8 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
-[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.3...HEAD
+[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/heyphat/pinestack/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/heyphat/pinestack/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/heyphat/pinestack/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/heyphat/pinestack/compare/v0.9.0...v0.9.1

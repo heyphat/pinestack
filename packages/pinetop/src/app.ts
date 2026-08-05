@@ -739,6 +739,11 @@ export class App {
     const count = this.page.rowCount(this.state, paneId);
     const panes = this.state.panes[this.state.page];
     const current = panes.cursor[paneId] ?? 0;
+    if (count > 0 && this.page.wrapCursor?.(this.state, paneId)) {
+      const normalized = clampCursor(current, count);
+      panes.cursor[paneId] = (((normalized + delta) % count) + count) % count;
+      return;
+    }
     panes.cursor[paneId] = clampCursor(current + delta, count);
   }
 

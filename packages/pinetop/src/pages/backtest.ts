@@ -55,7 +55,7 @@ import {
   strategyRowCount,
   type StrategiesPaneOptions,
 } from './strategies-pane.js';
-import { clampCursor, columns, rows, type Page, type PageContext } from './page.js';
+import { clampCursor, columns, rows, windowFor, type Page, type PageContext } from './page.js';
 
 /** The shared discovery cache — see `scripts.ts`; the editor reads the same one. */
 export function scripts(): ScriptEntry[] {
@@ -347,10 +347,61 @@ function drawTopDrawdowns(ctx: PageContext, rect: Rect, data: BacktestJson, y = 
   return y + 1 + drawdownRows;
 }
 
+type MetricSection = ReturnType<typeof tearsheetSections>[number];
+
+/**
+ * Rows one reading track costs: a title plus its metrics per section, and one
+ * blank line between adjacent sections. This is what decides whether the
+ * structured layout fits, so it must count exactly what `drawMetricSection`
+ * draws.
+ */
+function trackRows(sections: (MetricSection | undefined)[]): number {
+  const present = sections.filter((section): section is MetricSection => section != null);
+  const body = present.reduce((sum, section) => sum + 1 + section.rows.length, 0);
+  return body + Math.max(0, present.length - 1);
+}
+
+/**
+ * The pre-structured fallback: the flattened rail, paged by `j`/`k`. §4.3.a
+ * forbids a scrolling viewport, but a metric no key can reach is worse — so a
+ * pane too short for the tracks pages every metric instead of cutting the
+ * bottom of one off silently.
+ */
+function drawPagedRail(
+  screen: PageContext['screen'],
+  inner: Rect,
+  lines: RailLine[],
+  window: { from: number; to: number },
+  listRows: number,
+  footer: string,
+): void {
+  let y = inner.y;
+  for (let i = window.from; i < window.to; i++) {
+    if (y >= inner.y + listRows) break;
+    const line = lines[i]!;
+    if (line.kind === 'blank') {
+      y += 1;
+      continue;
+    }
+    if (line.kind === 'title') {
+      screen.text(inner.x, y, line.text, STYLE.title, inner);
+      y += 1;
+      continue;
+    }
+    drawRailRow(screen, inner, y, line.row);
+    y += 1;
+  }
+
+  if (footer !== '') {
+    const footerY = Math.min(y + 1, inner.y + inner.h - 1);
+    screen.text(inner.x, footerY, truncate(footer, inner.w), STYLE.muted, inner);
+  }
+}
+
 function drawMetricSection(
   screen: PageContext['screen'],
   rect: Rect,
-  section: ReturnType<typeof tearsheetSections>[number] | undefined,
+  section: MetricSection | undefined,
   y: number,
 ): number {
   if (section == null || y >= rect.y + rect.h) return y;
@@ -371,11 +422,31 @@ function drawMetrics(ctx: PageContext, rect: Rect): void {
   const focused = ctx.focus === 'metrics';
   const footer = tearsheetFooter(data?.strategy).join(' · ');
 
+  const sections = tearsheetSections(data?.strategy);
+  const returns = sections.find((section) => section.title === 'RETURNS');
+  const risk = sections.find((section) => section.title === 'RISK');
+  const trades = sections.find((section) => section.title === 'TRADES');
+
+  // Decided before the border is drawn, because the legend has to say whether
+  // the pane pages. `drawPane` insets one column and row on each side.
+  const innerW = Math.max(0, rect.w - 2);
+  const twoColumn = innerW >= DISTRIBUTION_MIN_COLS * 2 + METRIC_GAP_COLS;
+  const requiredRows = twoColumn
+    ? Math.max(trackRows([returns, risk]), trackRows([trades]))
+    : trackRows([returns, trades, risk]);
+  const interiorH = Math.max(0, rect.h - 2);
+  const listRows = Math.max(1, interiorH - (footer === '' ? 0 : 1));
+  const lines = railLines(data?.strategy);
+  const paged = data?.strategy != null && requiredRows > listRows;
+  const cursor = clampCursor(ctx.cursor('metrics'), lines.length);
+
   const inner = drawPane(screen, rect, {
     title: 'TEARSHEET',
     focused,
     key: ctx.paneKey('metrics'),
-    legend: fillModelNote(data?.strategy),
+    legend: paged
+      ? `${Math.floor(cursor / listRows) + 1}/${Math.ceil(lines.length / listRows)} · j/k`
+      : fillModelNote(data?.strategy),
   });
   if (inner.h <= 0) return;
 
@@ -384,14 +455,22 @@ function drawMetrics(ctx: PageContext, rect: Rect): void {
     return;
   }
 
-  const sections = tearsheetSections(data.strategy);
-  const returns = sections.find((section) => section.title === 'RETURNS');
-  const risk = sections.find((section) => section.title === 'RISK');
-  const trades = sections.find((section) => section.title === 'TRADES');
+  if (paged) {
+    drawPagedRail(
+      screen,
+      inner,
+      lines,
+      windowFor(cursor, lines.length, listRows),
+      listRows,
+      footer,
+    );
+    return;
+  }
+
   const bottom = inner.y + inner.h;
   let metricsEndY: number;
 
-  if (inner.w >= DISTRIBUTION_MIN_COLS * 2 + METRIC_GAP_COLS) {
+  if (twoColumn) {
     // RETURNS and RISK form the left reading track; the taller TRADES section
     // occupies the right. Both tracks finish before diagnostics take the full
     // pane width below them.

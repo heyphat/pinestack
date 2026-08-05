@@ -345,6 +345,160 @@ export function drawdownChartAscii(
   return lines.join('\n');
 }
 
+export interface RollingSharpeChartOptions {
+  /** Chart width in characters (default 64). */
+  width?: number;
+  /** Chart height in characters (default 4). */
+  height?: number;
+  /** Bar times (unix s or ms) — enables the date row under the chart. */
+  times?: number[];
+  /** Return window in bars. Defaults to `adaptiveRollingSharpeWindow`. */
+  window?: number;
+  /** Return observations per year for annualization. Default 1 (unannualized). */
+  periodsPerYear?: number;
+  /** Annual risk-free rate as a fraction. Default 0. */
+  riskFreeRate?: number;
+}
+
+/**
+ * Adaptive bar-count window for rolling Sharpe: approximately one fifth of the
+ * longest contiguous return history, clamped to 14–30 bars. Returns undefined
+ * when fewer than 15 contiguous finite returns are available, because a
+ * 14-return window would not produce a line with two points.
+ */
+export function adaptiveRollingSharpeWindow(equity: number[]): number | undefined {
+  let run = 0;
+  let longest = 0;
+  for (let i = 1; i < equity.length; i++) {
+    const previous = equity[i - 1]!;
+    const current = equity[i]!;
+    if (Number.isFinite(previous) && previous !== 0 && Number.isFinite(current)) {
+      run += 1;
+      longest = Math.max(longest, run);
+    } else {
+      run = 0;
+    }
+  }
+  if (longest < 15) return undefined;
+  return Math.min(30, Math.max(14, Math.round(longest / 5)));
+}
+
+/** Compact label for a Sharpe axis. */
+function fmtSharpe(value: number): string {
+  const magnitude = Math.abs(value);
+  return value.toFixed(magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : 2);
+}
+
+/**
+ * Rolling annualized Sharpe as a braille line with a dashed zero guide. Returns
+ * '' when the curve cannot produce at least two finite rolling observations.
+ * The default adaptive window is bar-count based, not calendar based, so short
+ * backtests and different timeframes use the data they actually contain.
+ */
+export function rollingSharpeAscii(equity: number[], opts: RollingSharpeChartOptions = {}): string {
+  const width = Math.max(16, opts.width ?? 64);
+  const height = Math.max(2, opts.height ?? 4);
+  const adaptive = adaptiveRollingSharpeWindow(equity);
+  const window = Math.floor(opts.window ?? adaptive ?? 0);
+  if (window < 2) return '';
+
+  const periodsPerYear =
+    opts.periodsPerYear != null && Number.isFinite(opts.periodsPerYear) && opts.periodsPerYear > 0
+      ? opts.periodsPerYear
+      : 1;
+  const annualRiskFree =
+    opts.riskFreeRate != null && Number.isFinite(opts.riskFreeRate) ? opts.riskFreeRate : 0;
+  const periodRiskFree =
+    annualRiskFree > -1 ? Math.pow(1 + annualRiskFree, 1 / periodsPerYear) - 1 : 0;
+
+  const values = new Array<number>(equity.length).fill(NaN);
+  const queue: number[] = [];
+  let sum = 0;
+  let sumSquares = 0;
+  for (let i = 1; i < equity.length; i++) {
+    const previous = equity[i - 1]!;
+    const current = equity[i]!;
+    if (!Number.isFinite(previous) || previous === 0 || !Number.isFinite(current)) {
+      queue.length = 0;
+      sum = 0;
+      sumSquares = 0;
+      continue;
+    }
+
+    const excess = current / previous - 1 - periodRiskFree;
+    queue.push(excess);
+    sum += excess;
+    sumSquares += excess * excess;
+    if (queue.length > window) {
+      const removed = queue.shift()!;
+      sum -= removed;
+      sumSquares -= removed * removed;
+    }
+    if (queue.length !== window) continue;
+
+    const mean = sum / window;
+    const variance = Math.max(0, (sumSquares - (sum * sum) / window) / (window - 1));
+    if (variance > 1e-24) values[i] = (mean / Math.sqrt(variance)) * Math.sqrt(periodsPerYear);
+  }
+
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (finite.length < 2) return '';
+  let lo = Math.min(0, ...chunkedMinMax(finite, 'min'));
+  let hi = Math.max(0, ...chunkedMinMax(finite, 'max'));
+  if (hi === lo) {
+    hi += 1;
+    lo -= 1;
+  }
+
+  const grid = new Uint8Array(width * height);
+  const slots = width * 2;
+  const levels = height * 4;
+  const lvl = (value: number): number =>
+    Math.min(levels - 1, Math.max(0, Math.round(((hi - value) / (hi - lo)) * (levels - 1))));
+  const set = (x: number, y: number): void => {
+    const index = (y >> 2) * width + (x >> 1);
+    grid[index] = grid[index]! | DOT[y & 3]![x & 1]!;
+  };
+
+  const zeroLevel = lvl(0);
+  for (let x = 0; x < slots; x++) if (x % 6 < 2) set(x, zeroLevel);
+
+  let previousLevel: number | null = null;
+  for (let x = 0; x < slots; x++) {
+    const value = values[Math.round((x * (values.length - 1)) / (slots - 1))]!;
+    if (!Number.isFinite(value)) {
+      previousLevel = null;
+      continue;
+    }
+    const level = lvl(value);
+    const from = previousLevel == null ? level : Math.min(previousLevel, level);
+    const to = previousLevel == null ? level : Math.max(previousLevel, level);
+    for (let y = from; y <= to; y++) set(x, y);
+    previousLevel = level;
+  }
+
+  const labels = new Map<number, string>([
+    [0, fmtSharpe(hi)],
+    [height - 1, fmtSharpe(lo)],
+  ]);
+  const zeroRow = zeroLevel >> 2;
+  if (!labels.has(zeroRow)) labels.set(zeroRow, '0.00');
+  const gutterW = Math.max(...[...labels.values()].map((label) => label.length));
+  const lines: string[] = [];
+  for (let rowIndex = 0; rowIndex < height; rowIndex++) {
+    let row = '';
+    for (let column = 0; column < width; column++) {
+      const bits = grid[rowIndex * width + column]!;
+      row += bits === 0 ? ' ' : String.fromCharCode(0x2800 + bits);
+    }
+    lines.push(
+      `${(labels.get(rowIndex) ?? '').padStart(gutterW)} ${labels.has(rowIndex) ? '┤' : '│'}${row}`,
+    );
+  }
+  pushDateRow(lines, opts.times ?? [], equity.length, width, gutterW);
+  return lines.join('\n');
+}
+
 /**
  * One-row ▁▂▃▄▅▆▇█ sparkline of any series, `width` characters wide. A flat
  * series renders as its baseline; NaN samples print a space.

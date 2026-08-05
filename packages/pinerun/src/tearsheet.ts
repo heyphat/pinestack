@@ -412,3 +412,256 @@ export function correlationMatrixAscii(items: { label: string; series: number[] 
   });
   return [header, ...rows].join('\n');
 }
+
+export interface TradeDiagnosticOptions {
+  /** Total output width (default 40, minimum 28). */
+  width?: number;
+  /** Maximum output rows (default 5 for buckets, 7 for density). */
+  height?: number;
+  /** Paint positive/negative outcomes green/red. Default false. */
+  color?: boolean;
+}
+
+/** Compact number for bucket boundaries and counts. */
+function compactNumber(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1_000_000)
+    return `${(value / 1_000_000).toFixed(magnitude < 10_000_000 ? 1 : 0)}m`;
+  if (magnitude >= 1_000) return `${(value / 1_000).toFixed(magnitude < 10_000 ? 1 : 0)}k`;
+  return String(Math.round(value));
+}
+
+/** Compact deterministic percentage, optionally showing a positive sign. */
+function diagnosticPercent(value: number, signed = false): string {
+  const normalized = Math.abs(value) < 0.005 ? 0 : value;
+  const magnitude = Math.abs(normalized);
+  let number: string;
+  if (magnitude >= 1_000) number = `${(magnitude / 1_000).toFixed(magnitude < 10_000 ? 1 : 0)}k`;
+  else number = magnitude.toFixed(magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : 2);
+  const sign = normalized < 0 ? '-' : signed && normalized > 0 ? '+' : '';
+  return `${sign}${number}%`;
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1]! + sorted[middle]!) / 2 : sorted[middle]!;
+}
+
+function percentile(values: number[], quantile: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.floor((sorted.length - 1) * Math.max(0, Math.min(1, quantile)));
+  return sorted[index]!;
+}
+
+/**
+ * Holding-time quantile buckets with median realized return, win rate, sample
+ * count, and a median-magnitude bar. Equal durations are never split between
+ * buckets, and the final open-ended bucket prevents one very long trade from
+ * stretching an axis. Returns '' when no trade has finite duration and return.
+ */
+export function durationReturnAscii(
+  trades: readonly {
+    entryPrice: number;
+    qty: number;
+    entryBar: number;
+    exitBar: number;
+    profit: number;
+  }[],
+  opts: TradeDiagnosticOptions = {},
+): string {
+  const observations: { duration: number; returnPercent: number; profit: number }[] = [];
+  for (const trade of trades) {
+    const notional = Math.abs(trade.entryPrice * trade.qty);
+    const duration = trade.exitBar - trade.entryBar;
+    if (
+      !Number.isFinite(notional) ||
+      notional <= 0 ||
+      !Number.isFinite(duration) ||
+      duration < 0 ||
+      !Number.isFinite(trade.profit)
+    ) {
+      continue;
+    }
+    observations.push({
+      duration,
+      returnPercent: (trade.profit / notional) * 100,
+      profit: trade.profit,
+    });
+  }
+  if (observations.length === 0) return '';
+  observations.sort((a, b) => a.duration - b.duration);
+
+  const width = Math.max(28, Math.floor(opts.width ?? 40));
+  const wanted = Math.min(5, Math.max(1, Math.floor(opts.height ?? 5)), observations.length);
+  const cuts: number[] = [];
+  for (let i = 1; i <= wanted; i++) {
+    const index = Math.min(
+      observations.length - 1,
+      Math.ceil((i * observations.length) / wanted) - 1,
+    );
+    const cut = observations[index]!.duration;
+    if (cuts[cuts.length - 1] !== cut) cuts.push(cut);
+  }
+
+  const buckets = cuts.map(() => [] as typeof observations);
+  for (const observation of observations) {
+    let bucket = cuts.findIndex((cut) => observation.duration <= cut);
+    if (bucket < 0) bucket = cuts.length - 1;
+    buckets[bucket]!.push(observation);
+  }
+
+  const rows = buckets.map((bucket, index) => {
+    const previous = index === 0 ? undefined : cuts[index - 1]!;
+    const lower = bucket[0]!.duration;
+    const upper = cuts[index]!;
+    let label: string;
+    if (cuts.length === 1) label = `${compactNumber(lower)}+`;
+    else if (index === cuts.length - 1) label = `>${compactNumber(previous!)}`;
+    else if (lower === upper) label = compactNumber(upper);
+    else label = `${compactNumber(lower)}–${compactNumber(upper)}`;
+    if (label.length > 8)
+      label = index === 0 ? `≤${compactNumber(upper)}` : `>${compactNumber(previous!)}`;
+
+    const med = median(bucket.map((item) => item.returnPercent));
+    const wins = bucket.filter((item) => item.profit > 0).length;
+    return {
+      label,
+      median: med,
+      returnText: diagnosticPercent(med, true),
+      winText: `${Math.round((wins / bucket.length) * 100)}%`,
+      countText: `n${compactNumber(bucket.length)}`,
+    };
+  });
+  // Display duration as a vertical magnitude axis: longest holds at the top,
+  // shortest at the bottom, matching the tearsheet's top-to-bottom ordering.
+  rows.reverse();
+
+  const labelW = Math.max(...rows.map((row) => row.label.length));
+  const returnW = Math.max(...rows.map((row) => row.returnText.length));
+  const winW = Math.max(...rows.map((row) => row.winText.length));
+  const countW = Math.max(...rows.map((row) => row.countText.length));
+  const fixedWidth = labelW + returnW + winW + countW + 4;
+  const barW = Math.max(0, width - fixedWidth);
+  const maxMedian = Math.max(...rows.map((row) => Math.abs(row.median)));
+
+  return rows
+    .map((row) => {
+      const barLength =
+        barW === 0 || row.median === 0 || maxMedian === 0
+          ? 0
+          : Math.max(1, Math.round((Math.abs(row.median) / maxMedian) * barW));
+      const ansi = row.median >= 0 ? GREEN : RED;
+      const returnCell = paint(
+        row.returnText.padStart(returnW),
+        ansi,
+        opts.color === true && row.median !== 0,
+      );
+      const barCell = paint(
+        '▇'.repeat(barLength).padEnd(barW),
+        ansi,
+        opts.color === true && row.median !== 0 && barW > 0,
+      );
+      return `${row.label.padStart(labelW)} ${returnCell} ${barCell} ${row.winText.padStart(winW)} ${row.countText.padStart(countW)}`;
+    })
+    .join('\n');
+}
+
+interface DensityCell {
+  count: number;
+  wins: number;
+  losses: number;
+}
+
+/**
+ * MAE/MFE density heatmap. Both axes are percentages of absolute entry
+ * notional and clamp at their 95th percentile, so rare excursions accumulate
+ * in edge cells instead of flattening the useful population. `░▒▓█` encodes
+ * log-scaled density; color shows the cell's majority realized outcome.
+ */
+export function maeMfeAscii(
+  trades: readonly {
+    entryPrice: number;
+    qty: number;
+    profit: number;
+    maxRunup: number;
+    maxDrawdown: number;
+  }[],
+  opts: TradeDiagnosticOptions = {},
+): string {
+  const observations: { mae: number; mfe: number; profit: number }[] = [];
+  for (const trade of trades) {
+    const notional = Math.abs(trade.entryPrice * trade.qty);
+    if (
+      !Number.isFinite(notional) ||
+      notional <= 0 ||
+      !Number.isFinite(trade.profit) ||
+      !Number.isFinite(trade.maxRunup) ||
+      trade.maxRunup < 0 ||
+      !Number.isFinite(trade.maxDrawdown) ||
+      trade.maxDrawdown < 0
+    ) {
+      continue;
+    }
+    observations.push({
+      mae: (trade.maxDrawdown / notional) * 100,
+      mfe: (trade.maxRunup / notional) * 100,
+      profit: trade.profit,
+    });
+  }
+  if (observations.length === 0) return '';
+
+  const width = Math.max(28, Math.floor(opts.width ?? 40));
+  const height = Math.max(4, Math.floor(opts.height ?? 7));
+  const plotRows = height - 1;
+  const rawMaeCap = percentile(
+    observations.map((item) => item.mae),
+    0.95,
+  );
+  const rawMfeCap = percentile(
+    observations.map((item) => item.mfe),
+    0.95,
+  );
+  const maeCap = rawMaeCap > 0 ? rawMaeCap : Math.max(1, ...observations.map((item) => item.mae));
+  const mfeCap = rawMfeCap > 0 ? rawMfeCap : Math.max(1, ...observations.map((item) => item.mfe));
+  const topLabel = diagnosticPercent(mfeCap);
+  const bottomLabel = diagnosticPercent(0);
+  const labelW = Math.max(topLabel.length, bottomLabel.length);
+  const plotW = Math.max(8, width - labelW - 1);
+  const grid = Array.from({ length: plotRows }, () =>
+    Array.from({ length: plotW }, (): DensityCell => ({ count: 0, wins: 0, losses: 0 })),
+  );
+
+  for (const observation of observations) {
+    const col = Math.min(
+      plotW - 1,
+      Math.round((Math.min(observation.mae, maeCap) / maeCap) * (plotW - 1)),
+    );
+    const row = Math.min(
+      plotRows - 1,
+      Math.round((1 - Math.min(observation.mfe, mfeCap) / mfeCap) * (plotRows - 1)),
+    );
+    const cell = grid[row]![col]!;
+    cell.count += 1;
+    if (observation.profit > 0) cell.wins += 1;
+    else if (observation.profit < 0) cell.losses += 1;
+  }
+
+  const maxCount = Math.max(...grid.flat().map((cell) => cell.count));
+  const density = ['░', '▒', '▓', '█'] as const;
+  const lines = grid.map((row, rowIndex) => {
+    const label = rowIndex === 0 ? topLabel : rowIndex === plotRows - 1 ? bottomLabel : '';
+    const cells = row.map((cell) => {
+      if (cell.count === 0) return ' ';
+      const scaled = Math.log1p(cell.count) / Math.log1p(maxCount);
+      const glyph =
+        density[Math.max(0, Math.min(density.length - 1, Math.ceil(scaled * density.length) - 1))]!;
+      const majority = Math.sign(cell.wins - cell.losses);
+      return paint(glyph, majority >= 0 ? GREEN : RED, opts.color === true && majority !== 0);
+    });
+    return `${label.padStart(labelW)}│${cells.join('')}`;
+  });
+  const caption = `MAE p95 ${diagnosticPercent(maeCap)}`.slice(0, plotW).padEnd(plotW);
+  lines.push(`${' '.repeat(labelW)}└${caption}`);
+  return lines.join('\n');
+}

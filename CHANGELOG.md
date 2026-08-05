@@ -81,6 +81,43 @@ without being announced as a release.
   synchronization guard. Opting out takes an explicit
   `requireExecutionSafety: false`.
 
+## [0.9.4] - 2026-08-05
+
+### Added
+
+- **`pinetop` BACKTEST tearsheet: drawdown, distribution, and trade-quality
+  analysis.** The right-hand TEARSHEET pane now uses its free width and
+  height for analysis beyond the scalar metric rail:
+  - **TRADE P/L DISTRIBUTION** — the closed-trade profit histogram, colored
+    green/red per bucket, sized to the available rail width.
+  - **RETURN BY HOLD** — closed trades grouped into holding-duration
+    quantile buckets (longest at top, shortest at bottom), each row showing
+    median return, a magnitude bar, win rate, and sample count. Buckets never
+    split an equal duration, and the longest bucket is open-ended so a single
+    outlier trade cannot distort the scale.
+  - **MFE / MAE DENSITY** — a density heatmap of each trade's maximum
+    favorable/adverse excursion (percent of entry notional), clipped at the
+    95th percentile per axis and colored by each cell's majority realized
+    outcome.
+  - **ROLLING SHARPE** — an annualized risk-adjusted equity-return chart that
+    shares the third CHARTS slot with DRAWDOWN; focus CHARTS and use `j`/`k` to
+    switch views. Its bar-count window adapts to roughly one fifth of the
+    available contiguous return history, clamped to 14–30 bars, so it works on
+    short backtests without assuming a calendar span.
+  - **TOP DRAWDOWNS** — the CLI's peak → trough → recovery episode table,
+    now rendered in the TUI across the full tearsheet width whenever height
+    allows, below the metrics and the panes above.
+    All five are read from the existing `pinerun backtest --json` payload; no
+    output-contract change. They degrade by omission (never by clipping a date,
+    duration, or axis) on narrower or shorter terminals.
+- **`pinerun` gains reusable trade-diagnostic and rolling-risk renderers.** New pure,
+  width/height-bounded `durationReturnAscii`, `maeMfeAscii`, and
+  `rollingSharpeAscii` builders are exported alongside the existing
+  `topDrawdownsAscii` and `profitHistogramAscii`, together with
+  `TradeDiagnosticOptions`, `RollingSharpeChartOptions`, and the adaptive
+  window helper. They back the new `pinetop` panels above and are usable
+  directly from `@heyphat/pinerun` by anything building on the library.
+
 ## [0.9.3] - 2026-08-04
 
 `pinetop` only — no `pinerun`, `pinery`, or `pinelive` behaviour changes, and no
@@ -763,7 +800,8 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
-[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.3...HEAD
+[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/heyphat/pinestack/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/heyphat/pinestack/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/heyphat/pinestack/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/heyphat/pinestack/compare/v0.9.0...v0.9.1

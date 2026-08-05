@@ -9,7 +9,7 @@ It adds no analytics of its own. Every number it shows comes from
 `pinerun --json`; piner remains the sole authority for fills, timestamps, and
 metrics.
 
-![The BACKTEST page: strategies, config, and history on the left; price, equity, and drawdown charts with the full tearsheet beside them; monthly returns and trades below](../../docs/assets/pinetop-backtest.png)
+![The BACKTEST page: strategies, config, and history on the left; price, equity, and drawdown charts with the full tearsheet beside them; monthly returns and trades below](../../docs/assets/pinestack-backtest.png)
 
 ## Install
 
@@ -240,7 +240,7 @@ wide middle with a line-number gutter. Pine files get syntax colouring from your
 terminal's palette; Markdown stays plain text rather than being mis-coloured as
 Pine.
 
-![The EDITOR page: project scripts and the open script's inputs in the sidebar, the .pine buffer with vim-modal editing in the middle](../../docs/assets/pinetop-editor.png)
+![The EDITOR page: project files and the open script's inputs in the sidebar, the .pine buffer with vim-modal editing in the middle, the shell pane on the right](../../docs/assets/pinestack-editor.png)
 
 Runnable strategies remain Pine-only: Markdown appears in FILES but never enters
 STRATEGIES, `pinerun` arguments, or the INPUTS parser. FILES mirrors the project's

@@ -106,6 +106,7 @@ export type {
   MonthlyTradesOptions,
   TopDrawdownsOptions,
   ProfitHistogramOptions,
+  TradeOutcomeSequenceOptions,
   TradeDiagnosticOptions,
   DrawdownEpisode,
 } from './tearsheet.js';
@@ -115,6 +116,7 @@ export {
   topDrawdownsAscii,
   drawdownEpisodes,
   profitHistogramAscii,
+  tradeOutcomeSequenceAscii,
   durationReturnAscii,
   maeMfeAscii,
   correlationMatrixAscii,

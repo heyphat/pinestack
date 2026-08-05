@@ -361,12 +361,16 @@ export interface RollingSharpeChartOptions {
 }
 
 /**
- * Adaptive bar-count window for rolling Sharpe: approximately one fifth of the
- * longest contiguous return history, clamped to 14–30 bars. Returns undefined
- * when fewer than 15 contiguous finite returns are available, because a
- * 14-return window would not produce a line with two points.
+ * Adaptive bar-count window for rolling Sharpe. With a valid annualization
+ * factor, target one empirical year of returns, capped at one fifth of the
+ * longest contiguous history so the chart still has enough rolling points.
+ * Without one, retain the compact 14–30-bar fallback for unannualized callers.
+ * Returns undefined when fewer than 15 contiguous finite returns are available.
  */
-export function adaptiveRollingSharpeWindow(equity: number[]): number | undefined {
+export function adaptiveRollingSharpeWindow(
+  equity: number[],
+  periodsPerYear?: number,
+): number | undefined {
   let run = 0;
   let longest = 0;
   for (let i = 1; i < equity.length; i++) {
@@ -380,7 +384,13 @@ export function adaptiveRollingSharpeWindow(equity: number[]): number | undefine
     }
   }
   if (longest < 15) return undefined;
-  return Math.min(30, Math.max(14, Math.round(longest / 5)));
+
+  const historyWindow = Math.max(14, Math.round(longest / 5));
+  const annualWindow =
+    periodsPerYear != null && Number.isFinite(periodsPerYear) && periodsPerYear > 0
+      ? Math.max(14, Math.round(periodsPerYear))
+      : 30;
+  return Math.min(longest - 1, historyWindow, annualWindow);
 }
 
 /** Compact label for a Sharpe axis. */
@@ -398,43 +408,55 @@ function fmtSharpe(value: number): string {
 export function rollingSharpeAscii(equity: number[], opts: RollingSharpeChartOptions = {}): string {
   const width = Math.max(16, opts.width ?? 64);
   const height = Math.max(2, opts.height ?? 4);
-  const adaptive = adaptiveRollingSharpeWindow(equity);
-  const window = Math.floor(opts.window ?? adaptive ?? 0);
-  if (window < 2) return '';
-
   const periodsPerYear =
     opts.periodsPerYear != null && Number.isFinite(opts.periodsPerYear) && opts.periodsPerYear > 0
       ? opts.periodsPerYear
       : 1;
+  const adaptive = adaptiveRollingSharpeWindow(equity, opts.periodsPerYear);
+  const window = Math.floor(opts.window ?? adaptive ?? 0);
+  if (window < 2) return '';
+
   const annualRiskFree =
     opts.riskFreeRate != null && Number.isFinite(opts.riskFreeRate) ? opts.riskFreeRate : 0;
   const periodRiskFree =
     annualRiskFree > -1 ? Math.pow(1 + annualRiskFree, 1 / periodsPerYear) - 1 : 0;
 
   const values = new Array<number>(equity.length).fill(NaN);
-  const queue: number[] = [];
+  // A ring buffer keeps updates O(1). Intraday annualization can select tens of
+  // thousands of observations; Array.shift() would move that entire window on
+  // every bar and turn chart rendering quadratic.
+  const queue = new Float64Array(window);
+  let queueLength = 0;
+  let queueIndex = 0;
   let sum = 0;
   let sumSquares = 0;
   for (let i = 1; i < equity.length; i++) {
     const previous = equity[i - 1]!;
     const current = equity[i]!;
     if (!Number.isFinite(previous) || previous === 0 || !Number.isFinite(current)) {
-      queue.length = 0;
+      queueLength = 0;
+      queueIndex = 0;
       sum = 0;
       sumSquares = 0;
       continue;
     }
 
     const excess = current / previous - 1 - periodRiskFree;
-    queue.push(excess);
-    sum += excess;
-    sumSquares += excess * excess;
-    if (queue.length > window) {
-      const removed = queue.shift()!;
+    if (queueLength < window) {
+      queue[queueLength] = excess;
+      queueLength += 1;
+      sum += excess;
+      sumSquares += excess * excess;
+    } else {
+      const removed = queue[queueIndex]!;
       sum -= removed;
       sumSquares -= removed * removed;
+      queue[queueIndex] = excess;
+      queueIndex = (queueIndex + 1) % window;
+      sum += excess;
+      sumSquares += excess * excess;
     }
-    if (queue.length !== window) continue;
+    if (queueLength !== window) continue;
 
     const mean = sum / window;
     const variance = Math.max(0, (sumSquares - (sum * sum) / window) / (window - 1));

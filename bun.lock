@@ -4,7 +4,7 @@
     "": {
       "name": "pinestack",
       "devDependencies": {
-        "@heyphat/piner": "0.11.1",
+        "@heyphat/piner": "0.12.0",
         "@types/bun": "^1.2.5",
         "prettier": "^3.9.4",
         "typescript": "^5.7.2",
@@ -12,7 +12,7 @@
     },
     "packages/pinelive": {
       "name": "@heyphat/pinelive",
-      "version": "0.9.1",
+      "version": "0.9.4",
       "bin": {
         "pinelive": "./src/cli.ts",
       },
@@ -27,7 +27,7 @@
     },
     "packages/pinerun": {
       "name": "@heyphat/pinerun",
-      "version": "0.9.1",
+      "version": "0.9.4",
       "bin": {
         "pinerun": "./src/cli.ts",
       },
@@ -40,7 +40,7 @@
     },
     "packages/pinery": {
       "name": "@heyphat/pinery",
-      "version": "0.9.1",
+      "version": "0.9.4",
       "dependencies": {
         "@tigeropenapi/tigeropen": "0.5.4",
       },
@@ -50,7 +50,7 @@
     },
     "packages/pinetop": {
       "name": "@heyphat/pinetop",
-      "version": "0.9.1",
+      "version": "0.9.4",
       "bin": {
         "pinetop": "./src/cli.ts",
       },
@@ -68,7 +68,7 @@
 
     "@heyphat/pinelive": ["@heyphat/pinelive@workspace:packages/pinelive"],
 
-    "@heyphat/piner": ["@heyphat/piner@0.11.1", "", {}, "sha512-swzr35GOLsb142huCXvtrn5J9IW7PEz5QSv7HfC6teVRHJ/pQ0fF5wPYMMJgykrGUuKXfFZUw9o+hzZ9Pyo+zw=="],
+    "@heyphat/piner": ["@heyphat/piner@0.12.0", "", {}, "sha512-qAsbFCPF/KFWPvCKiP76wWEMcuVPp5HPc2xX/61gvLDnCXGr5X5MjC66Tlqskh5M8wgSHgAets2HVOAC1mKeLg=="],
 
     "@heyphat/pinerun": ["@heyphat/pinerun@workspace:packages/pinerun"],
 

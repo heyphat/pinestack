@@ -189,7 +189,8 @@ export function metricRow(label: string, value: string, sign = 0): MetricRow {
 
 /**
  * The CLI's own formatters, so a value reads identically in both surfaces.
- * `printTearsheet` uses exactly these three (cli.ts fmtNum / fmtPct / fmtPf).
+ * `printTearsheet` uses the same scalar formatting conventions (cli.ts
+ * fmtNum / fmtPct / fmtR / fmtPf).
  */
 export function fmtNum(v: number | undefined): string {
   if (v == null || !Number.isFinite(v)) return 'na';
@@ -201,6 +202,12 @@ export function fmtNum(v: number | undefined): string {
 export function fmtPct(v: number | undefined): string {
   if (v == null || !Number.isFinite(v)) return 'na';
   return `${v.toFixed(2)}%`;
+}
+
+/** R multiples: finite mean return per unit of immutable initial risk. */
+export function fmtR(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return 'na';
+  return `${v.toFixed(2)}R`;
 }
 
 /** Ratios: `inf` is a real answer here, not a missing one. */
@@ -251,6 +258,26 @@ export function tearsheetSections(strategy: StrategySummary | undefined): Metric
         ),
         row('outperformance', fmtNum(m?.outperformance), '', Math.sign(m?.outperformance ?? 0)),
         row('CAGR', '', fmtPct(m?.cagrPercent), Math.sign(m?.cagrPercent ?? 0)),
+        row(
+          'arithmetic return',
+          '',
+          fmtPct(m?.arithmeticReturnPercent),
+          Math.sign(m?.arithmeticReturnPercent ?? 0),
+        ),
+        row(
+          'geometric return',
+          '',
+          fmtPct(m?.geometricReturnPercent),
+          Math.sign(m?.geometricReturnPercent ?? 0),
+        ),
+        row(
+          'volatility drag',
+          '',
+          fmtPct(m?.volatilityDragPercent),
+          m?.volatilityDragPercent != null && Number.isFinite(m.volatilityDragPercent)
+            ? -Math.sign(m.volatilityDragPercent)
+            : 0,
+        ),
       ],
     },
     {
@@ -274,6 +301,12 @@ export function tearsheetSections(strategy: StrategySummary | undefined): Metric
         row('win rate', '', fmtPct(s.winRate * 100)),
         row('profit factor', profitFactor(s), '', profitFactorSign(s)),
         row('expectancy', fmtNum(m?.expectancy), '', Math.sign(m?.expectancy ?? 0)),
+        row(
+          'R-multiple expectancy',
+          fmtR(m?.rMultipleExpectancy),
+          `(${m?.rMultipleTradeCount == null || !Number.isFinite(m.rMultipleTradeCount) ? 'na' : m.rMultipleTradeCount}/${s.closedTrades})`,
+          Math.sign(m?.rMultipleExpectancy ?? 0),
+        ),
         row('avg win / loss', `${fmtNum(s.avgWinningTrade)} / ${fmtNum(s.avgLosingTrade)}`),
         row('largest win / loss', `${fmtNum(m?.largestWin)} / ${fmtNum(m?.largestLoss)}`),
         row(

@@ -68,6 +68,9 @@ describe('the tearsheet mirrors `pinerun backtest` (§3 NG1)', () => {
       'buy & hold',
       'outperformance',
       'CAGR',
+      'arithmetic return',
+      'geometric return',
+      'volatility drag',
       'max drawdown',
       'max runup',
       'volatility (annual)',
@@ -79,6 +82,7 @@ describe('the tearsheet mirrors `pinerun backtest` (§3 NG1)', () => {
       'win rate',
       'profit factor',
       'expectancy',
+      'R-multiple expectancy',
       'avg win / loss',
       'largest win / loss',
       'max consecutive',
@@ -88,7 +92,7 @@ describe('the tearsheet mirrors `pinerun backtest` (§3 NG1)', () => {
     ]) {
       expect(labels).toContain(label);
     }
-    expect(labels).toHaveLength(23);
+    expect(labels).toHaveLength(27);
   });
 
   test('no metric is invented — every row maps to a report field', () => {

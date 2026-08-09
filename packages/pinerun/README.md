@@ -312,16 +312,22 @@ type RunFailure = BarMagnifierFailure | ExactHistoryFailure;
 // stable kind/code/message/details payload. Provider/network errors outside
 // that boundary retain each command's existing bounded-retry/fetch behavior.
 
-// piner's `Engine.strategyMetrics()` projected verbatim — derived risk-adjusted
-// analytics, kept distinct from the broker-verbatim numbers above.
+// piner's `Engine.strategyMetrics()` plus pinerun's normalized R-multiple
+// fields — derived risk-adjusted analytics kept distinct from broker-verbatim
+// numbers above.
 interface StrategyMetrics {
   sharpe: number; // annualized, per-bar equity returns
   sortino: number; // Infinity when no downside and mean > 0
   volatilityPercent: number; // annualized return volatility
+  arithmeticReturnPercent: number; // linearly annualized mean simple return
+  geometricReturnPercent: number; // linearly annualized geometric mean return
+  volatilityDragPercent: number; // arithmetic − geometric, percentage points
   cagrPercent: number;
   calmar: number; // CAGR % / max drawdown %
   exposurePercent: number; // barsInMarket / barsProcessed
   expectancy: number; // mean closed-trade profit
+  rMultipleExpectancy: number | null; // mean net P&L / immutable initial risk
+  rMultipleTradeCount: number; // closed-trade rows with valid initial risk
   maxConsecutiveWins: number;
   maxConsecutiveLosses: number;
   largestWin: number;
@@ -332,6 +338,18 @@ interface StrategyMetrics {
   periodsPerYear: number; // the annualization actually used
 }
 ```
+
+`arithmeticReturnPercent` and `geometricReturnPercent` use the same finite per-bar
+simple-return sample and are both linearly scaled by `periodsPerYear`. Their exact
+nonnegative difference is `volatilityDragPercent`; this keeps the AM-GM identity
+intact. `cagrPercent` remains the separate endpoint-to-endpoint compound growth
+rate over the run's elapsed years. A negative gross return (`r < -1`) makes the
+geometric mean and drag unavailable (`NaN` in-process, `null` in JSON, `na` in the
+text tearsheet).
+
+R-multiple fields require a piner engine that emits `ClosedTrade.initialRisk`.
+Older compatible engines remain supported and report `null` expectancy with zero
+coverage rather than deriving risk from max drawdown or another hindsight value.
 
 ### `executeJob(job) → Promise<RunResult>`
 
@@ -429,9 +447,11 @@ NaN values are ignored inside aggregates.
 
 **Derived metric fields** (live under `strategy.metrics` on the summary, rank with the
 same flat `strategy.<field>` grammar): `sharpe`, `sortino`, `volatilityPercent`,
-`cagrPercent`, `calmar`, `exposurePercent`, `expectancy`, `maxConsecutiveWins`,
-`maxConsecutiveLosses`, `largestWin`, `largestLoss`, `avgBarsInTrade`,
-`buyHoldReturnPercent`, `outperformance`.
+`arithmeticReturnPercent`, `geometricReturnPercent`, `volatilityDragPercent`,
+`cagrPercent`, `calmar`, `exposurePercent`, `expectancy`, `rMultipleExpectancy`
+(null coverage ranks as NaN and is dropped — only stop-covered runs remain),
+`maxConsecutiveWins`, `maxConsecutiveLosses`, `largestWin`, `largestLoss`,
+`avgBarsInTrade`, `buyHoldReturnPercent`, `outperformance`.
 
 ```ts
 const spec = parseRankSpec('last(rsi)');
@@ -798,6 +818,8 @@ The derived metrics annualize from the run's real bar times by default; pass
 Rank by any summary metric via the `strategy.<field>` spec —
 `strategy.netProfit`, `strategy.profitFactor`, `strategy.winRate`, and the derived
 `strategy.sharpe`, `strategy.sortino`, `strategy.calmar`, `strategy.cagrPercent`,
+`strategy.arithmeticReturnPercent`, `strategy.geometricReturnPercent`,
+`strategy.volatilityDragPercent`, `strategy.rMultipleExpectancy`,
 `strategy.outperformance`, plus the rest listed under [Ranking](#ranking). The CLI
 **auto-detects a strategy scan**, defaults the rank to `strategy.netProfit` (unless
 you pass `--rank`), and prints a backtest table instead of the single-value table:
@@ -848,8 +870,10 @@ pinerun scan examples/sma-cross-param.pine \
 
 Each `StrategyTrade` is `{ entryId, dir (+1/-1), qty, entryPrice, exitPrice,
 entryBar, exitBar, entryTime, exitTime, profit, cumProfit, commission, maxRunup,
-maxDrawdown }` — fill times are bar-time ms, `commission` is both sides' fees on
-the row, and `maxRunup`/`maxDrawdown` are the trade-life intrabar excursions.
+maxDrawdown, initialRisk, rMultiple }` — fill times are bar-time ms, `commission`
+is both sides' fees on the row, and the R fields are `null` when no valid initial
+protective stop/loss applied to that entry lot. `maxRunup`/`maxDrawdown` remain
+the hindsight trade-life intrabar excursions and are never used as risk.
 
 Programmatically:
 
@@ -939,6 +963,9 @@ pinerun backtest examples/sma-cross-param.pine \
     buy & hold                              17.90%
     outperformance             -843.33
     CAGR                                   390.10%
+    arithmetic return                      172.88%
+    geometric return                       158.72%
+    volatility drag                         14.16%
 
   RISK
     max drawdown               1358.59      12.50%
@@ -954,6 +981,7 @@ pinerun backtest examples/sma-cross-param.pine \
     win rate                                50.00%
     profit factor                 2.06
     expectancy                  118.37
+    R-multiple expectancy           na       (0/8)
     avg win / loss        459.75 / 223.00
     largest win / loss    899.82 / -406.80
     max consecutive       2 win / 3 loss

@@ -5,10 +5,22 @@
  */
 
 import type { ExactHistoryFailure } from '@heyphat/pinery';
-import type { SecurityRequest, StrategyMetrics } from '@heyphat/piner';
+import type { SecurityRequest, StrategyMetrics as PinerStrategyMetrics } from '@heyphat/piner';
 import type { BarMagnifierFailure } from './failure.js';
 
-export type { StrategyMetrics };
+export interface StrategyMetrics extends PinerStrategyMetrics {
+  /** Annualized arithmetic mean of finite per-bar simple equity returns. */
+  arithmeticReturnPercent: number;
+  /** Annualized geometric mean of the same returns; NaN when undefined. */
+  geometricReturnPercent: number;
+  /** Arithmetic minus geometric annualized mean return, percentage points. */
+  volatilityDragPercent: number;
+  /** Mean net closed-trade P&L divided by immutable initial risk. Null when no
+   *  closed trade has a valid protective-stop risk denominator. */
+  rMultipleExpectancy: number | null;
+  /** Number of closed-trade rows included in rMultipleExpectancy. */
+  rMultipleTradeCount: number;
+}
 export type RunFailure = BarMagnifierFailure | ExactHistoryFailure;
 
 export interface PlotResult {
@@ -80,9 +92,10 @@ export interface StrategySummary {
   barsProcessed: number;
   /** Bars on which a position was open after the bar's fill pass. */
   barsInMarket: number;
-  /** Derived risk-adjusted analytics (Sharpe, Sortino, CAGR, Calmar, exposure,
-   *  expectancy, buy-&-hold benchmark, …) — piner's `Engine.strategyMetrics()`
-   *  projected verbatim, kept distinct from the broker-verbatim stats above. */
+  /** Derived risk-adjusted analytics (Sharpe, Sortino, arithmetic/geometric
+   *  return, volatility drag, CAGR, Calmar, exposure, expectancy, buy-&-hold
+   *  benchmark, …), plus pinerun's normalized fields for compatibility across
+   *  piner engine versions. */
   metrics: StrategyMetrics;
 }
 
@@ -106,6 +119,10 @@ export interface StrategyTrade {
   /** Trade-life intrabar extremes for this row's quantity (money, ≥ 0). */
   maxRunup: number;
   maxDrawdown: number;
+  /** Planned loss at the first valid protective stop, prorated to this row. */
+  initialRisk: number | null;
+  /** Net trade profit divided by initialRisk. */
+  rMultiple: number | null;
   /** Set on portfolio-merged ledgers only: which sleeve produced this row. */
   symbol?: string;
 }

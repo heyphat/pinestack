@@ -297,8 +297,12 @@ number. Default `last` for indicators, `strategy.netProfit` for strategies.
 
 `strategy.netProfit` · `strategy.winRate` · `strategy.profitFactor` ·
 `strategy.sharpe` · `strategy.sortino` · `strategy.calmar` ·
-`strategy.cagrPercent` · `strategy.outperformance` · … (the full
-`StrategyMetrics` surface).
+`strategy.cagrPercent` · `strategy.arithmeticReturnPercent` ·
+`strategy.geometricReturnPercent` · `strategy.volatilityDragPercent` ·
+`strategy.rMultipleExpectancy` · `strategy.outperformance` · … (the full
+`StrategyMetrics` surface). Ranking by `rMultipleExpectancy` keeps only runs
+whose trades carried a protective stop (`null` coverage ranks as NaN and is
+dropped).
 
 Pair with `--top <n>` to keep the best N and `--asc` to sort ascending (default
 descending).

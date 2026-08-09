@@ -25,10 +25,15 @@ export function metrics(overrides: Partial<StrategyMetrics> = {}): StrategyMetri
     sharpe: 1.42,
     sortino: 2.11,
     volatilityPercent: 27.1,
+    arithmeticReturnPercent: 41.7,
+    geometricReturnPercent: 38.4,
+    volatilityDragPercent: 3.3,
     cagrPercent: 38.4,
     calmar: 2.23,
     exposurePercent: 61,
     expectancy: 142.5,
+    rMultipleExpectancy: 1.25,
+    rMultipleTradeCount: 1_284,
     maxConsecutiveWins: 9,
     maxConsecutiveLosses: 5,
     largestWin: 8_420,
@@ -126,6 +131,8 @@ export function trades(count = 24): StrategyTrade[] {
       commission: 32 + i,
       maxRunup: Math.abs(profit) * 1.4,
       maxDrawdown: Math.abs(profit) * 0.6,
+      initialRisk: Math.abs(profit),
+      rMultiple: Math.sign(profit),
     });
   }
   return out;

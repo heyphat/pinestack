@@ -256,7 +256,7 @@ export function railLines(strategy: BacktestJson['strategy']): RailLine[] {
   return out;
 }
 
-const METRIC_RAIL_COLS = 38;
+const METRIC_RAIL_COLS = 40;
 const METRIC_GAP_COLS = 1;
 const DISTRIBUTION_MIN_COLS = 28;
 const TOP_DRAWDOWNS_COLS = 56;
@@ -722,7 +722,7 @@ export const backtestPage: Page = {
     const narrow = screen.cols < backtestPage.minCols;
 
     const leftW = Math.min(32, Math.max(24, Math.floor(screen.cols * 0.21)));
-    // Prefer two full 38-column metric tracks while retaining a useful center.
+    // Prefer two full 40-column metric tracks while retaining a useful center.
     // Smaller terminals keep the prior responsive rail and stack only if even
     // two compact metric columns cannot be read honestly.
     const baseRailW = Math.min(102, Math.max(70, Math.floor(screen.cols * 0.46)));

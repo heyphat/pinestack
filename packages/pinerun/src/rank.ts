@@ -50,10 +50,16 @@ const METRICS_FIELDS = new Set([
   'sharpe',
   'sortino',
   'volatilityPercent',
+  'arithmeticReturnPercent',
+  'geometricReturnPercent',
+  'volatilityDragPercent',
   'cagrPercent',
   'calmar',
   'exposurePercent',
   'expectancy',
+  // number | null — evalRank maps null (no stop-covered trades) to NaN, and
+  // sortRanked drops NaN rows: ranking by R keeps only stop-covered runs.
+  'rMultipleExpectancy',
   'maxConsecutiveWins',
   'maxConsecutiveLosses',
   'largestWin',

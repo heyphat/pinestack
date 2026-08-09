@@ -586,6 +586,21 @@ function printCompare(
   row('sortino', fmtPf(sa.metrics.sortino), fmtPf(sb.metrics.sortino));
   row('calmar', fmtPf(sa.metrics.calmar), fmtPf(sb.metrics.calmar));
   row('CAGR %', fmtPct(sa.metrics.cagrPercent), fmtPct(sb.metrics.cagrPercent));
+  row(
+    'arithmetic return %',
+    fmtPct(sa.metrics.arithmeticReturnPercent),
+    fmtPct(sb.metrics.arithmeticReturnPercent),
+  );
+  row(
+    'geometric return %',
+    fmtPct(sa.metrics.geometricReturnPercent),
+    fmtPct(sb.metrics.geometricReturnPercent),
+  );
+  row(
+    'volatility drag %',
+    fmtPct(sa.metrics.volatilityDragPercent),
+    fmtPct(sb.metrics.volatilityDragPercent),
+  );
   row('volatility %', fmtPct(sa.metrics.volatilityPercent), fmtPct(sb.metrics.volatilityPercent));
   row('exposure %', fmtPct(sa.metrics.exposurePercent), fmtPct(sb.metrics.exposurePercent));
   row('expectancy', fmtNum(sa.metrics.expectancy), fmtNum(sb.metrics.expectancy));
@@ -802,6 +817,9 @@ function printTearsheet(
   line('buy & hold', '', fmtPct(m.buyHoldReturnPercent));
   line('outperformance', fmtNum(m.outperformance));
   line('CAGR', '', fmtPct(m.cagrPercent));
+  line('arithmetic return', '', fmtPct(m.arithmeticReturnPercent));
+  line('geometric return', '', fmtPct(m.geometricReturnPercent));
+  line('volatility drag', '', fmtPct(m.volatilityDragPercent));
   console.log('');
   console.log('  RISK');
   line('max drawdown', fmtNum(s.maxDrawdown), fmtPct(s.maxDrawdownPercent));
@@ -817,6 +835,11 @@ function printTearsheet(
   line('win rate', '', fmtPct(s.winRate * 100));
   line('profit factor', fmtPf(s.profitFactor));
   line('expectancy', fmtNum(m.expectancy));
+  line(
+    'R-multiple expectancy',
+    fmtR(m.rMultipleExpectancy),
+    `(${m.rMultipleTradeCount}/${s.closedTrades})`,
+  );
   line('avg win / loss', `${fmtNum(s.avgWinningTrade)} / ${fmtNum(s.avgLosingTrade)}`);
   line('largest win / loss', `${fmtNum(m.largestWin)} / ${fmtNum(m.largestLoss)}`);
   line('max consecutive', `${m.maxConsecutiveWins} win / ${m.maxConsecutiveLosses} loss`);
@@ -1051,6 +1074,9 @@ function printPortfolioTearsheet(report: PortfolioReport, timeframe: string, cha
   line('gross profit', fmtNum(s.grossProfit), fmtPct(s.grossProfitPercent));
   line('gross loss', fmtNum(s.grossLoss), fmtPct(s.grossLossPercent));
   line('CAGR', '', fmtPct(m.cagrPercent));
+  line('arithmetic return', '', fmtPct(m.arithmeticReturnPercent));
+  line('geometric return', '', fmtPct(m.geometricReturnPercent));
+  line('volatility drag', '', fmtPct(m.volatilityDragPercent));
   console.log('');
   console.log('  RISK');
   line('max drawdown', fmtNum(s.maxDrawdown), fmtPct(s.maxDrawdownPercent));
@@ -1067,6 +1093,11 @@ function printPortfolioTearsheet(report: PortfolioReport, timeframe: string, cha
   line('win rate', '', fmtPct(s.winRate * 100));
   line('profit factor', fmtPf(s.profitFactor));
   line('expectancy', fmtNum(m.expectancy));
+  line(
+    'R-multiple expectancy',
+    fmtR(m.rMultipleExpectancy),
+    `(${m.rMultipleTradeCount}/${s.closedTrades})`,
+  );
   line('avg win / loss', `${fmtNum(s.avgWinningTrade)} / ${fmtNum(s.avgLosingTrade)}`);
   line('commission paid', fmtNum(s.totalCommission));
   if (report.trades.some((t) => t.symbol) || s.closedTrades > 0)
@@ -2426,6 +2457,10 @@ function fmtPf(v: number): string {
   return v.toFixed(2);
 }
 
+function fmtR(v: number | null | undefined): string {
+  return typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(2)}R` : 'na';
+}
+
 function fail(msg: string): never {
   console.error(msg);
   process.exit(1);
@@ -2496,7 +2531,8 @@ INIT EXAMPLE
                           last(title) first(#0) min/max/mean/sum/count(title)
                           strategy.netProfit | strategy.winRate | strategy.profitFactor
                           | strategy.sharpe | strategy.sortino | strategy.calmar
-                          | strategy.cagrPercent | strategy.outperformance | ...
+                          | strategy.cagrPercent | strategy.volatilityDragPercent
+                          | strategy.outperformance | ...
   --top <n>             Keep only the top N
   --asc                 Sort ascending (default descending)
   --trades              Include the closed-trade ledger + equity curve
@@ -2614,7 +2650,7 @@ EXAMPLE
 
   Prints a full tearsheet: returns (net/gross, buy & hold, CAGR), risk (drawdown,
   volatility, Sharpe/Sortino/Calmar, exposure), and trade quality (win rate,
-  profit factor, expectancy, streaks), then MONTHLY RETURNS (year × month %
+  profit factor, expectancy, R-multiple expectancy with risk coverage, streaks), then MONTHLY RETURNS (year × month %
   grid), MONTHLY TRADES (the same grid tallying closed trades as win/loss/even
   counts, green/red on a TTY),
   TOP DRAWDOWNS (the 5 deepest episodes with recovery dates), and a

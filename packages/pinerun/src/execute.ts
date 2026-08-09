@@ -34,6 +34,7 @@ import {
   type PinerCapabilityAdapter,
 } from './piner-capabilities.js';
 import { assertResolvedSecurityForBarMagnifier } from './security.js';
+import { projectStrategyTrade, withRMultipleMetrics } from './r-multiple.js';
 import type {
   BarMagnifierSummary,
   PlotResult,
@@ -139,6 +140,8 @@ export async function executeJob(job: Job): Promise<RunResult> {
       const stats = engine.ctx.strategy;
       const broker = engine.ctx.strategyBroker;
       const report = engine.strategy;
+      const projectedTrades = broker.closedTrades.map(projectStrategyTrade);
+      const metrics = withRMultipleMetrics(engine.strategyMetrics(job.metrics), projectedTrades);
       const effectiveCoof = (broker.settings as { calcOnOrderFills?: boolean }).calcOnOrderFills;
       const barMagnifier = projectAuthoritativeBarMagnifierReport(
         report as unknown,
@@ -172,10 +175,10 @@ export async function executeJob(job: Job): Promise<RunResult> {
         totalCommission: report.totalCommission,
         barsProcessed: report.barsProcessed,
         barsInMarket: report.barsInMarket,
-        metrics: engine.strategyMetrics(job.metrics),
+        metrics,
       };
       if (job.includeTrades) {
-        trades = broker.closedTrades.map((trade) => ({ ...trade }));
+        trades = projectedTrades;
         equityCurve = broker.equityCurve.slice();
         barTimes = job.bars.map((bar) => bar.time);
         closes = job.bars.map((bar) => bar.close);

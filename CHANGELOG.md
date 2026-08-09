@@ -81,6 +81,40 @@ without being announced as a release.
   synchronization guard. Opting out takes an explicit
   `requireExecutionSafety: false`.
 
+## [0.10.0] - 2026-08-09
+
+Risk-normalized and return-decomposition analytics across `pinerun` and
+`pinetop`, backed by the `@heyphat/piner` 0.12.0 engine.
+
+### Added
+
+- **R-multiple expectancy** — trade quality normalized by planned risk. The
+  backtest and portfolio tearsheets (CLI and pinetop) gain an
+  `R-multiple expectancy` row with `n/N` coverage, showing the mean net trade
+  P&L per unit of **immutable initial risk** — the risk frozen at the first
+  protective stop covering each entry, never derived from hindsight values
+  like MAE or max drawdown. Trade ledgers (`--trades`, CSV, JSON) carry
+  per-row `initialRisk`/`rMultiple` (`null` when no valid protective stop
+  applied). Scans can rank with `strategy.rMultipleExpectancy` (runs without
+  stop coverage rank as NaN and are dropped). Requires a piner engine that
+  emits `ClosedTrade.initialRisk` (≥ 0.12.0); older engines report `na` with
+  `0/N` coverage rather than a guess.
+- **Annualized return decomposition** — the tearsheets gain
+  `arithmetic return`, `geometric return`, and `volatility drag` rows, and
+  both compare surfaces (CLI `compare`, pinetop) show them side by side. The
+  two means are computed by the engine over the same per-bar return sample as
+  Sharpe and both are linearly annualized, so the drag is their exact AM-GM
+  gap; a return below −100% (equity crossing zero) reports `na` for geometric
+  and drag. All three are rankable in scans/sweeps
+  (`strategy.arithmeticReturnPercent`, `strategy.geometricReturnPercent`,
+  `strategy.volatilityDragPercent`).
+
+### Changed
+
+- **`@heyphat/piner` 0.11.1 → 0.12.0** — the engine release carrying
+  `ClosedTrade.initialRisk`/`rMultiple` and the annualized return
+  decomposition that the analytics above surface.
+
 ## [0.9.4] - 2026-08-05
 
 ### Added
@@ -816,7 +850,8 @@ First public open-source release.
 - Repository set up for open-source release: AGPL-3.0 `LICENSE`, contributing /
   security / conduct guides, issue & PR templates, and CI.
 
-[unreleased]: https://github.com/heyphat/pinestack/compare/v0.9.4...HEAD
+[unreleased]: https://github.com/heyphat/pinestack/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/heyphat/pinestack/compare/v0.9.4...v0.10.0
 [0.9.4]: https://github.com/heyphat/pinestack/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/heyphat/pinestack/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/heyphat/pinestack/compare/v0.9.1...v0.9.2

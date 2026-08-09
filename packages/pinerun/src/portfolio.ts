@@ -16,14 +16,14 @@
  */
 import type { HistoryProvider, HistoryRange } from '@heyphat/pinery';
 import { toPinerTimeframe } from '@heyphat/pinery';
-import {
-  CompileError,
-  PortfolioEngine,
-  type PortfolioSleeveSpec,
-  type StrategyMetrics,
-} from '@heyphat/piner';
+import { CompileError, PortfolioEngine, type PortfolioSleeveSpec } from '@heyphat/piner';
 import type { Job, JobMetricsOptions, Bar } from './job.js';
-import type { BarMagnifierSummary, StrategySummary, StrategyTrade } from './result.js';
+import type {
+  BarMagnifierSummary,
+  StrategyMetrics,
+  StrategySummary,
+  StrategyTrade,
+} from './result.js';
 import {
   assertResolvedMagnifierDatasetForJob,
   projectAuthoritativeBarMagnifierReport,
@@ -39,6 +39,7 @@ import { BarMagnifierError } from './failure.js';
 import { assertResolvedSecurityForBarMagnifier, resolveSecurity } from './security.js';
 import { resolveInstrument } from './instrument.js';
 import { alignEquity, returnCorrelation, type Sleeve } from './align.js';
+import { projectStrategyTrade, withRMultipleMetrics } from './r-multiple.js';
 
 export interface PortfolioOptions {
   source: string;
@@ -268,8 +269,9 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     inputs: opts.inputs,
   });
   const res = engine.run(sleeves);
-  const metrics = engine.metrics(opts.metrics);
   const r = res.report;
+  const trades = r.closedTrades.map(projectStrategyTrade);
+  const metrics = withRMultipleMetrics(engine.metrics(opts.metrics), trades);
 
   // Contribution table — the one derived block pinerun computes (plain arithmetic).
   const sleeveContribs: SleeveContribution[] = res.sleeves.map((s) => {
@@ -301,7 +303,7 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
           : NaN,
       equityCurve: s.report.equityCurve,
       barTimes: s.barTimes,
-      trades: s.report.closedTrades.map((t) => ({ ...t })),
+      trades: s.report.closedTrades.map(projectStrategyTrade),
     };
   });
 
@@ -427,7 +429,7 @@ export async function portfolio(opts: PortfolioOptions): Promise<PortfolioReport
     summary,
     ...(portfolioBarMagnifier ? { barMagnifier: portfolioBarMagnifier } : {}),
     metrics,
-    trades: r.closedTrades.map((t) => ({ ...t })),
+    trades,
     sleeves: sleeveContribs,
     fetchErrors,
     elapsedMs: Date.now() - started,
